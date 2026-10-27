@@ -46,19 +46,36 @@ fn changes(pairs: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {
 async fn credential_probe_preview_is_atomic_validated_and_never_persisted() {
     let fixture = Fixture::new().await;
     let store = fixture.store().await;
-    let saved = store.update(0, changes(&[
-        ("MODEL_BASE_URL", Some("https://old.example/v1")), ("MODEL_NAME", Some("saved-model")),
-        ("MODEL_API_KEY", Some("saved-private-key")),
-    ])).await.unwrap();
-    let preview = store.preview_effective_values(saved.revision, &changes(&[
-        ("MODEL_BASE_URL", Some("https://new.example/v1")), ("MODEL_API_KEY", Some("temporary-key")),
-    ])).await.unwrap();
+    let saved = store
+        .update(
+            0,
+            changes(&[
+                ("MODEL_BASE_URL", Some("https://old.example/v1")),
+                ("MODEL_NAME", Some("saved-model")),
+                ("MODEL_API_KEY", Some("saved-private-key")),
+            ]),
+        )
+        .await
+        .unwrap();
+    let preview = store
+        .preview_effective_values(
+            saved.revision,
+            &changes(&[
+                ("MODEL_BASE_URL", Some("https://new.example/v1")),
+                ("MODEL_API_KEY", Some("temporary-key")),
+            ]),
+        )
+        .await
+        .unwrap();
     assert_eq!(preview["MODEL_API_KEY"], "temporary-key");
     let current = store.effective_values().await.unwrap();
     assert_eq!(current["MODEL_API_KEY"], "saved-private-key");
     assert_eq!(current["MODEL_BASE_URL"], "https://old.example/v1");
     assert_eq!(store.revision().await.unwrap(), saved.revision);
-    assert!(matches!(store.preview_effective_values(0, &HashMap::new()).await, Err(ConfigError::Conflict)));
+    assert!(matches!(
+        store.preview_effective_values(0, &HashMap::new()).await,
+        Err(ConfigError::Conflict)
+    ));
 }
 
 #[tokio::test]
@@ -298,6 +315,63 @@ async fn missing_master_file_fails_closed_and_does_not_generate_replacement() {
     assert_eq!(
         store.effective_values().await.unwrap()["MODEL_API_KEY"],
         "fixture-secret"
+    );
+}
+
+#[tokio::test]
+async fn recovery_key_validation_checks_active_cipher_and_snapshot_without_exposing_values() {
+    let fixture = Fixture::new().await;
+    let store = fixture.store().await;
+    let original = fs::read_to_string(store.config_dir().join("master.key")).unwrap();
+    let check: String = sqlx::query_scalar("SELECT key_check FROM instance_config_meta WHERE id=1")
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .validate_recovery_master_key(&original, &check)
+            .unwrap(),
+        parse_key(&original).unwrap()
+    );
+    assert!(matches!(
+        store.validate_recovery_master_key(&"56".repeat(32), &check),
+        Err(ConfigError::Crypto)
+    ));
+    assert!(matches!(
+        store.validate_recovery_master_key("corrupt", &check),
+        Err(ConfigError::Crypto)
+    ));
+    assert!(matches!(
+        store.validate_recovery_master_key(&original, "v1:broken"),
+        Err(ConfigError::Crypto)
+    ));
+    fs::remove_file(store.config_dir().join("master.key")).unwrap();
+    assert!(
+        store
+            .validate_recovery_master_key(&original, &check)
+            .is_ok()
+    );
+    let mut other = fixture.options(&[]);
+    other.master_key = Some("ab".repeat(32));
+    let other_fixture = Fixture::new().await;
+    other.config_dir = other_fixture.dir.path().join("config");
+    let foreign = ConfigStore::with_options(other_fixture.pool.clone(), other)
+        .await
+        .unwrap();
+    let foreign_check: String =
+        sqlx::query_scalar("SELECT key_check FROM instance_config_meta WHERE id=1")
+            .fetch_one(&other_fixture.pool)
+            .await
+            .unwrap();
+    assert!(
+        store
+            .validate_recovery_master_key(&original, &foreign_check)
+            .is_err()
+    );
+    assert!(
+        foreign
+            .validate_recovery_master_key(&"ab".repeat(32), &foreign_check)
+            .is_ok()
     );
 }
 

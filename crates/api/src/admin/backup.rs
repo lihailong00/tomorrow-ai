@@ -445,6 +445,19 @@ async fn run_backup(
     if !snapshot.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
         return Err(());
     }
+    let key_row = sqlx::query("SELECT instance_id,key_check FROM instance_config_meta WHERE id=1")
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| ())?;
+    let instance_id: String = key_row.try_get("instance_id").map_err(|_| ())?;
+    let key_check: String = key_row.try_get("key_check").map_err(|_| ())?;
+    if instance_id != state.settings.instance_id() {
+        return Err(());
+    }
+    let environment_key = std::env::var("TADA_CONFIG_MASTER_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let master_key = capture_master_key(&state.settings, &key_check, environment_key.as_deref())?;
     let rows = sqlx::query("SELECT id,size FROM uploads ORDER BY id")
         .fetch_all(&mut *transaction)
         .await
@@ -472,6 +485,7 @@ async fn run_backup(
             options,
             password,
             effective_settings,
+            master_key,
             &snapshot,
             uploads,
             &passphrase,
@@ -484,6 +498,41 @@ async fn run_backup(
     }
     transaction.commit().await.map_err(|_| ())?;
     Ok(bytes)
+}
+fn capture_master_key(
+    settings: &tomorrow_settings::ConfigStore,
+    key_check: &str,
+    environment_key: Option<&str>,
+) -> Result<[u8; 32], ()> {
+    let candidate = if let Some(value) = environment_key {
+        value.to_owned()
+    } else {
+        let path = settings.config_dir().join("master.key");
+        let metadata = fs::symlink_metadata(&path).map_err(|_| ())?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 256 {
+            return Err(());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(());
+            }
+        }
+        let mut value = String::new();
+        File::open(path)
+            .map_err(|_| ())?
+            .take(257)
+            .read_to_string(&mut value)
+            .map_err(|_| ())?;
+        if value.len() > 256 {
+            return Err(());
+        }
+        value
+    };
+    settings
+        .validate_recovery_master_key(&candidate, key_check)
+        .map_err(|_| ())
 }
 fn pg_dump(
     options: &sqlx::postgres::PgConnectOptions,
@@ -555,6 +604,7 @@ fn export(
     options: sqlx::postgres::PgConnectOptions,
     password: String,
     effective_settings: std::collections::HashMap<String, String>,
+    mut master_key: [u8; 32],
     snapshot: &str,
     uploads: Vec<(String, u64)>,
     passphrase: &str,
@@ -573,6 +623,21 @@ fn export(
         entries.push((format!("uploads/{id}"), upload_root.join(&id), Some(size)));
     }
     collect_files(config, config, "config", &mut entries)?;
+    // Capture validated effective material rather than copying a live master.key
+    // which may have disappeared, changed, or never existed for env-managed keys.
+    let canonical_master: String = master_key
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    master_key.fill(0);
+    let master_path = work.join("config-master.key");
+    let mut master_file = private_file(&master_path).map_err(|_| ())?;
+    master_file
+        .write_all(canonical_master.as_bytes())
+        .map_err(|_| ())?;
+    master_file.sync_all().map_err(|_| ())?;
+    drop(master_file);
+    entries.push(("config/master.key".into(), master_path, None));
     let settings_path = work.join("effective-settings.json");
     let mut settings_file = private_file(&settings_path).map_err(|_| ())?;
     serde_json::to_writer(&mut settings_file, &effective_settings).map_err(|_| ())?;
@@ -588,7 +653,7 @@ fn export(
     // encrypted export, never in the JSON manifest or download metadata.
     let recovery = work.join("effective-secrets.env");
     let mut recovery_file = private_file(&recovery).map_err(|_| ())?;
-    for name in ["CONNECTOR_ENCRYPTION_KEY", "TADA_CONFIG_MASTER_KEY"] {
+    for name in ["CONNECTOR_ENCRYPTION_KEY"] {
         if let Ok(value) = std::env::var(name) {
             if value.contains(['\r', '\n', '\0']) {
                 return Err(());
@@ -598,6 +663,7 @@ fn export(
             }
         }
     }
+    writeln!(recovery_file, "TADA_CONFIG_MASTER_KEY={canonical_master}").map_err(|_| ())?;
     recovery_file.sync_all().map_err(|_| ())?;
     drop(recovery_file);
     entries.push(("recovery/effective-secrets.env".into(), recovery, None));
@@ -671,6 +737,9 @@ fn collect_files(
         }
         let relative = path.strip_prefix(root).map_err(|_| ())?;
         let name = relative.to_string_lossy().replace('\\', "/");
+        if name == "master.key" {
+            continue;
+        }
         if name.split('/').any(|part| {
             matches!(part, "backups" | "tmp" | "logs" | "setup-token") || part.starts_with('.')
         }) {
@@ -799,6 +868,84 @@ fn encrypt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn master_capture_fails_closed_for_missing_corrupt_or_wrong_live_file() {
+        sqlx::any::install_default_drivers();
+        let temporary = tempfile::tempdir().unwrap();
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let settings = tomorrow_settings::ConfigStore::with_options(
+            pool.clone(),
+            tomorrow_settings::ConfigOptions {
+                config_dir: temporary.path().join("config"),
+                master_key: None,
+                environment: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let check: String =
+            sqlx::query_scalar("SELECT key_check FROM instance_config_meta WHERE id=1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let path = settings.config_dir().join("master.key");
+        let original = fs::read_to_string(&path).unwrap();
+        let captured = capture_master_key(&settings, &check, None).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(capture_master_key(&settings, &check, None).is_err());
+        assert!(settings.effective_values().await.is_ok());
+        fs::write(&path, "corrupt").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(capture_master_key(&settings, &check, None).is_err());
+        fs::write(&path, "56".repeat(32)).unwrap();
+        assert!(capture_master_key(&settings, &check, None).is_err());
+        fs::write(&path, &original).unwrap();
+        assert_eq!(
+            capture_master_key(&settings, &check, None).unwrap(),
+            captured
+        );
+    }
+    #[tokio::test]
+    async fn environment_master_capture_needs_no_file_and_matches_active_cipher() {
+        sqlx::any::install_default_drivers();
+        let temporary = tempfile::tempdir().unwrap();
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let original = "34".repeat(32);
+        let settings = tomorrow_settings::ConfigStore::with_options(
+            pool.clone(),
+            tomorrow_settings::ConfigOptions {
+                config_dir: temporary.path().join("config"),
+                master_key: Some(original.clone()),
+                environment: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let check: String =
+            sqlx::query_scalar("SELECT key_check FROM instance_config_meta WHERE id=1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!settings.config_dir().join("master.key").exists());
+        assert_eq!(
+            capture_master_key(&settings, &check, Some(&original)).unwrap(),
+            [0x34; 32]
+        );
+        assert!(capture_master_key(&settings, &check, Some(&"56".repeat(32))).is_err());
+        assert!(capture_master_key(&settings, &check, None).is_err());
+    }
     fn example_job(index: u128, status: &str) -> BackupJob {
         BackupJob {
             id: uuid::Uuid::from_u128(index + 1).to_string(),

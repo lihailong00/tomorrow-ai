@@ -240,6 +240,21 @@ impl ConfigStore {
         &self.0.instance_id
     }
 
+    /// Trusted encrypted-export preflight only. Validate recovery material
+    /// against both the active cipher and the database snapshot's key check.
+    /// Never serialize, log, or expose the returned key through an API.
+    pub fn validate_recovery_master_key(&self, value: &str, key_check: &str) -> Result<[u8; 32]> {
+        if self.decrypt("__key_check", key_check)? != CHECK_VALUE {
+            return Err(ConfigError::Crypto);
+        }
+        let key = parse_key(value)?;
+        let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| ConfigError::Crypto)?;
+        if decrypt_using(&cipher, &self.0.instance_id, "__key_check", key_check)? != CHECK_VALUE {
+            return Err(ConfigError::Crypto);
+        }
+        Ok(key)
+    }
+
     pub async fn revision(&self) -> Result<i64> {
         Ok(
             sqlx::query_scalar("SELECT revision FROM instance_config_meta WHERE id=1")
@@ -323,7 +338,9 @@ impl ConfigStore {
         expected_revision: i64,
         changes: &HashMap<String, Option<String>>,
     ) -> Result<ConfigReadiness> {
-        let values = self.preview_effective_values(expected_revision, changes).await?;
+        let values = self
+            .preview_effective_values(expected_revision, changes)
+            .await?;
         Ok(readiness::evaluate(expected_revision, &values))
     }
 
@@ -595,25 +612,33 @@ impl ConfigStore {
     }
 
     fn decrypt(&self, name: &str, value: &str) -> Result<Vec<u8>> {
-        let bytes = value
-            .strip_prefix("v1:")
-            .ok_or(ConfigError::Crypto)
-            .and_then(|s| STANDARD.decode(s).map_err(|_| ConfigError::Crypto))?;
-        if bytes.len() < 28 {
-            return Err(ConfigError::Crypto);
-        }
-        let aad = format!("tada:config:v1\0{}\0{name}", self.0.instance_id);
-        self.0
-            .cipher
-            .decrypt(
-                Nonce::from_slice(&bytes[..12]),
-                Payload {
-                    msg: &bytes[12..],
-                    aad: aad.as_bytes(),
-                },
-            )
-            .map_err(|_| ConfigError::Crypto)
+        decrypt_using(&self.0.cipher, &self.0.instance_id, name, value)
     }
+}
+
+fn decrypt_using(
+    cipher: &Aes256Gcm,
+    instance_id: &str,
+    name: &str,
+    value: &str,
+) -> Result<Vec<u8>> {
+    let bytes = value
+        .strip_prefix("v1:")
+        .ok_or(ConfigError::Crypto)
+        .and_then(|s| STANDARD.decode(s).map_err(|_| ConfigError::Crypto))?;
+    if bytes.len() < 28 {
+        return Err(ConfigError::Crypto);
+    }
+    let aad = format!("tada:config:v1\0{instance_id}\0{name}");
+    cipher
+        .decrypt(
+            Nonce::from_slice(&bytes[..12]),
+            Payload {
+                msg: &bytes[12..],
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| ConfigError::Crypto)
 }
 
 fn validate(name: &str, value: &str) -> Result<()> {

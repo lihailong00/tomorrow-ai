@@ -1,4 +1,5 @@
 import hashlib
+import base64
 import importlib.util
 import io
 import json
@@ -42,7 +43,86 @@ def encrypt_fixture(plaintext, password="fixture-password-123"):
     return result
 
 
+def encrypted_config_sql(key=bytes(range(32)), check=True):
+    instance = "e84d3e1f-580e-46a0-a815-f13e1ff747d0"
+    def encrypt(name, value, nonce):
+        aad = ("tada:config:v1\0" + instance + "\0" + name).encode()
+        return "v1:" + base64.b64encode(nonce + AESGCM(key).encrypt(nonce, value, aad)).decode()
+    key_check = encrypt("__key_check", b"tada:instance-config-key:v1", b"0" * 12) if check else ""
+    value = encrypt("MODEL_API_KEY", b"fixture-private-model-key", b"1" * 12)
+    return ("COPY public.instance_config_meta (id, instance_id, revision, key_check) FROM stdin;\n"
+            + "1\t" + instance + "\t0\t" + key_check + "\n\\.\n"
+            + "COPY public.instance_config_values (name, ciphertext) FROM stdin;\n"
+            + "MODEL_API_KEY\t" + value + "\n\\.\n")
+
+
 class RestoreTests(unittest.TestCase):
+    def test_missing_corrupt_wrong_or_conflicting_master_rejects_before_database_write(self):
+        key = bytes(range(32))
+        for candidate in [None, "corrupt", "56" * 32]:
+            with self.subTest(candidate_kind="missing" if candidate is None else "invalid"), tempfile.TemporaryDirectory() as folder:
+                source, data = Path(folder) / "source", Path(folder) / "data"
+                (source / "config").mkdir(parents=True)
+                (source / "uploads").mkdir()
+                (source / "database.dump").write_bytes(b"fixture")
+                if candidate is not None:
+                    (source / "config/master.key").write_text(candidate)
+                data.mkdir()
+                marker = data / "original-marker"
+                marker.write_text("unchanged")
+                with patch.dict(os.environ, {"TADA_OFFLINE_RESTORE": "1", "TADA_CONFIG_MASTER_KEY": ""}), patch.object(restore, "config_dump_sql", return_value=encrypted_config_sql(key)), patch.object(restore.subprocess, "run") as command:
+                    with self.assertRaises(restore.BackupError):
+                        restore.apply_restore(source, data)
+                    command.assert_not_called()
+                self.assertEqual(marker.read_text(), "unchanged")
+                self.assertFalse((data / "config").exists())
+
+    def test_file_and_environment_material_restore_to_a_bootable_private_master(self):
+        key = bytes(range(32))
+        for source_kind in ["file", "environment"]:
+            with self.subTest(source_kind=source_kind), tempfile.TemporaryDirectory() as folder:
+                source, data = Path(folder) / "source", Path(folder) / "data"
+                (source / "config").mkdir(parents=True)
+                (source / "uploads").mkdir()
+                (source / "database.dump").write_bytes(b"fixture")
+                if source_kind == "file":
+                    (source / "config/master.key").write_text(key.hex())
+                else:
+                    (source / "recovery").mkdir()
+                    (source / "recovery/effective-secrets.env").write_text("TADA_CONFIG_MASTER_KEY=" + base64.b64encode(key).decode() + "\n")
+                data.mkdir()
+                with patch.dict(os.environ, {"TADA_OFFLINE_RESTORE": "1", "TADA_CONFIG_MASTER_KEY": "", "DATABASE_URL": "postgresql://owner:fixture@localhost/fixture"}), patch.object(restore, "config_dump_sql", return_value=encrypted_config_sql(key)), patch.object(restore.subprocess, "run") as command:
+                    command.return_value.returncode = 0
+                    restore.apply_restore(source, data)
+                    self.assertEqual(command.call_count, 2)
+                self.assertEqual(restore.recovery_key((data / "config/master.key").read_text()), key)
+                if os.name != "nt":
+                    self.assertEqual((data / "config/master.key").stat().st_mode & 0o777, 0o600)
+
+    def test_legacy_empty_database_needs_no_invented_recovery_key(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"TADA_CONFIG_MASTER_KEY": ""}), patch.object(restore, "config_dump_sql", return_value="-- no encrypted settings tables\n"):
+            source = Path(folder)
+            restore.validate_config_recovery(source)
+            self.assertFalse((source / "config/master.key").exists())
+
+    def test_duplicate_incomplete_and_mismatched_config_data_fail_closed(self):
+        sql = encrypted_config_sql()
+        for invalid in [sql + sql, encrypted_config_sql(check=False), sql.replace("MODEL_API_KEY\t", "OTHER_KEY\t"), sql.replace("\\.\n", "", 1)]:
+            with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"TADA_CONFIG_MASTER_KEY": ""}), patch.object(restore, "config_dump_sql", return_value=invalid):
+                source = Path(folder)
+                (source / "config").mkdir()
+                (source / "config/master.key").write_text(bytes(range(32)).hex())
+                with self.assertRaises(restore.BackupError):
+                    restore.validate_config_recovery(source)
+
+    def test_target_environment_must_match_archived_master(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"TADA_CONFIG_MASTER_KEY": "56" * 32}), patch.object(restore, "config_dump_sql", return_value=encrypted_config_sql()):
+            source = Path(folder)
+            (source / "config").mkdir()
+            (source / "config/master.key").write_text(bytes(range(32)).hex())
+            with self.assertRaises(restore.BackupError):
+                restore.validate_config_recovery(source)
+
     def test_stream_round_trip_and_secret_not_plaintext(self):
         plain = archive_payload()
         encrypted = encrypt_fixture(plain)
