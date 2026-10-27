@@ -8,6 +8,47 @@ const response = (data: unknown, status = 200) =>
   } as Response);
 
 describe('mobile API boundary', () => {
+  it('allows a slow accepted SMS response beyond the general request deadline without retrying', async () => {
+    jest.useFakeTimers();
+    try {
+      let signal!: AbortSignal;
+      const fetcher = jest.fn((_url, init) => {
+        signal = init.signal;
+        return new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(() => resolve(response({ challenge_id: 'slow-challenge', expires_in: 300, retry_after: 60, test_mode: false })), 31000);
+          signal.addEventListener('abort', () => { clearTimeout(timer); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); });
+        });
+      });
+      const api = new ApiClient('https://api.example.com', undefined, undefined, fetcher);
+      const result = api.requestPhoneCode('13800138000', 'register');
+      await jest.advanceTimersByTimeAsync(21000);
+      expect(signal.aborted).toBe(false);
+      await jest.advanceTimersByTimeAsync(10000);
+      await expect(result).resolves.toMatchObject({ challenge_id: 'slow-challenge', test_mode: false });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    } finally { jest.clearAllTimers(); jest.useRealTimers(); }
+  });
+  it('treats an expired SMS request as uncertain and enforces a wait without retrying', async () => {
+    jest.useFakeTimers();
+    try {
+      const fetcher = jest.fn((_url, init) => new Promise<Response>((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      }));
+      const api = new ApiClient('https://api.example.com', undefined, undefined, fetcher);
+      const result = api.requestPhoneCode('13800138000', 'register').catch(error => error);
+      await jest.advanceTimersByTimeAsync(45000);
+      expect(await result).toMatchObject({ code: 'sms_send_uncertain', retryAfterSeconds: 60 });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    } finally { jest.clearAllTimers(); jest.useRealTimers(); }
+  });
+  it('does not claim an SMS failed when the network loses the result', async () => {
+    const fetcher = jest.fn().mockRejectedValue(new TypeError('network lost'));
+    const api = new ApiClient('https://api.example.com', undefined, undefined, fetcher);
+    await expect(api.requestPhoneCode('13800138000', 'register')).rejects.toMatchObject({
+      code: 'sms_send_uncertain', retryAfterSeconds: 60,
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it('uses password login and sends passwords exactly as entered for register and reset', async () => {
     const fetcher = jest.fn().mockResolvedValue(response({ ok: true }));
     const api = new ApiClient(

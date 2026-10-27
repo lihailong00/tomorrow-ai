@@ -94,9 +94,12 @@ export class ApiClient {
     }
     const multipart =
       typeof FormData !== 'undefined' && body instanceof FormData;
+    const smsCodeRequest = path === '/auth/phone/code';
     const timeout = setTimeout(
       () => controller.abort(),
-      path === '/chat' || path.endsWith('/transcribe')
+      smsCodeRequest
+        ? 45000 // The SMS provider may take up to 30 seconds; allow return-path margin.
+        : path === '/chat' || path.endsWith('/transcribe')
         ? 120000
         : multipart
         ? 60000
@@ -162,6 +165,14 @@ export class ApiClient {
     } catch (error) {
       if (error instanceof ApiError) {
         throw error;
+      }
+      if (smsCodeRequest) {
+        throw new ApiError(
+          'sms_send_uncertain',
+          '发送结果尚未确认，短信可能仍会到达。请核对收件手机号，等待 60 秒后再试。',
+          0,
+          60,
+        );
       }
       if ((error as Error).name === 'AbortError') {
         throw new ApiError(

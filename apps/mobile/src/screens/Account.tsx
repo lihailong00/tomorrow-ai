@@ -187,6 +187,11 @@ function PhoneAuthScreen({
   const registering = mode === 'register';
   const resetting = mode === 'reset';
   const needsCode = mode !== 'login';
+  let smsRecipient = '';
+  try {
+    const national = normalizePhoneNumber(phone).slice(3);
+    smsRecipient = `${national.slice(0, 3)}****${national.slice(-4)}`;
+  } catch { /* The phone field may still be incomplete. */ }
   const registrationOpen = !preferences.instance || preferences.instance.registration_policy === 'open';
   const resetCode = () => {
     setCode('');
@@ -225,7 +230,7 @@ function PhoneAuthScreen({
           setCodeNotice(
             challenge.test_mode
               ? '测试验证码：123456，有效期 5 分钟。'
-              : '验证码已发送，请查看短信。',
+              : `验证码已发送至 ${smsRecipient}，请查看该手机号的短信。`,
           );
         } catch (error) {
           if (error instanceof ApiError && error.retryAfterSeconds) {
@@ -387,6 +392,7 @@ function PhoneAuthScreen({
         maxLength={20}
         editable={!busy}
       />
+      {needsCode && smsRecipient ? <Text style={s.small}>验证码收件手机号：{smsRecipient}，请核对后再发送。</Text> : null}
       <Field
         key={mode}
         label={resetting ? '新密码' : '密码'}

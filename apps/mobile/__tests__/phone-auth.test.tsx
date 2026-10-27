@@ -115,6 +115,32 @@ function setup() {
 }
 
 describe('phone password account flow', () => {
+  it('shows the actual masked recipient before sending and in the successful receipt', async () => {
+    const screen = setup();
+    screen.api.requestPhoneCode.mockResolvedValueOnce({ challenge_id: 'actual-phone', expires_in: 300, retry_after: 60, test_mode: false });
+    await screen.mount(); await screen.tab('创建账号');
+    await screen.input('手机号 · +86', '17380473939');
+    expect(screen.text()).toContain('173****3939');
+    await screen.input('手机号 · +86', '17380473936');
+    expect(screen.text()).toContain('173****3936');
+    expect(screen.text()).not.toContain('173****3939');
+    await screen.button('获取验证码');
+    expect(screen.api.requestPhoneCode).toHaveBeenCalledWith('17380473936', 'register');
+    expect(screen.text()).toContain('验证码已发送至 173****3936');
+    await screen.unmount();
+  });
+  it('blocks immediate resend when the SMS result is unknown', async () => {
+    const screen = setup();
+    screen.api.requestPhoneCode.mockRejectedValueOnce(new ApiError('sms_send_uncertain', '发送结果尚未确认', 0, 60));
+    await screen.mount(); await screen.tab('创建账号');
+    await screen.input('手机号 · +86', '13800138000');
+    await screen.button('获取验证码');
+    expect(screen.buttonProps('60 秒后重试')!.disabled).toBe(true);
+    expect(screen.text()).not.toContain('验证码已发送至');
+    await screen.button('60 秒后重试');
+    expect(screen.api.requestPhoneCode).toHaveBeenCalledTimes(1);
+    await screen.unmount();
+  });
   it('logs in with a password without sending or requesting a code', async () => {
     const screen = setup();
     await screen.mount();
