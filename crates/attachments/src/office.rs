@@ -25,6 +25,8 @@ const MAX_XML_DEPTH: usize = 64;
 const MAX_SHEETS: usize = 32;
 const MAX_STRINGS: usize = 20_000;
 const MAX_CELLS: usize = 50_000;
+const MAX_ROW: u32 = 1_048_576;
+const MAX_COLUMN: u32 = 16_384;
 pub(super) static PARSERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 pub(super) fn supported(name: &str) -> bool {
@@ -101,7 +103,7 @@ pub(super) fn extract(upload: &Upload, bytes: &[u8]) -> Result<String, Attachmen
     } else {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
     };
-    let mut content_matches = false;
+    let mut main_parts = Vec::new();
     walk(&content_types, |event| {
         if let Event::Start(e) | Event::Empty(e) = event {
             if let Some(content) = attr(e, "ContentType")? {
@@ -110,28 +112,51 @@ pub(super) fn extract(upload: &Upload, bytes: &[u8]) -> Result<String, Attachmen
                     return Err(unsafe_content());
                 }
                 if content == required_content {
-                    content_matches = true;
+                    let name = attr(e, "PartName")?.ok_or_else(invalid)?;
+                    if !name.starts_with('/') {
+                        return Err(invalid());
+                    }
+                    main_parts.push(resolve_part("", &name)?);
                 }
             }
         }
         Ok(())
     })?;
-    if !content_matches {
+    if main_parts.is_empty() {
         return Err(invalid());
     }
     // Validate every relationship file before reading any document content.
+    let mut root_main = None;
     for name in package
         .names
         .clone()
         .into_iter()
         .filter(|name| name.ends_with(".rels"))
     {
-        relationships(&package.xml(&name)?)?;
+        let rels = relationships(&package.xml(&name)?)?;
+        if name == "_rels/.rels" {
+            for (target, kind) in rels.values() {
+                if kind.ends_with("/officeDocument") {
+                    if root_main.is_some() {
+                        return Err(invalid());
+                    }
+                    root_main = Some(resolve_part("", target)?);
+                }
+            }
+            if root_main.is_none() {
+                return Err(invalid());
+            }
+        }
     }
+    let main_part = match root_main {
+        Some(path) if main_parts.contains(&path) => path,
+        None if main_parts.len() == 1 => main_parts.pop().unwrap(),
+        _ => return Err(invalid()),
+    };
     let out = if format == "docx" {
-        docx(&mut package)?
+        docx(&mut package, &main_part)?
     } else {
-        xlsx(&mut package)?
+        xlsx(&mut package, &main_part)?
     };
     if out.trim().is_empty() {
         return Err(error(
@@ -236,15 +261,77 @@ impl<'a> Package<'a> {
             .take(MAX_XML_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| invalid())?;
+        let xml = decode_xml(&bytes)?;
         self.read_total = self
             .read_total
-            .checked_add(bytes.len() as u64)
+            .checked_add(bytes.len().max(xml.len()) as u64)
             .ok_or_else(limited)?;
         if bytes.len() as u64 > MAX_XML_BYTES || self.read_total > MAX_EXPANDED_BYTES {
             return Err(limited());
         }
-        String::from_utf8(bytes).map_err(|_| invalid())
+        Ok(xml)
     }
+}
+
+fn decode_xml(bytes: &[u8]) -> Result<String, AttachmentError> {
+    let (body, endian) = if let Some(body) = bytes.strip_prefix(&[0xff, 0xfe]) {
+        (body, Some(true))
+    } else if let Some(body) = bytes.strip_prefix(&[0xfe, 0xff]) {
+        (body, Some(false))
+    } else {
+        (
+            bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes),
+            None,
+        )
+    };
+    let xml = if let Some(little_endian) = endian {
+        if body.len() % 2 != 0 {
+            return Err(invalid());
+        }
+        let units = body.chunks_exact(2).map(|pair| {
+            let pair = [pair[0], pair[1]];
+            if little_endian {
+                u16::from_le_bytes(pair)
+            } else {
+                u16::from_be_bytes(pair)
+            }
+        });
+        let mut xml = String::new();
+        for character in char::decode_utf16(units) {
+            let character = character.map_err(|_| invalid())?;
+            if xml.len() + character.len_utf8() > MAX_XML_BYTES as usize {
+                return Err(limited());
+            }
+            xml.push(character);
+        }
+        xml
+    } else {
+        std::str::from_utf8(body).map_err(|_| invalid())?.to_owned()
+    };
+    if xml.len() > MAX_XML_BYTES as usize {
+        return Err(limited());
+    }
+    // A decoded string must not silently contradict the XML encoding declaration.
+    if let Event::Decl(declaration) = Reader::from_str(&xml).read_event().map_err(|_| invalid())? {
+        if let Some(encoding) = declaration.encoding() {
+            let encoding = encoding.map_err(|_| invalid())?;
+            let matches = match endian {
+                None => encoding.eq_ignore_ascii_case("UTF-8"),
+                Some(true) => {
+                    encoding.eq_ignore_ascii_case("UTF-16")
+                        || encoding.eq_ignore_ascii_case("UTF-16LE")
+                }
+                Some(false) => {
+                    encoding.eq_ignore_ascii_case("UTF-16")
+                        || encoding.eq_ignore_ascii_case("UTF-16BE")
+                }
+            };
+            if !matches {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(xml)
 }
 
 fn attr(element: &BytesStart<'_>, key: &str) -> Result<Option<String>, AttachmentError> {
@@ -273,8 +360,13 @@ fn walk<'a>(
     let mut reader = Reader::from_str(xml);
     let mut depth = 0usize;
     let mut roots = 0usize;
+    let mut first_event = true;
     for _ in 0..MAX_XML_EVENTS {
         let event = reader.read_event().map_err(|_| invalid())?;
+        if matches!(event, Event::Decl(_)) && !first_event {
+            return Err(invalid());
+        }
+        first_event = false;
         match &event {
             Event::Start(e) => {
                 if depth == 0 {
@@ -377,8 +469,40 @@ fn relationships(xml: &str) -> Result<HashMap<String, (String, String)>, Attachm
     Ok(out)
 }
 
-fn docx(package: &mut Package<'_>) -> Result<String, AttachmentError> {
-    let xml = package.xml("word/document.xml")?;
+fn resolve_part(source: &str, target: &str) -> Result<String, AttachmentError> {
+    if target.is_empty()
+        || target.starts_with("//")
+        || target.contains([':', '\\', '\0', '?', '#', '%'])
+    {
+        return Err(invalid());
+    }
+    let path = if let Some(path) = target.strip_prefix('/') {
+        path.to_owned()
+    } else if let Some((directory, _)) = source.rsplit_once('/') {
+        format!("{directory}/{target}")
+    } else {
+        target.to_owned()
+    };
+    if path.len() > 256
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(invalid());
+    }
+    Ok(path)
+}
+
+fn part_relationships(part: &str) -> String {
+    if let Some((directory, name)) = part.rsplit_once('/') {
+        format!("{directory}/_rels/{name}.rels")
+    } else {
+        format!("_rels/{part}.rels")
+    }
+}
+
+fn docx(package: &mut Package<'_>, main_part: &str) -> Result<String, AttachmentError> {
+    let xml = package.xml(main_part)?;
     let mut out = String::new();
     let mut in_text = false;
     walk(&xml, |event| {
@@ -393,6 +517,8 @@ fn docx(package: &mut Package<'_>) -> Result<String, AttachmentError> {
             Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
                 "tab" => push(&mut out, "\t")?,
                 "br" | "cr" => push(&mut out, "\n")?,
+                "noBreakHyphen" => push(&mut out, "\u{2011}")?,
+                "softHyphen" => push(&mut out, "\u{00ad}")?,
                 _ => {}
             },
             _ if in_text => {
@@ -407,10 +533,23 @@ fn docx(package: &mut Package<'_>) -> Result<String, AttachmentError> {
     Ok(out)
 }
 
-fn xlsx(package: &mut Package<'_>) -> Result<String, AttachmentError> {
+fn xlsx(package: &mut Package<'_>, main_part: &str) -> Result<String, AttachmentError> {
+    let rels = relationships(&package.xml(&part_relationships(main_part))?)?;
+    let mut string_part = None;
+    for (target, kind) in rels.values() {
+        if kind.ends_with("/sharedStrings") {
+            if string_part.is_some() {
+                return Err(invalid());
+            }
+            string_part = Some(resolve_part(main_part, target)?);
+        }
+    }
+    if string_part.is_none() && package.names.iter().any(|s| s == "xl/sharedStrings.xml") {
+        string_part = Some("xl/sharedStrings.xml".to_owned());
+    }
     let mut strings = Vec::new();
-    if package.names.iter().any(|s| s == "xl/sharedStrings.xml") {
-        let xml = package.xml("xl/sharedStrings.xml")?;
+    if let Some(path) = string_part {
+        let xml = package.xml(&path)?;
         let mut current = String::new();
         let mut in_text = false;
         let mut in_phonetic = false;
@@ -446,8 +585,7 @@ fn xlsx(package: &mut Package<'_>) -> Result<String, AttachmentError> {
             Ok(())
         })?;
     }
-    let xml = package.xml("xl/workbook.xml")?;
-    let rels = relationships(&package.xml("xl/_rels/workbook.xml.rels")?)?;
+    let xml = package.xml(main_part)?;
     let mut sheets = Vec::new();
     walk(&xml, |event| {
         if let Event::Start(e) | Event::Empty(e) = event {
@@ -461,16 +599,7 @@ fn xlsx(package: &mut Package<'_>) -> Result<String, AttachmentError> {
                 if !kind.ends_with("/worksheet") {
                     return Err(invalid());
                 }
-                let path = if target.starts_with("/xl/") {
-                    target.trim_start_matches('/').to_owned()
-                } else {
-                    format!("xl/{target}")
-                };
-                if !path.starts_with("xl/worksheets/")
-                    || path.split('/').any(|p| p == ".." || p == ".")
-                {
-                    return Err(invalid());
-                }
+                let path = resolve_part(main_part, target)?;
                 sheets.push((name, path));
             }
         }
@@ -490,9 +619,33 @@ fn xlsx(package: &mut Package<'_>) -> Result<String, AttachmentError> {
         let mut in_value = false;
         let mut in_inline = false;
         let mut in_phonetic = false;
+        let mut row: Option<RowPosition> = None;
+        let mut previous_row = 0;
         walk(&xml, |event| {
             match event {
-                Event::Start(e) if e.local_name().as_ref() == "c" => {
+                Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == "row" => {
+                    if row.is_some() || cell.is_some() {
+                        return Err(invalid());
+                    }
+                    let explicit = attr(e, "r")?;
+                    let index = match &explicit {
+                        Some(value) => row_number(value)?,
+                        None => previous_row + 1,
+                    };
+                    if index <= previous_row || index > MAX_ROW {
+                        return Err(invalid());
+                    }
+                    if matches!(event, Event::Empty(_)) {
+                        previous_row = index;
+                    } else {
+                        row = Some(RowPosition {
+                            index,
+                            explicit: explicit.is_some(),
+                            column: 0,
+                        });
+                    }
+                }
+                Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == "c" => {
                     if cell.is_some() {
                         return Err(invalid());
                     }
@@ -500,11 +653,20 @@ fn xlsx(package: &mut Package<'_>) -> Result<String, AttachmentError> {
                     if count > MAX_CELLS {
                         return Err(limited());
                     }
-                    cell = Some(Cell {
-                        address: attr(e, "r")?.ok_or_else(invalid)?,
+                    let address = row
+                        .as_mut()
+                        .ok_or_else(invalid)?
+                        .address(attr(e, "r")?, previous_row)?;
+                    let next = Cell {
+                        address,
                         kind: attr(e, "t")?.unwrap_or_default(),
                         ..Cell::default()
-                    });
+                    };
+                    if matches!(event, Event::Empty(_)) {
+                        next.emit(&mut out, &strings)?;
+                    } else {
+                        cell = Some(next);
+                    }
                 }
                 Event::Start(e) if cell.is_some() && e.local_name().as_ref() == "v" => {
                     in_value = true
@@ -522,6 +684,12 @@ fn xlsx(package: &mut Package<'_>) -> Result<String, AttachmentError> {
                     "v" => in_value = false,
                     "t" => in_inline = false,
                     "rPh" => in_phonetic = false,
+                    "row" => {
+                        if cell.is_some() {
+                            return Err(invalid());
+                        }
+                        previous_row = row.take().ok_or_else(invalid)?.index;
+                    }
                     "c" => {
                         let cell = cell.take().ok_or_else(invalid)?;
                         cell.emit(&mut out, &strings)?;
@@ -543,6 +711,70 @@ fn xlsx(package: &mut Package<'_>) -> Result<String, AttachmentError> {
     Ok(out)
 }
 
+fn row_number(value: &str) -> Result<u32, AttachmentError> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let row = value.parse::<u32>().map_err(|_| invalid())?;
+    if row == 0 || row > MAX_ROW {
+        return Err(invalid());
+    }
+    Ok(row)
+}
+
+fn cell_position(address: &str) -> Result<(u32, u32), AttachmentError> {
+    let letters = address.bytes().take_while(u8::is_ascii_uppercase).count();
+    if !(1..=3).contains(&letters) || address.len() <= letters || address.len() > 10 {
+        return Err(invalid());
+    }
+    let column = address[..letters]
+        .bytes()
+        .fold(0, |value, byte| value * 26 + u32::from(byte - b'A' + 1));
+    if column > MAX_COLUMN {
+        return Err(invalid());
+    }
+    Ok((column, row_number(&address[letters..])?))
+}
+
+struct RowPosition {
+    index: u32,
+    explicit: bool,
+    column: u32,
+}
+
+impl RowPosition {
+    fn address(
+        &mut self,
+        explicit: Option<String>,
+        previous_row: u32,
+    ) -> Result<String, AttachmentError> {
+        if let Some(address) = explicit {
+            let (column, row) = cell_position(&address)?;
+            // The first explicit cell can identify an otherwise implicit sparse row.
+            if !self.explicit && self.column == 0 && row > previous_row {
+                self.index = row;
+            }
+            if row != self.index || column <= self.column {
+                return Err(invalid());
+            }
+            self.column = column;
+            return Ok(address);
+        }
+        if self.column >= MAX_COLUMN {
+            return Err(invalid());
+        }
+        self.column += 1;
+        let mut column = self.column;
+        let mut letters = Vec::new();
+        while column > 0 {
+            letters.push(char::from(b'A' + ((column - 1) % 26) as u8));
+            column = (column - 1) / 26;
+        }
+        let letters: String = letters.into_iter().rev().collect();
+        Ok(format!("{letters}{}", self.index))
+    }
+}
+
 #[derive(Default)]
 struct Cell {
     address: String,
@@ -552,24 +784,13 @@ struct Cell {
 }
 impl Cell {
     fn emit(self, out: &mut String, strings: &[String]) -> Result<(), AttachmentError> {
-        let letter_count = self
-            .address
-            .bytes()
-            .take_while(u8::is_ascii_uppercase)
-            .count();
-        if !(1..=3).contains(&letter_count)
-            || self.address.len() <= letter_count
-            || self.address.len() > 10
-            || !self.address[letter_count..]
-                .bytes()
-                .all(|b| b.is_ascii_digit())
-        {
-            return Err(invalid());
-        }
+        cell_position(&self.address)?;
         if self.value.is_empty() && !self.formula {
             return Ok(());
         }
-        let value = if self.kind == "s" {
+        let value = if self.value.is_empty() && self.formula {
+            "[公式，无缓存结果]".to_owned()
+        } else if self.kind == "s" {
             strings
                 .get(self.value.parse::<usize>().map_err(|_| invalid())?)
                 .ok_or_else(invalid)?
@@ -580,8 +801,6 @@ impl Cell {
                 "1" => "true".to_owned(),
                 _ => return Err(invalid()),
             }
-        } else if self.value.is_empty() && self.formula {
-            "[公式，无缓存结果]".to_owned()
         } else {
             self.value
         };
