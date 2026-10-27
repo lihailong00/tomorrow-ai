@@ -13,11 +13,76 @@ pub(super) async fn initialize(pool: &AnyPool) -> Result<Runtime, AttachmentErro
     for sql in [
         "CREATE TABLE IF NOT EXISTS photo_index_devices(user_id TEXT NOT NULL,device_id TEXT NOT NULL,enabled BIGINT NOT NULL DEFAULT 0,epoch BIGINT NOT NULL DEFAULT 0,PRIMARY KEY(user_id,device_id))",
         "CREATE TABLE IF NOT EXISTS photo_index_assets(user_id TEXT NOT NULL,device_id TEXT NOT NULL,asset_id TEXT NOT NULL,revision TEXT NOT NULL,metadata TEXT NOT NULL,updated_at TEXT NOT NULL,PRIMARY KEY(user_id,device_id,asset_id))",
-        "CREATE TABLE IF NOT EXISTS photo_index_results(user_id TEXT NOT NULL,device_id TEXT NOT NULL,asset_id TEXT NOT NULL,kind TEXT NOT NULL,processor TEXT NOT NULL,content TEXT NOT NULL,PRIMARY KEY(user_id,device_id,asset_id,kind))",
+        "CREATE TABLE IF NOT EXISTS photo_index_results(user_id TEXT NOT NULL,device_id TEXT NOT NULL,asset_id TEXT NOT NULL,kind TEXT NOT NULL,processor TEXT NOT NULL,content TEXT NOT NULL,search_text TEXT,PRIMARY KEY(user_id,device_id,asset_id,kind))",
     ] {
         sqlx::query(sql).execute(pool).await?;
     }
+    initialize_keyword_search(pool).await?;
     semantic::initialize(pool).await
+}
+
+async fn initialize_keyword_search(pool: &AnyPool) -> Result<(), AttachmentError> {
+    // Attachments use compatible startup schema upgrades on SQLite and Postgres.
+    // A second instance may have added the column after our first check.
+    let check = "SELECT search_text FROM photo_index_results LIMIT 0";
+    if sqlx::query(check).fetch_optional(pool).await.is_err() {
+        if let Err(error) = sqlx::query("ALTER TABLE photo_index_results ADD COLUMN search_text TEXT")
+            .execute(pool).await
+        {
+            sqlx::query(check).fetch_optional(pool).await.map_err(|_| error)?;
+        }
+    }
+    sqlx::query("CREATE INDEX IF NOT EXISTS photo_index_asset_order ON photo_index_assets(user_id,device_id,updated_at DESC,asset_id)")
+        .execute(pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS photo_index_search_pending ON photo_index_results(user_id,device_id,asset_id,kind) WHERE search_text IS NULL")
+        .execute(pool).await?;
+    loop {
+        // At most 128 source rows and 776 SQL parameters per batch. Commit each
+        // batch separately; never retain a stream/connection for the whole index.
+        let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
+            "SELECT user_id,device_id,asset_id,kind,content FROM photo_index_results WHERE search_text IS NULL ORDER BY user_id,device_id,asset_id,kind LIMIT 128",
+        ).fetch_all(pool).await?;
+        if rows.is_empty() {
+            break;
+        }
+        backfill_keyword_batch(pool, &rows).await?;
+        tokio::task::yield_now().await;
+    }
+    Ok(())
+}
+
+async fn backfill_keyword_batch(
+    pool: &AnyPool,
+    rows: &[(String, String, String, String, String)],
+) -> Result<(), AttachmentError> {
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+        return Ok(());
+    };
+    // Any's generic QueryBuilder uses '?' placeholders; numbered parameters are
+    // accepted by both supported backends. Only fixed parameter counts enter SQL.
+    let values = (0..rows.len()).map(|row| {
+        let parameters = (1..=6).map(|column| format!("${}", row * 6 + column))
+            .collect::<Vec<_>>().join(",");
+        format!("({parameters})")
+    }).collect::<Vec<_>>().join(",");
+    // UPDATE only: a concurrent delete must never resurrect private text.
+    // Comparing the source also prevents overwriting a concurrent re-sync.
+    // Limit the update's target scan to this sorted batch's primary-key range.
+    // Otherwise Postgres can choose to scan every pending row for every batch.
+    let bounds = (1..=8).map(|n| format!("${}", rows.len() * 6 + n))
+        .collect::<Vec<_>>();
+    let lower = bounds[..4].join(",");
+    let upper = bounds[4..].join(",");
+    let sql = format!("WITH pending(user_id,device_id,asset_id,kind,source,normalized) AS (VALUES {values}) UPDATE photo_index_results AS r SET search_text=p.normalized FROM pending p WHERE r.user_id=p.user_id AND r.device_id=p.device_id AND r.asset_id=p.asset_id AND r.kind=p.kind AND r.content=p.source AND r.search_text IS NULL AND (r.user_id,r.device_id,r.asset_id,r.kind)>=({lower}) AND (r.user_id,r.device_id,r.asset_id,r.kind)<=({upper})");
+    let mut query = sqlx::query(&sql);
+    for (user, device, asset, kind, content) in rows {
+        query = query.bind(user).bind(device).bind(asset).bind(kind)
+            .bind(content).bind(content.to_lowercase());
+    }
+    query = query.bind(&first.0).bind(&first.1).bind(&first.2).bind(&first.3)
+        .bind(&last.0).bind(&last.1).bind(&last.2).bind(&last.3);
+    query.execute(pool).await?;
+    Ok(())
 }
 
 pub(super) fn router(state: AttachmentsState) -> Router {
@@ -333,8 +398,9 @@ async fn persist_sync(
     )
     .await?;
     for result in input.results {
-        sqlx::query("INSERT INTO photo_index_results(user_id,device_id,asset_id,kind,processor,content)VALUES($1,$2,$3,$4,$5,$6)")
-            .bind(&user).bind(&device).bind(&asset).bind(result.kind).bind(result.processor).bind(result.content).execute(&mut *tx).await?;
+        let search_text = result.content.to_lowercase();
+        sqlx::query("INSERT INTO photo_index_results(user_id,device_id,asset_id,kind,processor,content,search_text)VALUES($1,$2,$3,$4,$5,$6,$7)")
+            .bind(&user).bind(&device).bind(&asset).bind(result.kind).bind(result.processor).bind(result.content).bind(search_text).execute(&mut *tx).await?;
     }
     if let Some((hash, model, job)) = vision_hash {
         sqlx::query("INSERT INTO photo_vision_results(user_id,device_id,asset_id,input_hash,model,revision)VALUES($1,$2,$3,$4,$5,$6)ON CONFLICT(user_id,device_id,asset_id)DO UPDATE SET input_hash=$4,model=$5,revision=$6")
@@ -430,16 +496,9 @@ async fn list(
     {
         return Err(invalid());
     }
-    let pattern = format!(
-        "%{}%",
-        q.to_lowercase()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-    );
     let hybrid = mode == "hybrid" && !q.is_empty();
-    let literal:Vec<String>=sqlx::query_scalar("SELECT a.asset_id FROM photo_index_assets a WHERE a.user_id=$1 AND a.device_id=$2 AND ($3='' OR EXISTS(SELECT 1 FROM photo_index_results r WHERE r.user_id=a.user_id AND r.device_id=a.device_id AND r.asset_id=a.asset_id AND LOWER(r.content) LIKE $4 ESCAPE '\\')) ORDER BY a.updated_at DESC,a.asset_id LIMIT $5 OFFSET $6")
-        .bind(&user).bind(&device).bind(&q).bind(pattern).bind(if hybrid{100_i64}else{20}).bind(if hybrid{0}else{offset}).fetch_all(&state.pool).await?;
+    let literal = literal_matches(&state, &user, &device, &q,
+        if hybrid { 100 } else { 20 }, if hybrid { 0 } else { offset }).await?;
     let mut fallback = None;
     let mut used_semantic = false;
     let ids = if hybrid {
@@ -490,6 +549,44 @@ async fn list(
     Ok(Json(
         json!({"next_offset":if items.len()==20 && (!hybrid||offset+20<100){Some(offset+20)}else{None},"items":items,"search_mode":if used_semantic{"hybrid"}else{"keyword"},"notice":fallback}),
     ))
+}
+
+async fn literal_matches(
+    state: &AttachmentsState,
+    user: &str,
+    device: &str,
+    query: &str,
+    limit: usize,
+    offset: i64,
+) -> Result<Vec<String>, AttachmentError> {
+    if query.is_empty() {
+        return Ok(sqlx::query_scalar("SELECT asset_id FROM photo_index_assets WHERE user_id=$1 AND device_id=$2 ORDER BY updated_at DESC,asset_id LIMIT $3 OFFSET $4")
+            .bind(user).bind(device).bind(limit as i64).bind(offset).fetch_all(&state.pool).await?);
+    }
+    // Normalize once when syncing/backfilling, then filter inside the database.
+    // Escape LIKE metacharacters so keyword search remains literal on both DBs.
+    let escaped = query.to_lowercase().replace('!', "!!").replace('%', "!%")
+        .replace('_', "!_");
+    let pattern = format!("%{escaped}%");
+    // Common keywords can fill a page among the newest 256 photos. Probe this
+    // bounded window first, without forcing a full-table scan for every click.
+    // We only return early when the whole requested page fits in that window;
+    // otherwise the full filtered query below preserves global pagination.
+    let needed = offset as usize + limit;
+    if needed <= 256 {
+        let recent: Vec<String> = sqlx::query_scalar("WITH candidates AS MATERIALIZED(SELECT asset_id,updated_at FROM photo_index_assets WHERE user_id=$1 AND device_id=$2 ORDER BY updated_at DESC,asset_id LIMIT 256) SELECT a.asset_id FROM candidates a WHERE EXISTS(SELECT 1 FROM photo_index_results r WHERE r.user_id=$1 AND r.device_id=$2 AND r.asset_id=a.asset_id AND r.search_text LIKE $3 ESCAPE '!') ORDER BY a.updated_at DESC,a.asset_id LIMIT $4")
+            .bind(user).bind(device).bind(&pattern).bind(needed as i64)
+            .fetch_all(&state.pool).await?;
+        if recent.len() == needed {
+            return Ok(recent.into_iter().skip(offset as usize).collect());
+        }
+    }
+    // Filter source rows once before looking up/sorting assets. A correlated
+    // EXISTS would perform a random text lookup for every photo on a miss.
+    // Only matching IDs are materialized, never the original or normalized OCR.
+    Ok(sqlx::query_scalar("WITH matching AS MATERIALIZED(SELECT DISTINCT asset_id FROM photo_index_results WHERE user_id=$1 AND device_id=$2 AND search_text LIKE $3 ESCAPE '!') SELECT a.asset_id FROM matching r JOIN photo_index_assets a ON a.user_id=$1 AND a.device_id=$2 AND a.asset_id=r.asset_id ORDER BY a.updated_at DESC,a.asset_id LIMIT $4 OFFSET $5")
+        .bind(user).bind(device).bind(pattern).bind(limit as i64).bind(offset)
+        .fetch_all(&state.pool).await?)
 }
 
 async fn remove(

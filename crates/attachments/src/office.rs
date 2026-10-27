@@ -418,6 +418,13 @@ fn xlsx(package: &mut Package<'_>) -> Result<String, AttachmentError> {
         walk(&xml, |event| {
             match event {
                 Event::Start(e) if e.local_name().as_ref() == "si" => current.clear(),
+                Event::Empty(e) if e.local_name().as_ref() == "si" => {
+                    if strings.len() >= MAX_STRINGS {
+                        return Err(limited());
+                    }
+                    // An empty item still occupies its shared-string index.
+                    strings.push(String::new());
+                }
                 Event::Start(e) if e.local_name().as_ref() == "rPh" => in_phonetic = true,
                 Event::End(e) if e.local_name().as_ref() == "rPh" => in_phonetic = false,
                 Event::Start(e) if e.local_name().as_ref() == "t" => in_text = !in_phonetic,

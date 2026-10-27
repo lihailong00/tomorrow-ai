@@ -499,6 +499,7 @@ mod tests {
             content: content.into(),
             created_at: "2026-10-26T00:00:00Z".into(),
             model_mode: None,
+            attachments: Vec::new(),
         }
     }
 

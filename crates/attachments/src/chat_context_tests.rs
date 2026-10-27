@@ -1,0 +1,196 @@
+use super::*;
+
+struct TestDirectory(PathBuf);
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let root = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        if let Ok(path) = std::fs::canonicalize(&self.0) {
+            if path.parent() == Some(root.as_path())
+                && path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("tada-e03-context-")
+            {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
+    }
+}
+async fn fixture() -> (AttachmentsState, TestDirectory, String, String) {
+    let directory = TestDirectory(
+        std::env::temp_dir().join(format!("tada-e03-context-{}", uuid::Uuid::new_v4())),
+    );
+    let repo = Repository::connect("sqlite::memory:").await.unwrap();
+    let owner = repo
+        .create_user(
+            "context-a@example.test",
+            "unused",
+            "Context A",
+            "Asia/Shanghai",
+        )
+        .await
+        .unwrap()
+        .id;
+    let other = repo
+        .create_user(
+            "context-b@example.test",
+            "unused",
+            "Context B",
+            "Asia/Shanghai",
+        )
+        .await
+        .unwrap()
+        .id;
+    let state = AttachmentsState::initialize(repo, directory.0.clone(), DEFAULT_MAX_BYTES, None)
+        .await
+        .unwrap();
+    (state, directory, owner, other)
+}
+async fn file(state: &AttachmentsState, owner: &str, name: &str, text: &str) -> String {
+    let id = tomorrow_domain::new_id();
+    tokio::fs::write(state.path(&id).unwrap(), text)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO uploads(id,user_id,name,mime_type,size,created_at)VALUES($1,$2,$3,'text/plain',$4,$5)")
+        .bind(&id).bind(owner).bind(name).bind(text.len() as i64).bind(tomorrow_domain::timestamp(tomorrow_domain::now())).execute(&state.pool).await.unwrap();
+    id
+}
+fn message(attachment: MessageAttachment) -> Message {
+    Message {
+        id: tomorrow_domain::new_id(),
+        conversation_id: "fixture".into(),
+        role: "user".into(),
+        content: "File reference".into(),
+        created_at: tomorrow_domain::timestamp(tomorrow_domain::now()),
+        model_mode: None,
+        attachments: vec![attachment],
+    }
+}
+
+#[tokio::test]
+async fn attachment_history_deduplicates_recent_first_and_signals_count_budget() {
+    let (state, _directory, owner, _) = fixture().await;
+    let mut ids = Vec::new();
+    let mut history = Vec::new();
+    for number in 0..12 {
+        let id = file(
+            &state,
+            &owner,
+            &format!("project-{number}.txt"),
+            &format!("SOURCE_{number}_MARKER"),
+        )
+        .await;
+        history.push(message(
+            state
+                .message_attachments(&owner, &[id.clone()])
+                .await
+                .unwrap()
+                .remove(0),
+        ));
+        ids.push(id);
+    }
+    let current = vec![ids[11].clone(), ids[11].clone()];
+    assert_eq!(
+        state
+            .message_attachments(&owner, &current)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let context = state
+        .conversation_chat_context(&owner, &current, &history)
+        .await
+        .unwrap();
+    assert_eq!(context.matches("SOURCE_11_MARKER").count(), 1);
+    assert!(context.contains("SOURCE_1_MARKER"));
+    assert!(!context.contains("SOURCE_0_MARKER"));
+    assert!(context.contains("部分较早资料未载入"));
+    assert!(context.find("SOURCE_10_MARKER").unwrap() < context.find("SOURCE_1_MARKER").unwrap());
+    assert!(context.len() <= MAX_CONTEXT_BYTES);
+}
+
+#[tokio::test]
+async fn historical_context_respects_bytes_and_current_uploads_never_silently_truncate() {
+    let (state, _directory, owner, _) = fixture().await;
+    let mut history = Vec::new();
+    let mut ids = Vec::new();
+    for number in 0..3 {
+        let text = format!("LARGE_SOURCE_{number}_{}", "x".repeat(64000));
+        let id = file(&state, &owner, &format!("large-{number}.txt"), &text).await;
+        history.push(message(
+            state
+                .message_attachments(&owner, &[id.clone()])
+                .await
+                .unwrap()
+                .remove(0),
+        ));
+        ids.push(id);
+    }
+    let context = state
+        .conversation_chat_context(&owner, &[], &history)
+        .await
+        .unwrap();
+    assert!(context.contains("LARGE_SOURCE_2_"));
+    assert!(!context.contains("LARGE_SOURCE_0_"));
+    assert!(context.contains("部分较早资料未载入"));
+    assert!(context.len() <= MAX_CONTEXT_BYTES);
+    assert!(state
+        .conversation_chat_context(&owner, &ids, &[])
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn deleted_and_foreign_uploads_are_unavailable_without_reading_their_text() {
+    let (state, _directory, owner, other) = fixture().await;
+    let id = file(&state, &owner, "deleted-note.txt", "DELETED_SECRET_MARKER").await;
+    let mut history = vec![message(
+        state
+            .message_attachments(&owner, &[id.clone()])
+            .await
+            .unwrap()
+            .remove(0),
+    )];
+    sqlx::query("DELETE FROM uploads WHERE id=$1 AND user_id=$2")
+        .bind(&id)
+        .bind(&owner)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    state
+        .refresh_message_attachments(&owner, &mut history)
+        .await
+        .unwrap();
+    assert!(history[0].attachments[0].unavailable);
+    assert_eq!(history[0].attachments[0].name, "deleted-note.txt");
+    let context = state
+        .conversation_chat_context(&owner, &[], &history)
+        .await
+        .unwrap();
+    assert!(!context.contains("DELETED_SECRET_MARKER"));
+    assert!(context.contains("unavailable="));
+    let foreign = file(
+        &state,
+        &other,
+        "foreign-private-name.txt",
+        "FOREIGN_SECRET_MARKER",
+    )
+    .await;
+    assert_eq!(
+        state
+            .message_attachments(&owner, &[foreign.clone()])
+            .await
+            .unwrap_err()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    history[0].attachments[0].upload_id = foreign;
+    let context = state
+        .conversation_chat_context(&owner, &[], &history)
+        .await
+        .unwrap();
+    assert!(!context.contains("FOREIGN_SECRET_MARKER"));
+    assert!(!context.contains("foreign-private-name"));
+}

@@ -11,6 +11,8 @@ pub struct Repository {
     pub(crate) pool: AnyPool,
 }
 
+pub const MAX_TASK_ATTEMPTS: i64 = 3;
+
 impl Repository {
     pub fn pool(&self) -> AnyPool {
         self.pool.clone()
@@ -37,7 +39,36 @@ impl Repository {
     }
 
     pub async fn memories(&self, user_id: &str) -> Result<Vec<Memory>, DomainError> {
-        self.resources(user_id, "memory").await
+        Ok(self.memories_page(user_id, None, 0, 500).await?.0)
+    }
+    pub async fn memories_page(
+        &self,
+        user_id: &str,
+        kind: Option<&str>,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Memory>, Option<i64>), DomainError> {
+        validate_page(offset, limit)?;
+        if let Some(kind) = kind {
+            memory_kind(kind)?;
+        }
+        let mut connection = self.pool.acquire().await?;
+        // Memory categories live in JSON; apply them in SQL before the page limit.
+        let category = if connection.backend_name() == "PostgreSQL" {
+            "CAST(body AS JSONB)->>'kind'"
+        } else {
+            "json_extract(body, '$.kind')"
+        };
+        let query = format!("SELECT body FROM resources WHERE user_id=$1 AND kind='memory' AND ($2='' OR {category}=$2) ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4");
+        let rows = sqlx::query(&query)
+            .bind(user_id).bind(kind.unwrap_or(""))
+            .bind(limit + 1).bind(offset)
+            .fetch_all(&mut *connection).await?;
+        let items = rows.into_iter().map(|row| {
+            serde_json::from_str(row.get::<&str, _>("body"))
+                .map_err(|e| DomainError::Internal(e.to_string()))
+        }).collect::<Result<Vec<Memory>, _>>()?;
+        Ok(finish_page(items, offset, limit))
     }
     pub async fn create_memory(
         &self,
@@ -81,7 +112,11 @@ impl Repository {
             memory.title = validate_text(&value, "标题", 120)?;
         }
         if let Some(value) = input.content {
-            memory.content = validate_text(&value, "记忆内容", 10000)?;
+            // Previously created overlong memories must remain editable without
+            // requiring the user to discard their original information.
+            if value != old.content {
+                memory.content = validate_text(&value, "记忆内容", 10000)?;
+            }
         }
         if let Some(value) = input.kind {
             memory_kind(&value)?;
@@ -140,15 +175,29 @@ impl Repository {
         self.task(user_id, &id).await
     }
     pub async fn tasks(&self, user_id: &str) -> Result<Vec<Task>, DomainError> {
-        sqlx::query(
-            "SELECT * FROM tasks WHERE user_id=$1 ORDER BY created_at DESC,id DESC LIMIT 500",
+        Ok(self.tasks_page(user_id, "all", 0, 500).await?.0)
+    }
+    pub async fn tasks_page(
+        &self,
+        user_id: &str,
+        status: &str,
+        offset: i64,
+        limit: i64,
+    ) -> Result<(Vec<Task>, Option<i64>), DomainError> {
+        validate_page(offset, limit)?;
+        if !["all", "active", "done", "queued", "running", "waiting_approval", "succeeded", "failed", "cancelled", "uncertain"].contains(&status) {
+            return Err(DomainError::Validation("无效的任务状态".into()));
+        }
+        let items = sqlx::query(
+            "SELECT * FROM tasks WHERE user_id=$1 AND ($2='all' OR status=$2 OR ($2='active' AND status IN ('queued','running','waiting_approval','uncertain')) OR ($2='done' AND status='succeeded')) ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4",
         )
-        .bind(user_id)
+        .bind(user_id).bind(status).bind(limit + 1).bind(offset)
         .fetch_all(&self.pool)
         .await?
         .iter()
         .map(task_from)
-        .collect()
+        .collect::<Result<Vec<Task>, _>>()?;
+        Ok(finish_page(items, offset, limit))
     }
     pub async fn task(&self, user_id: &str, id: &str) -> Result<Task, DomainError> {
         let row = sqlx::query("SELECT * FROM tasks WHERE user_id=$1 AND id=$2")
@@ -186,7 +235,7 @@ impl Repository {
             let id: String = row.get("id");
             let attempts: i64 = row.get("attempts");
             let user_id: String = row.get("user_id");
-            if attempts >= 3 {
+            if attempts >= MAX_TASK_ATTEMPTS {
                 sqlx::query("UPDATE tasks SET status='failed',error='任务执行多次中断，请重新发起',updated_at=$1 WHERE id=$2 AND attempts=$3 AND status='running' AND claimed_until<$1").bind(time).bind(&id).bind(attempts).execute(&self.pool).await?;
                 continue;
             }
@@ -264,9 +313,23 @@ impl Repository {
         error: &str,
         retry: bool,
     ) -> Result<bool, DomainError> {
-        let retry = retry && claim.attempt < 3;
+        let retry = retry && claim.attempt < MAX_TASK_ATTEMPTS;
         Ok(sqlx::query("UPDATE tasks SET status=$1,error=$2,progress=0,next_attempt_at=$3,claimed_until=0,updated_at=$4 WHERE id=$5 AND user_id=$6 AND status='running' AND attempts=$7 AND claimed_until>=$4")
             .bind(if retry{"queued"}else{"failed"}).bind(error.chars().take(500).collect::<String>()).bind(now()+5*2_i64.pow(claim.attempt.min(6)as u32)).bind(now()).bind(&claim.task.id).bind(&claim.user_id).bind(claim.attempt).execute(&self.pool).await?.rows_affected()>0)
+    }
+
+    /// Persist the selected execution route before generation, including failed attempts.
+    pub async fn record_task_model_mode(
+        &self,
+        claim: &ClaimedTask,
+        mode: &str,
+    ) -> Result<bool, DomainError> {
+        if !matches!(mode, "local" | "llm") {
+            return Err(DomainError::Validation("任务模型模式无效".into()));
+        }
+        Ok(sqlx::query("UPDATE tasks SET model_mode=$1 WHERE id=$2 AND user_id=$3 AND status='running' AND attempts=$4 AND claimed_until>=$5 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=tasks.user_id AND c.disabled<>0)")
+            .bind(mode).bind(&claim.task.id).bind(&claim.user_id).bind(claim.attempt).bind(now())
+            .execute(&self.pool).await?.rows_affected() == 1)
     }
     pub async fn schedules(&self, user_id: &str) -> Result<Vec<Schedule>, DomainError> {
         sqlx::query("SELECT * FROM schedules WHERE user_id=$1 ORDER BY created_at DESC")
@@ -319,12 +382,20 @@ impl Repository {
         let previous_frequency = old.frequency.clone();
         let frequency = input.frequency.unwrap_or(old.frequency);
         let time = input.time.unwrap_or(old.time);
-        let timezone = input.timezone.unwrap_or(old.timezone);
+        let timezone = input.timezone.unwrap_or_else(|| old.timezone.clone());
         let next = if frequency == "weekly" && previous_frequency == "weekly" {
             let anchor = chrono::DateTime::parse_from_rfc3339(&old.next_run_at)
                 .map_err(|_| DomainError::Internal("计划时间无效".into()))?
                 .timestamp();
-            next_weekly_execution(&time, &timezone, anchor, now())?
+            // The stored occurrence anchors a weekday in its original timezone.
+            // Reinterpreting its instant in the new timezone can shift that weekday.
+            let old_zone: chrono_tz::Tz = old.timezone.parse()
+                .map_err(|_| DomainError::Validation("无效的 IANA 时区".into()))?;
+            use chrono::Datelike;
+            let weekday = chrono::DateTime::from_timestamp(anchor, 0)
+                .ok_or_else(|| DomainError::Validation("无效的计划日期".into()))?
+                .with_timezone(&old_zone).weekday();
+            next_weekday_execution(&time, &timezone, weekday, now())?
         } else {
             next_execution(&frequency, &time, &timezone, now(), false)?
         };
@@ -380,24 +451,12 @@ impl Repository {
         Ok(count)
     }
     pub async fn conversations(&self, user_id: &str) -> Result<Vec<Conversation>, DomainError> {
-        let rows = sqlx::query("SELECT body FROM resources WHERE user_id=$1 AND kind='conversation' ORDER BY updated_at DESC,id DESC LIMIT 500")
-            .bind(user_id).fetch_all(&self.pool).await?;
-        let mut conversations = rows
-            .into_iter()
-            .map(|row| {
-                serde_json::from_str::<Conversation>(row.get::<&str, _>("body"))
-                    .map_err(|error| DomainError::Internal(error.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        // Resource timestamps retain second precision for existing databases;
-        // the conversation timestamp also orders activity within the same second.
-        conversations.sort_by(|a, b| {
-            chrono::DateTime::parse_from_rfc3339(&b.updated_at)
-                .ok()
-                .cmp(&chrono::DateTime::parse_from_rfc3339(&a.updated_at).ok())
-                .then_with(|| b.id.cmp(&a.id))
-        });
-        Ok(conversations)
+        Ok(self.conversations_page(user_id, 0, 500).await?.0)
+    }
+    pub async fn conversations_page(
+        &self, user_id: &str, offset: i64, limit: i64,
+    ) -> Result<(Vec<Conversation>, Option<i64>), DomainError> {
+        self.resources_page(user_id, "conversation", None, offset, limit).await
     }
     pub async fn conversation(&self, user_id: &str, id: &str) -> Result<Conversation, DomainError> {
         self.resource(user_id, "conversation", id).await
@@ -490,12 +549,34 @@ impl Repository {
         turn: &ChatTurn,
         input_fingerprint: &str,
     ) -> Result<(), DomainError> {
+        let mut memory = turn.memory.clone();
+        if let Some(memory) = &mut memory {
+            memory.content = validate_text(&memory.content, "记忆内容", 10000)?;
+            memory.title = validate_text(&memory.title, "标题", 120)?;
+            memory_kind(&memory.kind)?;
+        }
         let request_key = turn
             .request_id
             .as_deref()
             .map(|request_id| chat_request_key(user_id, request_id))
             .transpose()?;
         let mut transaction = self.pool.begin().await?;
+        for message in [&turn.user_message, &turn.assistant_message] {
+            if message.attachments.len() > 5 {
+                return Err(DomainError::Validation("每条消息最多附带 5 个附件".into()));
+            }
+            for attachment in &message.attachments {
+                let owned: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM uploads WHERE user_id=$1 AND id=$2")
+                        .bind(user_id)
+                        .bind(&attachment.upload_id)
+                        .fetch_one(&mut *transaction)
+                        .await?;
+                if owned != 1 {
+                    return Err(DomainError::NotFound);
+                }
+            }
+        }
         if let Some(key) = request_key {
             let changed=sqlx::query("UPDATE chat_requests SET response=$1 WHERE request_key=$2 AND user_id=$3 AND response IS NULL AND EXISTS(SELECT 1 FROM chat_request_inputs i WHERE i.request_key=$2 AND i.user_id=$3 AND i.fingerprint=$4)")
                 .bind(turn.response.to_string()).bind(key).bind(user_id).bind(auth::hash_token(input_fingerprint)).execute(&mut *transaction).await?.rows_affected();
@@ -524,7 +605,7 @@ impl Repository {
                 serde_json::to_string(&turn.assistant_message),
             ),
         ];
-        if let Some(memory) = &turn.memory {
+        if let Some(memory) = &memory {
             resources.push(("memory", memory.id.clone(), serde_json::to_string(memory)));
         }
         for (kind, id, body) in resources {
@@ -580,11 +661,21 @@ impl Repository {
     pub async fn artifacts(&self, user_id: &str) -> Result<Vec<Artifact>, DomainError> {
         self.resources(user_id, "artifact").await
     }
+    pub async fn artifacts_page(
+        &self, user_id: &str, offset: i64, limit: i64,
+    ) -> Result<(Vec<Artifact>, Option<i64>), DomainError> {
+        self.resources_page(user_id, "artifact", None, offset, limit).await
+    }
     pub async fn artifact(&self, user_id: &str, id: &str) -> Result<Artifact, DomainError> {
         self.resource(user_id, "artifact", id).await
     }
     pub async fn notifications(&self, user_id: &str) -> Result<Vec<Notification>, DomainError> {
         self.resources(user_id, "notification").await
+    }
+    pub async fn notifications_page(
+        &self, user_id: &str, read: Option<bool>, offset: i64, limit: i64,
+    ) -> Result<(Vec<Notification>, Option<i64>), DomainError> {
+        self.resources_page(user_id, "notification", read, offset, limit).await
     }
     pub async fn read_notification(&self, user_id: &str, id: &str) -> Result<(), DomainError> {
         let mut notification: Notification = self.resource(user_id, "notification", id).await?;
@@ -656,6 +747,11 @@ impl Repository {
         .await?;
         sqlx::raw_sql(include_str!(
             "../../../migrations/sqlite/008_chat_request_inputs.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/009_agent_event_cursors.sql"
         ))
         .execute(&pool)
         .await?;
@@ -797,14 +893,41 @@ impl Repository {
         user_id: &str,
         kind: &str,
     ) -> Result<Vec<T>, DomainError> {
-        let rows = sqlx::query("SELECT body FROM resources WHERE user_id=$1 AND kind=$2 ORDER BY created_at DESC,id DESC LIMIT 500")
-            .bind(user_id).bind(kind).fetch_all(&self.pool).await?;
-        rows.into_iter()
+        Ok(self.resources_page(user_id, kind, None, 0, 500).await?.0)
+    }
+    async fn resources_page<T: DeserializeOwned>(
+        &self, user_id: &str, kind: &str, read: Option<bool>, offset: i64, limit: i64,
+    ) -> Result<(Vec<T>, Option<i64>), DomainError> {
+        validate_page(offset, limit)?;
+        let mut connection = self.pool.acquire().await?;
+        let postgres = connection.backend_name() == "PostgreSQL";
+        let query = if kind == "conversation" {
+            let activity = if postgres { "CAST(body AS JSONB)->>'updated_at'" } else { "json_extract(body, '$.updated_at')" };
+            let seconds = if postgres { "EXTRACT(EPOCH FROM CAST(whole_seconds AS TIMESTAMPTZ))" } else { "CAST(strftime('%s', whole_seconds) AS BIGINT)" };
+            // Sort activity before pagination. Split RFC3339 seconds and nanoseconds:
+            // SQLite Julian dates and PostgreSQL timestamps both lose subsecond precision.
+            format!("WITH activity_rows AS (
+                SELECT body,id,{activity} AS activity FROM resources WHERE user_id=$1 AND kind=$2 AND $3=-1
+            ), normalized AS (
+                SELECT body,id,
+                    substr(activity,1,19) || CASE WHEN upper(substr(activity,length(activity),1))='Z' THEN 'Z' ELSE substr(activity,length(activity)-5,6) END AS whole_seconds,
+                    CASE WHEN substr(activity,20,1)='.' THEN substr(substr(activity,21,length(activity)-20-CASE WHEN upper(substr(activity,length(activity),1))='Z' THEN 1 ELSE 6 END) || '000000000',1,9) ELSE '000000000' END AS fractional_seconds
+                FROM activity_rows
+            ) SELECT body FROM normalized ORDER BY {seconds} DESC,fractional_seconds DESC,id DESC LIMIT $4 OFFSET $5")
+        } else {
+            let read_value = if postgres { "CASE WHEN CAST(body AS JSONB)->>'read'='true' THEN 1 ELSE 0 END" } else { "json_extract(body, '$.read')" };
+            format!("SELECT body FROM resources WHERE user_id=$1 AND kind=$2 AND ($3=-1 OR {read_value}=$3) ORDER BY created_at DESC,id DESC LIMIT $4 OFFSET $5")
+        };
+        let rows = sqlx::query(&query).bind(user_id).bind(kind)
+            .bind(read.map(i64::from).unwrap_or(-1)).bind(limit + 1).bind(offset)
+            .fetch_all(&mut *connection).await?;
+        let items = rows.into_iter()
             .map(|row| {
                 serde_json::from_str(row.get::<&str, _>("body"))
                     .map_err(|e| DomainError::Internal(e.to_string()))
             })
-            .collect()
+            .collect::<Result<Vec<T>, _>>()?;
+        Ok(finish_page(items, offset, limit))
     }
     pub(crate) async fn resource<T: DeserializeOwned>(
         &self,
@@ -843,6 +966,19 @@ impl Repository {
 
 fn chat_request_key(user_id: &str, request_id: &str) -> Result<String, DomainError> {
     Ok(format!("{user_id}:{}", validate_text(request_id, "请求编号", 120)?))
+}
+
+fn validate_page(offset: i64, limit: i64) -> Result<(), DomainError> {
+    if offset < 0 || offset > i64::MAX - 500 || !(1..=500).contains(&limit) {
+        return Err(DomainError::Validation("分页参数无效：offset 必须非负，limit 必须为 1 至 500".into()));
+    }
+    Ok(())
+}
+
+fn finish_page<T>(mut items: Vec<T>, offset: i64, limit: i64) -> (Vec<T>, Option<i64>) {
+    let next = (items.len() > limit as usize).then_some(offset + limit);
+    items.truncate(limit as usize);
+    (items, next)
 }
 
 fn user_from(row: &AnyRow) -> User {
@@ -985,6 +1121,18 @@ pub fn next_weekly_execution(
         .ok_or_else(|| DomainError::Validation("无效的计划日期".into()))?
         .with_timezone(&zone)
         .weekday();
+    next_weekday_execution(time, timezone, weekday, after)
+}
+
+fn next_weekday_execution(
+    time: &str,
+    timezone: &str,
+    weekday: chrono::Weekday,
+    after: i64,
+) -> Result<i64, DomainError> {
+    use chrono::Datelike;
+    let zone: chrono_tz::Tz = timezone.parse()
+        .map_err(|_| DomainError::Validation("无效的 IANA 时区".into()))?;
     let mut candidate = next_execution("daily", time, timezone, after, false)?;
     for _ in 0..7 {
         if chrono::DateTime::from_timestamp(candidate, 0)

@@ -32,6 +32,7 @@ fn message(conversation_id: &str, role: &str, at: &str) -> Message {
         content: format!("Synthetic {role}"),
         created_at: at.into(),
         model_mode: None,
+        attachments: Vec::new(),
     }
 }
 

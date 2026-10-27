@@ -100,6 +100,7 @@ async fn invalid_input_does_not_leave_a_reserved_request() {
     for input in [
         json!({"message":"  ","client_request_id":"available-id"}),
         json!({"message":"Valid text","client_request_id":"   "}),
+        json!({"message":"记".repeat(10001),"remember":true,"client_request_id":"memory-over-limit"}),
     ] {
         let (status, _) = call(&router, &token, input).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -117,6 +118,29 @@ async fn invalid_input_does_not_leave_a_reserved_request() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn memory_and_ordinary_chat_preserve_their_distinct_supported_limits() {
+    let (router, repository, user, token) = fixture().await;
+    let (status, _) = call(
+        &router,
+        &token,
+        json!({"message":"记".repeat(10000),"remember":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let memories = repository.memories(&user).await.unwrap();
+    assert_eq!(memories.len(), 1);
+    assert_eq!(memories[0].content.chars().count(), 10000);
+    let (status, _) = call(
+        &router,
+        &token,
+        json!({"message":"x".repeat(20000),"remember":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(repository.memories(&user).await.unwrap().len(), 1);
 }
 
 #[tokio::test]

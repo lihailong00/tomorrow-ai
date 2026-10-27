@@ -143,6 +143,107 @@ async fn count(state: &AttachmentsState, table: &str) -> i64 {
 }
 
 #[tokio::test]
+async fn keyword_search_folds_unicode_and_preserves_literal_pagination_and_scope() {
+    keyword_search_checks("sqlite::memory:").await;
+}
+
+#[tokio::test]
+#[ignore = "requires the isolated local tada_qa_e05 PostgreSQL database"]
+async fn postgres_keyword_search_folds_unicode_and_preserves_literal_scope() {
+    let database = std::env::var("E05_ATTACHMENTS_TEST_DATABASE_URL")
+        .expect("explicit isolated test database required");
+    let url = reqwest::Url::parse(&database).unwrap();
+    assert!(["postgres", "postgresql"].contains(&url.scheme()));
+    assert_eq!(url.host_str(), Some("127.0.0.1"));
+    assert_eq!(url.path(), "/tada_qa_e05");
+    keyword_search_checks(&database).await;
+}
+
+async fn keyword_search_checks(database: &str) {
+    let f = Fixture::at(database).await;
+    let epoch = f.enable().await;
+    for _ in 0..4 {
+        let id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(f.sync(&id, "MÜNCHEN ΑΘΉΝΑ 100%_done! C:\\Photos", epoch).await.status(), StatusCode::OK);
+    }
+    assert_eq!(f.sync(&f.asset, "unrelated OCR", epoch).await.status(), StatusCode::OK);
+    sqlx::query("UPDATE photo_index_results SET search_text=NULL WHERE user_id=$1")
+        .bind(&f.user).execute(&f.state.pool).await.unwrap();
+    initialize_keyword_search(&f.state.pool).await.unwrap();
+    let all = literal_matches(&f.state, &f.user, &f.device, "münchen", 100, 0).await.unwrap();
+    assert_eq!(all.len(), 4);
+    assert_eq!(literal_matches(&f.state, &f.user, &f.device, "αθήνα", 100, 0).await.unwrap(), all);
+    assert_eq!(literal_matches(&f.state, &f.user, &f.device, "%_", 100, 0).await.unwrap(), all);
+    assert_eq!(literal_matches(&f.state, &f.user, &f.device, "done! c:\\photos", 100, 0).await.unwrap(), all);
+    assert_eq!(literal_matches(&f.state, &f.user, &f.device, "münchen", 2, 0).await.unwrap(), all[..2]);
+    assert_eq!(literal_matches(&f.state, &f.user, &f.device, "münchen", 2, 2).await.unwrap(), all[2..]);
+    assert!(literal_matches(&f.state, &f.user, &uuid::Uuid::new_v4().to_string(), "münchen", 20, 0).await.unwrap().is_empty());
+    let path = format!("{}/assets?mode=keyword&q=m%C3%BCnchen", f.base());
+    let response = call(&f.state, &f.other, "GET", &path, json!(null)).await;
+    assert!(body(response).await["items"].as_array().unwrap().is_empty());
+    assert_eq!(body(f.call("GET", &path, json!(null)).await).await["items"].as_array().unwrap().len(), 4);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn legacy_keyword_search_backfills_multiple_batches_and_preserves_source() {
+    let repo = Repository::connect("sqlite::memory:").await.unwrap();
+    let pool = repo.pool();
+    sqlx::query("CREATE TABLE photo_index_results(user_id TEXT NOT NULL,device_id TEXT NOT NULL,asset_id TEXT NOT NULL,kind TEXT NOT NULL,processor TEXT NOT NULL,content TEXT NOT NULL,PRIMARY KEY(user_id,device_id,asset_id,kind))")
+        .execute(&pool).await.unwrap();
+    for i in 0..257 {
+        sqlx::query("INSERT INTO photo_index_results(user_id,device_id,asset_id,kind,processor,content)VALUES('legacy-user','legacy-device',$1,'ocr','device','MÜNCHEN ΑΘΉΝΑ 100%_!')")
+            .bind(i.to_string()).execute(&pool).await.unwrap();
+    }
+    initialize(&pool).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM photo_index_results WHERE content='MÜNCHEN ΑΘΉΝΑ 100%_!' AND search_text='münchen αθήνα 100%_!'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(count, 257);
+    initialize_keyword_search(&pool).await.unwrap();
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM photo_index_results WHERE search_text IS NULL").fetch_one(&pool).await.unwrap(), 0);
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn keyword_backfill_cannot_resurrect_deleted_or_overwrite_resynced_rows() {
+    let f = Fixture::new().await;
+    let epoch = f.enable().await;
+    assert_eq!(f.sync(&f.asset, "OLD MÜNCHEN", epoch).await.status(), StatusCode::OK);
+    sqlx::query("UPDATE photo_index_results SET search_text=NULL WHERE user_id=$1")
+        .bind(&f.user).execute(&f.state.pool).await.unwrap();
+    let pending = sqlx::query_as::<_, (String, String, String, String, String)>("SELECT user_id,device_id,asset_id,kind,content FROM photo_index_results WHERE user_id=$1")
+        .bind(&f.user).fetch_all(&f.state.pool).await.unwrap();
+    assert_eq!(f.sync(&f.asset, "NEW ΑΘΉΝΑ", epoch).await.status(), StatusCode::OK);
+    backfill_keyword_batch(&f.state.pool, &pending).await.unwrap();
+    assert_eq!(literal_matches(&f.state, &f.user, &f.device, "new αθήνα", 20, 0).await.unwrap(), vec![f.asset.clone()]);
+    f.call("DELETE", &f.base(), json!(null)).await;
+    backfill_keyword_batch(&f.state.pool, &pending).await.unwrap();
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM photo_index_results WHERE user_id=$1").bind(&f.user).fetch_one(&f.state.pool).await.unwrap(), 0);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn keyword_recent_window_preserves_global_order_and_older_matches() {
+    let f = Fixture::new().await;
+    let epoch = f.enable().await;
+    for _ in 0..30 {
+        let id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(f.sync(&id, "MÜNCHEN", epoch).await.status(), StatusCode::OK);
+    }
+    let all = literal_matches(&f.state, &f.user, &f.device, "münchen", 100, 0).await.unwrap();
+    assert_eq!(all.len(), 30);
+    assert_eq!(literal_matches(&f.state, &f.user, &f.device, "münchen", 20, 0).await.unwrap(), all[..20]);
+    assert_eq!(literal_matches(&f.state, &f.user, &f.device, "münchen", 20, 20).await.unwrap(), all[20..]);
+    for _ in 0..270 {
+        let id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(f.sync(&id, "unrelated recent photo", epoch).await.status(), StatusCode::OK);
+    }
+    assert_eq!(literal_matches(&f.state, &f.user, &f.device, "münchen", 20, 0).await.unwrap(), all[..20]);
+    assert_eq!(literal_matches(&f.state, &f.user, &f.device, "münchen", 20, 20).await.unwrap(), all[20..]);
+    f.cleanup().await;
+}
+
+#[tokio::test]
 async fn semantic_search_finds_nonliteral_matches_caches_calls_and_isolates_users() {
     semantic_search_checks("sqlite::memory:", false).await;
 }

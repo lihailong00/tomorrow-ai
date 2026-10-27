@@ -57,7 +57,9 @@ fn docx_paired_and_empty_separators_extract_equivalent_text() {
     let prefix = r#"<w:document xmlns:w="word"><w:p><w:r><w:t>one</w:t>"#;
     let suffix = r#"<w:t>four</w:t></w:r></w:p></w:document>"#;
     let empty = format!("{prefix}<w:tab/><w:t>two</w:t><w:br/><w:t>three</w:t><w:cr/>{suffix}");
-    let paired = format!("{prefix}<w:tab></w:tab><w:t>two</w:t><w:br></w:br><w:t>three</w:t><w:cr></w:cr>{suffix}");
+    let paired = format!(
+        "{prefix}<w:tab></w:tab><w:t>two</w:t><w:br></w:br><w:t>three</w:t><w:cr></w:cr>{suffix}"
+    );
     assert_eq!(document(&empty), "one\ttwo\nthree\nfour");
     assert_eq!(document(&paired), document(&empty));
 }
@@ -102,6 +104,75 @@ fn xlsx_reads_workbook_order_shared_and_inline_strings_sparse_addresses_and_cach
     assert!(text.find("进度 & 计划").unwrap() < text.find("空表").unwrap());
     assert!(text.contains("A2\t客户甲方\nD2\t周五\nF2\t30\nG2\ttrue\nH2\t[公式，无缓存结果]"));
     assert!(!text.contains("https://example.test"));
+}
+
+fn shared_string_workbook(strings: &str, cells: &str) -> Vec<u8> {
+    let sheet = format!("<worksheet><sheetData><row r=\"1\">{cells}</row></sheetData></worksheet>");
+    archive(&[
+        ("[Content_Types].xml", XLS_CONTENT),
+        (
+            "xl/workbook.xml",
+            r#"<workbook xmlns:r="relationships"><sheets><sheet name="中文计划" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            r#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+        ),
+        ("xl/sharedStrings.xml", strings),
+        ("xl/worksheets/sheet1.xml", &sheet),
+    ])
+}
+
+#[test]
+fn xlsx_empty_shared_strings_preserve_indices_and_rich_text() {
+    let cells = r#"<c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1" t="s"><v>3</v></c><c r="E1" t="s"><v>4</v></c><c r="F1" t="s"><v>5</v></c><c r="G1" t="s"><v>6</v></c><c r="H1" t="s"><v>3</v></c>"#;
+    let mut previous = None;
+    for empty in ["<si/>", "<si></si>", "<si><t/></si>", "<si><t></t></si>"] {
+        let strings = format!(
+            r#"<sst>{empty}<si><t>春节计划</t></si>{empty}<si><r><t>春</t></r><r><t/></r><r><t>节 &amp; 计划</t></r><rPh sb="0" eb="1"><t>chun</t></rPh><rPh/><r><t>2027</t></r></si>{empty}<si><t>2027-02-06</t></si>{empty}</sst>"#
+        );
+        let bytes = shared_string_workbook(&strings, cells);
+        let text = extract(&upload("plan.xlsx", &bytes), &bytes).unwrap();
+        assert!(text.ends_with("A1\t\nB1\t春节计划\nC1\t\nD1\t春节 & 计划2027\nE1\t\nF1\t2027-02-06\nG1\t\nH1\t春节 & 计划2027"));
+        if let Some(previous) = &previous {
+            assert_eq!(&text, previous);
+        }
+        previous = Some(text);
+    }
+}
+
+#[test]
+fn xlsx_empty_shared_strings_obey_item_limit_without_padding_indices() {
+    let cells = format!(
+        r#"<c r="A1" t="s"><v>{}</v></c><c r="B1" t="s"><v>0</v></c>"#,
+        MAX_STRINGS - 1
+    );
+    for (empty_count, expected_error) in [
+        (MAX_STRINGS - 1, None),
+        (MAX_STRINGS, Some("office_file_limit")),
+    ] {
+        let strings = format!(
+            "<sst><si><t>kept</t></si>{}</sst>",
+            "<si/>".repeat(empty_count)
+        );
+        let bytes = shared_string_workbook(&strings, &cells);
+        let result = extract(&upload("limit.xlsx", &bytes), &bytes);
+        if let Some(code) = expected_error {
+            assert_eq!(result.unwrap_err().code(), code);
+        } else {
+            assert!(result.unwrap().ends_with("A1\t\nB1\tkept"));
+        }
+    }
+    let bytes = shared_string_workbook(
+        r#"<sst count="10" uniqueCount="10"><si/></sst>"#,
+        r#"<c r="A1" t="s"><v>1</v></c>"#,
+    );
+    assert_eq!(
+        extract(&upload("invalid-index.xlsx", &bytes), &bytes)
+            .unwrap_err()
+            .code(),
+        "invalid_office_file"
+    );
 }
 
 #[test]

@@ -10,6 +10,8 @@ use crate::{auth, new_id, now, timestamp, validate_text, DomainError, Message, R
 
 const RUN_LEASE: i64 = 150;
 const MAX_RESPONSE: usize = 512 * 1024;
+const MAX_ATTEMPT_EVENTS: i64 = 500;
+const MAX_RETAINED_EVENTS: i64 = 500;
 
 #[derive(Clone)]
 pub struct AgentClient {
@@ -206,12 +208,10 @@ impl AgentClient {
 
 impl Repository {
     pub async fn next_agent_sequence(&self, run_id: &str) -> Result<i64, DomainError> {
-        let last: Option<i64> =
-            sqlx::query_scalar("SELECT MAX(sequence) FROM agent_events WHERE run_id=$1")
-                .bind(run_id)
-                .fetch_one(&self.pool)
-                .await?;
-        Ok(last.unwrap_or(0) + 1)
+        // The cursor survives display-history pruning. The fallback supports an active run
+        // created by a previous server version until its first journal callback.
+        Ok(sqlx::query_scalar("SELECT COALESCE((SELECT next_sequence FROM agent_event_cursors WHERE run_id=$1),(SELECT MAX(sequence)+1 FROM agent_events WHERE run_id=$1),1)")
+            .bind(run_id).fetch_one(&self.pool).await?)
     }
     pub async fn agent_run_summaries(&self, user_id: &str) -> Result<Vec<Value>, DomainError> {
         let rows=sqlx::query("SELECT id,conversation_id,scope,status,lease_until,created_at FROM agent_runs WHERE user_id=$1 ORDER BY created_at DESC,id DESC LIMIT 50").bind(user_id).fetch_all(&self.pool).await?;
@@ -237,14 +237,15 @@ impl Repository {
             Some((id, attempt)) => ("task", Some(id), Some(attempt)),
             None => ("chat", None, None),
         };
+        let mut tx = self.pool.begin().await?;
         let inserted = sqlx::query("INSERT INTO agent_runs(id,user_id,run_key,fingerprint,conversation_id,scope,task_id,task_attempt,token_hash,status,lease_until,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'running',$10,$11,$11)ON CONFLICT(run_key)DO NOTHING")
             .bind(&id).bind(user_id).bind(&key).bind(&fingerprint).bind(conversation_id).bind(scope)
             .bind(task_id).bind(task_attempt).bind(auth::hash_token(&token)).bind(now()+RUN_LEASE).bind(now())
-            .execute(&self.pool).await?.rows_affected();
+            .execute(&mut *tx).await?.rows_affected();
         let row = sqlx::query("SELECT * FROM agent_runs WHERE user_id=$1 AND run_key=$2")
             .bind(user_id)
             .bind(&key)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await?;
         if row.get::<String, _>("fingerprint") != fingerprint
             || row.get::<String, _>("scope") != scope
@@ -255,6 +256,7 @@ impl Repository {
         let conversation_id = row.get("conversation_id");
         let result: Option<String> = row.get("result");
         if result.is_some() {
+            tx.commit().await?;
             return Ok(RunTicket {
                 id,
                 token,
@@ -268,13 +270,18 @@ impl Repository {
             }
             let changed = sqlx::query("UPDATE agent_runs SET token_hash=$1,status='running',lease_until=$2,task_attempt=$3,error=NULL,updated_at=$4 WHERE id=$5 AND user_id=$6 AND status!='cancelled' AND (status!='running' OR lease_until<$4 OR (task_attempt IS NOT NULL AND task_attempt!=$3))")
                 .bind(auth::hash_token(&token)).bind(now()+RUN_LEASE).bind(task_attempt).bind(now()).bind(&id).bind(user_id)
-                .execute(&self.pool).await?.rows_affected();
+                .execute(&mut *tx).await?.rows_affected();
             if changed != 1 {
                 return Err(DomainError::Conflict(
                     "Agent 正在执行，请稍后查看结果".into(),
                 ));
             }
         }
+        // A retry rotates authority and resets only its logical event budget. Never reset
+        // the run identity, global sequence, or the durable business-operation journal.
+        sqlx::query("INSERT INTO agent_event_cursors(run_id,token_hash,next_sequence,attempt_events)VALUES($1,$2,COALESCE((SELECT MAX(sequence)+1 FROM agent_events WHERE run_id=$1),1),0)ON CONFLICT(run_id)DO UPDATE SET token_hash=excluded.token_hash,attempt_events=0")
+            .bind(&id).bind(auth::hash_token(&token)).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(RunTicket {
             id,
             token,
@@ -372,14 +379,65 @@ impl Repository {
         body: &Value,
     ) -> Result<(), DomainError> {
         self.agent_authority(run_id, token).await?;
-        if !(1..=500).contains(&sequence)
+        if sequence < 1
+            || sequence == i64::MAX
             || !["started", "turn", "tool_start", "tool_end", "finished"].contains(&kind)
             || body.to_string().len() > 64000
         {
             return Err(DomainError::Validation("执行事件无效".into()));
         }
+        let body = body.to_string();
+        let token_hash = auth::hash_token(token);
+        let mut tx = self.pool.begin().await?;
+        // Serializes journal writes with retry token rotation, cancellation and effects.
+        // Repeat authority inside the transaction so a callback checked before a retry
+        // cannot append after the new attempt has acquired the run.
+        let locked = sqlx::query("UPDATE agent_runs SET updated_at=updated_at WHERE id=$1 AND token_hash=$2 AND status='running' AND lease_until>=$3 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=agent_runs.user_id AND c.disabled<>0) AND (task_id IS NULL OR EXISTS(SELECT 1 FROM tasks t WHERE t.id=agent_runs.task_id AND t.user_id=agent_runs.user_id AND t.status='running' AND t.attempts=agent_runs.task_attempt AND t.claimed_until>=$3))")
+            .bind(run_id).bind(&token_hash).bind(now()).execute(&mut *tx).await?.rows_affected();
+        if locked != 1 {
+            return Err(DomainError::Forbidden);
+        }
+        sqlx::query("INSERT INTO agent_event_cursors(run_id,token_hash,next_sequence,attempt_events)SELECT $1,$2,COALESCE(MAX(sequence)+1,1),COUNT(*) FROM agent_events WHERE run_id=$1 ON CONFLICT(run_id)DO NOTHING")
+            .bind(run_id).bind(&token_hash).execute(&mut *tx).await?;
+        let cursor = sqlx::query("SELECT next_sequence,attempt_events FROM agent_event_cursors WHERE run_id=$1 AND token_hash=$2")
+            .bind(run_id).bind(&token_hash).fetch_optional(&mut *tx).await?
+            .ok_or(DomainError::Forbidden)?;
+        let next: i64 = cursor.get("next_sequence");
+        let count: i64 = cursor.get("attempt_events");
+        if sequence < next && sequence >= next - count {
+            // Retried delivery of the same current-attempt event is harmless. Changed or
+            // prior-attempt sequences cannot overwrite the trace or reset its budget.
+            let existing =
+                sqlx::query("SELECT kind,body FROM agent_events WHERE run_id=$1 AND sequence=$2")
+                    .bind(run_id)
+                    .bind(sequence)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if existing.is_some_and(|row| {
+                row.get::<String, _>("kind") == kind && row.get::<String, _>("body") == body
+            }) {
+                tx.commit().await?;
+                return Ok(());
+            }
+        }
+        if sequence != next {
+            return Err(DomainError::Conflict("执行事件顺序无效".into()));
+        }
+        if count >= MAX_ATTEMPT_EVENTS {
+            return Err(DomainError::Validation(
+                "本次执行事件已达上限，请重试".into(),
+            ));
+        }
         sqlx::query("INSERT INTO agent_events(run_id,sequence,kind,body,created_at)VALUES($1,$2,$3,$4,$5)ON CONFLICT(run_id,sequence)DO NOTHING")
-            .bind(run_id).bind(sequence).bind(kind).bind(body.to_string()).bind(now()).execute(&self.pool).await?;
+            .bind(run_id).bind(sequence).bind(kind).bind(body).bind(now()).execute(&mut *tx).await?;
+        sqlx::query("UPDATE agent_event_cursors SET next_sequence=$1,attempt_events=attempt_events+1 WHERE run_id=$2")
+            .bind(sequence + 1).bind(run_id).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM agent_events WHERE run_id=$1 AND sequence<=$2")
+            .bind(run_id)
+            .bind(sequence - MAX_RETAINED_EVENTS)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 

@@ -803,12 +803,12 @@ async fn callback(
     let (status, message) = match result {
         Ok(true) => (
             StatusCode::OK,
-            "授权完成。请返回 Tomorrow AI 并刷新连接列表。",
+            "授权完成。请返回妥啦并刷新连接列表。",
         ),
-        Ok(false) => (StatusCode::OK, "你已取消本次授权。请返回 Tomorrow AI。"),
+        Ok(false) => (StatusCode::OK, "你已取消本次授权。请返回妥啦。"),
         Err(error) => (error.status, error.message),
     };
-    (status,[(header::CACHE_CONTROL,"no-store"),(header::REFERRER_POLICY,"no-referrer"),(header::CONTENT_SECURITY_POLICY,"default-src 'none'; frame-ancestors 'none'")],Html(format!("<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Tomorrow AI</title><body><h1>Tomorrow AI</h1><p>{message}</p></body></html>"))).into_response()
+    (status,[(header::CACHE_CONTROL,"no-store"),(header::REFERRER_POLICY,"no-referrer"),(header::CONTENT_SECURITY_POLICY,"default-src 'none'; frame-ancestors 'none'")],Html(format!("<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>妥啦</title><body><h1>妥啦</h1><p>{message}</p></body></html>"))).into_response()
 }
 
 #[cfg(test)]
