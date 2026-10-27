@@ -34,6 +34,16 @@
 .provider-inherit-note p { margin: 0; line-height: 1.8; }
 .provider-inherit-note small { display: block; color: #9ba5b7; }
 .provider-error { color: #b85e65; background: #fff5f5; padding: 12px 15px; border-radius: 10px; font-size: 12px; }
+.provider-test { border-top: 1px solid #edf0f6; margin-top: 19px; padding-top: 19px; }
+.provider-test-actions { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.provider-test-actions > p { margin: 0; font-size: 11px; line-height: 1.8; color: #8c98ae; }
+.provider-test-actions small { display: block; color: #a2aabd; font-size: 10px; }
+.provider-test-sample { margin: 13px 0 0; font-size: 11px; line-height: 1.8; color: #8b98af; }
+.provider-test-result { margin-top: 15px; padding: 13px 16px; border-radius: 11px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 12px; }
+.provider-test-result strong { font-weight: 500; }
+.provider-test-result span { font-size: 10px; opacity: .8; margin-left: auto; }
+.probe-success { background: #eef7f2; color: #55856e; }
+.probe-failure { background: #fbf3ed; color: #a47a56; }
 @media (max-width: 1050px) { .provider-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 600px) {
   .provider-panel { padding: 20px 16px; }

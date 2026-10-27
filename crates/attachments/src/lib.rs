@@ -7,6 +7,8 @@ use std::{
     time::Duration,
 };
 mod asr;
+pub mod asr_probe;
+mod ai_history;
 mod office;
 mod photo_index;
 
@@ -238,6 +240,7 @@ impl AttachmentsState {
         .execute(&pool)
         .await?;
         asr::initialize(&pool).await?;
+        ai_history::initialize(&pool).await?;
         let photo_index = Arc::new(photo_index::initialize(&pool).await?);
         let photo_vision = Arc::new(photo_index::vision::initialize(&pool).await?);
         let client = reqwest::Client::builder()
@@ -579,7 +582,8 @@ pub fn router(state: AttachmentsState) -> Router {
         .route("/v1/uploads/{id}/transcribe", post(transcribe))
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state.clone())
-        .merge(photo_index::router(state))
+        .merge(photo_index::router(state.clone()))
+        .merge(ai_history::router(state))
 }
 
 async fn list(

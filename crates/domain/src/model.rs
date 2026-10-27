@@ -11,6 +11,9 @@ const DEEPSEEK_MODEL: &str = "deepseek-flash";
 const RESPONSE_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 const SYSTEM_INSTRUCTION: &str = "你是妥啦手机助手。请用清晰、简洁的中文回答。只依据提供的对话和用户记忆作答；没有工具执行结果时，不得声称已经浏览网页、读取邮件、创建日程、发送消息或完成其他外部操作。不要虚构引用、事实、权限或操作结果。";
 
+#[cfg(test)]
+mod probe_tests;
+
 // Deliberately no Debug implementation: provider credentials must not enter logs.
 #[derive(Clone)]
 pub struct LlmProvider {
@@ -110,6 +113,98 @@ pub struct ModelReply {
     pub content: String,
     pub mode: String,
     pub provider: Option<String>,
+}
+
+/// Deliberately contains no provider response, endpoint, request, or credential.
+#[derive(Serialize)]
+pub struct ModelProbe {
+    pub ok: bool,
+    pub code: &'static str,
+    pub message: &'static str,
+    pub elapsed_ms: u64,
+    pub upstream_status: Option<u16>,
+    pub model: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+}
+
+impl LlmProvider {
+    /// One bounded completion, with no tools, user data, persistence or retries.
+    pub async fn probe_connection(&self) -> ModelProbe {
+        let start = std::time::Instant::now();
+        let mut result = ModelProbe {
+            ok: false, code: "not_configured", message: "请先选择模型并配置对应服务商的 API Key。",
+            elapsed_ms: 0, upstream_status: None, model: self.model.clone(), input_tokens: None, output_tokens: None,
+        };
+        if !self.is_configured() { return result; }
+        let Ok(endpoint) = completion_endpoint(&self.base_url) else { return result; };
+        let client = Client::builder().connect_timeout(Duration::from_secs(7))
+            .timeout(Duration::from_secs(25)).redirect(Policy::none()).build();
+        let Ok(client) = client else {
+            result.code = "connection_failed"; result.message = "无法初始化安全连接，请稍后重试。"; return result;
+        };
+        let mut body = serde_json::json!({
+            "model": self.model.as_deref().unwrap_or_default(),
+            "messages": [{"role":"user","content":"Reply OK."}],
+            "max_tokens": 128, "stream": false
+        });
+        if endpoint.host_str() == Some("api.deepseek.com") && self.model.as_deref() == Some("deepseek-flash") {
+            body["thinking"] = serde_json::json!({"type":"disabled"});
+        }
+        let response = client.post(endpoint).bearer_auth(self.api_key.as_deref().unwrap_or_default())
+            .json(&body).send().await;
+        match response {
+            Err(error) => {
+                result.code = if error.is_timeout() { "timeout" } else { "connection_failed" };
+                result.message = if error.is_timeout() { "模型服务响应超时，请稍后重试。" } else { "无法连接模型服务，请检查网络、服务地址或证书。" };
+            }
+            Ok(mut response) => {
+                let status = response.status().as_u16();
+                result.upstream_status = Some(status);
+                if !response.status().is_success() {
+                    (result.code, result.message) = match status {
+                        300..=399 => ("redirect_blocked", "服务返回了重定向，已停止测试以保护密钥。"),
+                        401 | 403 => ("authentication_failed", "密钥无效或权限不足，请确认该账号已开通所选模型。"),
+                        402 => ("quota_exhausted", "服务商账户余额或可用额度不足。"),
+                        404 => ("model_not_found", "模型或接口不存在，请核对所选服务商和模型。"),
+                        429 => ("upstream_rate_limited", "服务商限流或额度不足，请稍后重试。"),
+                        400 | 422 => ("request_rejected", "服务商未接受测试请求，请检查模型和接口兼容性。"),
+                        _ => ("upstream_error", "模型服务暂时不可用，请稍后重试。"),
+                    };
+                } else {
+                    result.code = "invalid_response"; result.message = "接口可访问，但未返回有效的模型响应。";
+                    let mut bytes = Vec::new();
+                    loop {
+                        match response.chunk().await {
+                            Ok(Some(chunk)) if bytes.len() + chunk.len() <= 64 * 1024 => bytes.extend_from_slice(&chunk),
+                            Ok(None) => {
+                                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                                    let message = value.pointer("/choices/0/message");
+                                    let generated = message.is_some_and(|message| {
+                                        ["content", "reasoning_content"].iter().any(|key| message.get(key).and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty())) ||
+                                        message.get("role").and_then(|v| v.as_str()) == Some("assistant") && value.pointer("/choices/0/finish_reason").and_then(|v| v.as_str()) == Some("length")
+                                    });
+                                    if generated && value.get("error").is_none() {
+                                        result.ok = true; result.code = "connected"; result.message = "连接成功，模型已响应。";
+                                        result.input_tokens = value.pointer("/usage/prompt_tokens").and_then(|v| v.as_u64());
+                                        result.output_tokens = value.pointer("/usage/completion_tokens").and_then(|v| v.as_u64());
+                                    }
+                                }
+                                break;
+                            }
+                            Err(error) => {
+                                if error.is_timeout() { result.code = "timeout"; result.message = "读取模型响应超时，请稍后重试。"; }
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+            }
+        }
+        result.elapsed_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        result
+    }
 }
 
 impl LlmProvider {

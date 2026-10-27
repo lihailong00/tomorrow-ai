@@ -43,6 +43,25 @@ fn changes(pairs: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {
 }
 
 #[tokio::test]
+async fn credential_probe_preview_is_atomic_validated_and_never_persisted() {
+    let fixture = Fixture::new().await;
+    let store = fixture.store().await;
+    let saved = store.update(0, changes(&[
+        ("MODEL_BASE_URL", Some("https://old.example/v1")), ("MODEL_NAME", Some("saved-model")),
+        ("MODEL_API_KEY", Some("saved-private-key")),
+    ])).await.unwrap();
+    let preview = store.preview_effective_values(saved.revision, &changes(&[
+        ("MODEL_BASE_URL", Some("https://new.example/v1")), ("MODEL_API_KEY", Some("temporary-key")),
+    ])).await.unwrap();
+    assert_eq!(preview["MODEL_API_KEY"], "temporary-key");
+    let current = store.effective_values().await.unwrap();
+    assert_eq!(current["MODEL_API_KEY"], "saved-private-key");
+    assert_eq!(current["MODEL_BASE_URL"], "https://old.example/v1");
+    assert_eq!(store.revision().await.unwrap(), saved.revision);
+    assert!(matches!(store.preview_effective_values(0, &HashMap::new()).await, Err(ConfigError::Conflict)));
+}
+
+#[tokio::test]
 async fn first_boot_is_private_with_stable_identity_and_managed_keys() {
     let fixture = Fixture::new().await;
     let store = fixture.store().await;
@@ -660,7 +679,7 @@ async fn readiness_recognizes_explicit_private_keyless_models_but_never_public_k
 }
 
 #[test]
-fn startup_limits_match_pi_caps_and_are_marked_as_requiring_restart() {
+fn runtime_limits_match_pi_caps_and_apply_without_restart() {
     for (key, max) in [
         ("AGENT_MAX_TURNS", 20),
         ("AGENT_MAX_TOOLS", 40),
@@ -669,7 +688,7 @@ fn startup_limits_match_pi_caps_and_are_marked_as_requiring_restart() {
     ] {
         assert!(validate(key, &max.to_string()).is_ok());
         assert!(validate(key, &(max + 1).to_string()).is_err());
-        assert!(definition(key).unwrap().restart_required);
+        assert!(!definition(key).unwrap().restart_required);
     }
 }
 

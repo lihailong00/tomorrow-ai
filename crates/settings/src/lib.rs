@@ -323,6 +323,17 @@ impl ConfigStore {
         expected_revision: i64,
         changes: &HashMap<String, Option<String>>,
     ) -> Result<ConfigReadiness> {
+        let values = self.preview_effective_values(expected_revision, changes).await?;
+        Ok(readiness::evaluate(expected_revision, &values))
+    }
+
+    /// Trusted server-side preview, including credentials, without persisting.
+    /// Never serialize or log this map; probes may use only their allowlisted keys.
+    pub async fn preview_effective_values(
+        &self,
+        expected_revision: i64,
+        changes: &HashMap<String, Option<String>>,
+    ) -> Result<HashMap<String, String>> {
         self.validate_changes(changes)?;
         let (revision, mut stored) = self.read().await?;
         if revision != expected_revision {
@@ -338,7 +349,7 @@ impl ConfigStore {
                 }
             }
         }
-        Ok(readiness::evaluate(revision, &self.effective(&stored)))
+        Ok(self.effective(&stored))
     }
 
     pub async fn snapshot(&self) -> Result<SettingsSnapshot> {

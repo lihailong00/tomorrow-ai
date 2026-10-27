@@ -16,6 +16,7 @@ use tomorrow_domain::{auth, now, timestamp, DomainError, Repository};
 use tomorrow_settings::{ConfigError, ConfigStore};
 
 pub mod backup;
+mod model_probe;
 const COOKIE: &str = "tada_admin_session";
 const SESSION_SECONDS: i64 = 12 * 60 * 60;
 const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$ZHVtbXktc2FsdC0xMjM0NQ$2Fk2PbqQ1mQj5F0R2jXYSzOaC84n1sKUXvB+ukpQkqg";
@@ -26,6 +27,7 @@ pub struct AdminState {
     pub settings: ConfigStore,
     pub config_dir: PathBuf,
     password_jobs: Arc<Semaphore>,
+    model_probe_jobs: Arc<Semaphore>,
 }
 
 #[derive(Debug)]
@@ -103,6 +105,7 @@ impl AdminState {
             settings,
             config_dir,
             password_jobs: Arc::new(Semaphore::new(2)),
+            model_probe_jobs: Arc::new(Semaphore::new(1)),
         };
         state.initialize().await?;
         Ok(state)
@@ -236,6 +239,8 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/api/status", get(status))
         .route("/admin/api/config", get(config).patch(update_config))
         .route("/admin/api/config/check", post(check_config))
+        .route("/admin/api/config/test-model", post(model_probe::test_model))
+        .route("/admin/api/config/test-speech", post(model_probe::test_speech))
         .route("/admin/api/users", get(users).post(create_user))
         .route("/admin/api/users/{id}", axum::routing::patch(update_user))
         .route(
@@ -1406,6 +1411,43 @@ mod tests {
             body["csrf_token"].as_str().unwrap().into(),
             body["user"]["id"].as_str().unwrap().into(),
         )
+    }
+    #[tokio::test]
+    async fn model_connection_probe_requires_owner_csrf_and_never_saves_configuration() {
+        let f = fixture().await;
+        let (cookie, csrf, user_id) = owner(&f.state).await;
+        let revision = f.state.settings.revision().await.unwrap();
+        let input = json!({"expected_revision":revision,"changes":{}});
+        let path = "/admin/api/config/test-model";
+        let (status, _, _) = call(&f.state, Method::POST, path, Some(input.clone()), None, None, "https://unit.test").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _, _) = call(&f.state, Method::POST, path, Some(input.clone()), Some(&cookie), None, "https://unit.test").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, body) = call(&f.state, Method::POST, path, Some(input.clone()), Some(&cookie), Some(&csrf), "https://unit.test").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["code"], "not_configured");
+        assert_eq!(body["ok"], false);
+        let (status, _, voice) = call(&f.state, Method::POST, "/admin/api/config/test-speech", Some(input.clone()), Some(&cookie), Some(&csrf), "https://unit.test").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(voice["code"], "not_configured");
+        let (status, _, voice) = call(&f.state, Method::POST, "/admin/api/config/test-speech", Some(json!({
+            "expected_revision":revision,"changes":{"ASR_PROTOCOL":"qwen_asr","ASR_MODEL":"unsupported-model",
+            "ASR_BASE_URL":"http://127.0.0.1:9/v1","ASR_API_KEY":"fixture-temporary-private-key"}
+        })), Some(&cookie), Some(&csrf), "https://unit.test").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(voice["code"], "unsupported_model");
+        assert!(!voice.to_string().contains("fixture-temporary-private-key"));
+        assert!(!f.state.settings.effective_values().await.unwrap().contains_key("ASR_API_KEY"));
+        assert_eq!(f.state.settings.revision().await.unwrap(), revision);
+        let held = f.state.model_probe_jobs.clone().acquire_owned().await.unwrap();
+        let (status, _, _) = call(&f.state, Method::POST, path, Some(input.clone()), Some(&cookie), Some(&csrf), "https://unit.test").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        drop(held);
+        let (status, _, _) = call(&f.state, Method::POST, path, Some(json!({"expected_revision":revision,"changes":{"SMS_PROVIDER":"disabled"}})), Some(&cookie), Some(&csrf), "https://unit.test").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        sqlx::query("UPDATE admin_roles SET role='admin' WHERE user_id=$1").bind(user_id).execute(&f.state.repository.pool()).await.unwrap();
+        let (status, _, _) = call(&f.state, Method::POST, path, Some(input), Some(&cookie), Some(&csrf), "https://unit.test").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
     #[tokio::test]
     async fn setup_is_one_use_separate_session_and_cookie_is_revoked() {

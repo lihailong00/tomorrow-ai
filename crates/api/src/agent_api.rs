@@ -116,6 +116,22 @@ async fn tool(
 ) -> Result<Json<Value>> {
     let token = credentials(&state, &headers)?;
     let (user_id, _scope) = state.repository.agent_authority(&id, &token).await?;
+    if matches!(input.name.as_str(), "search_ai_history" | "read_ai_history") {
+        let attachments = state.attachments.as_ref()
+            .ok_or_else(|| DomainError::Validation("对话导入服务尚未配置".into()))?;
+        let offset = input.arguments.get("offset").and_then(Value::as_u64).unwrap_or(0).min(100_000) as usize;
+        let result = if input.name == "search_ai_history" {
+            attachments.search_ai_history(&user_id,
+                input.arguments.get("query").and_then(Value::as_str).unwrap_or(""),
+                input.arguments.get("provider").and_then(Value::as_str), offset, 20).await
+        } else {
+            let conversation = input.arguments.get("id").and_then(Value::as_str)
+                .ok_or_else(|| DomainError::Validation("缺少导入对话编号".into()))?;
+            attachments.read_ai_history(&user_id,conversation,offset,30,true).await
+        }.map_err(tomorrow_attachments::AttachmentError::into_domain)?;
+        state.repository.agent_authority(&id,&token).await?;
+        return Ok(Json(result));
+    }
     if matches!(input.name.as_str(), "list_integrations" | "search_imports" | "read_integration") {
         let integrations = state.integrations.as_ref()
             .ok_or_else(|| DomainError::Validation("手机资料接入服务尚未配置".into()))?;

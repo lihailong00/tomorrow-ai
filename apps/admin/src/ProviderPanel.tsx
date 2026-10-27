@@ -1,18 +1,23 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Icon } from "./icons";
-import type { Edit, Setting } from "./api";
+import { ApiError, type Edit, type Setting, type ProviderProbe } from "./api";
 import { credentialScopeChanged, currentService, endpoint, presets, selectionEdits, value, type Edits, type Service } from "./providers";
 
 const titles: Record<Service, string> = {
   model: "对话与思考", speech: "语音转文字", vision: "图片理解", embedding: "向量检索",
 };
-export function ProviderPanel({ service, settings, edits, onEdits }: {
+export function ProviderPanel({ service, settings, edits, onEdits, onTest }: {
   service: Service; settings: Setting[]; edits: Edits; onEdits: (changes: Edits) => void;
+  onTest?: (signal: AbortSignal) => Promise<ProviderProbe>;
 }) {
   const [custom, setCustom] = useState(false);
   const [customModel, setCustomModel] = useState(false);
   const [replacing, setReplacing] = useState(false);
   const [error, setError] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<ProviderProbe | null>(null);
+  const [testError, setTestError] = useState("");
+  const testController = useRef<AbortController | null>(null);
   const state = currentService(settings, edits, service);
   const selected = custom ? "custom" : state.id;
   const choices = presets.filter(item => item.services.includes(service));
@@ -21,6 +26,27 @@ export function ProviderPanel({ service, settings, edits, onEdits }: {
     service === "embedding" ? presets.find(preset => preset.id === "qwen-embedding")?.models : []) ?? [];
   const key = settings.find(item => item.key === state.keys.key);
   const keyEdit = edits[state.keys.key];
+  const testFingerprint = JSON.stringify(settings.filter(item => item.group === service)
+    .map(item => [item.key, item.value, item.configured, item.locked, edits[item.key]]));
+  useEffect(() => {
+    testController.current?.abort(); testController.current = null;
+    setTesting(false); setTestResult(null); setTestError("");
+    return () => { testController.current?.abort(); };
+  }, [testFingerprint]);
+  async function testConnection() {
+    if (!onTest || testing) return;
+    const controller = new AbortController();
+    testController.current = controller;
+    setTesting(true); setTestResult(null); setTestError("");
+    try {
+      const result = await onTest(controller.signal);
+      if (!controller.signal.aborted) setTestResult(result);
+    } catch (failure) {
+      if (!controller.signal.aborted) setTestError(failure instanceof ApiError ? failure.message : "暂时无法完成测试，请检查服务器连接后重试。");
+    } finally {
+      if (!controller.signal.aborted) setTesting(false);
+    }
+  }
   const showKeyInput = !key?.locked && (replacing || keyEdit?.mode === "replace" || !state.hasKey);
   const keyValue = keyEdit?.mode === "replace" ? keyEdit.value : "";
   const change = (field: string, next: string) => onEdits({ [field]: { mode: "replace", value: next } });
@@ -166,6 +192,25 @@ export function ProviderPanel({ service, settings, edits, onEdits }: {
           {!customMode && !inherited && <details className="provider-advanced"><summary>查看自动配置的接口</summary>
             <code>{state.base}</code><p>地址已自动填写，无需修改。业务空间专属域名可通过“自定义接入”设置。</p>
           </details>}
+          {onTest && <div className="provider-test">
+            <div className="provider-test-actions">
+              <button type="button" className="button button-secondary" disabled={testing}
+                onClick={() => void testConnection()} aria-label={titles[service] + "测试连接"}>
+                <Icon name={service === "speech" ? "phone" : "spark"} size={16} />
+                {testing ? (service === "speech" ? "正在校验转写…" : "正在连接模型…") : "测试连接"}
+              </button>
+              <p>{service === "speech" ? "使用内置短音频，可能产生少量语音识别费用。" : "发送一条简短测试消息，可能产生少量模型费用。"}
+                <small>测试当前填写的配置，不会自动保存。</small></p>
+            </div>
+            {service === "speech" && <p className="provider-test-sample">测试音频：“明天上午九点提醒我开会。” · 当前支持千问 ASR Flash</p>}
+            <div aria-live="polite">
+              {testResult && <div className={"provider-test-result " + (testResult.ok ? "probe-success" : "probe-failure")} role="status">
+                <strong>{testResult.ok ? "✓ " : "!"} {testResult.message}</strong>
+                <span>{Math.round(testResult.elapsed_ms).toLocaleString()} 毫秒{testResult.upstream_status ? " · HTTP " + testResult.upstream_status : ""}</span>
+              </div>}
+              {testError && <p className="provider-error" role="alert">{testError}</p>}
+            </div>
+          </div>}
         </>
       )}
       {state.keys.enabled && <div className="provider-enable">

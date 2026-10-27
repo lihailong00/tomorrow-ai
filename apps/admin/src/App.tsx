@@ -20,6 +20,7 @@ import {
   type Edit,
   type Session,
   type Setting,
+  type ProviderProbe,
   type Status,
   type User,
 } from "./api";
@@ -381,6 +382,22 @@ export function App() {
       }
     });
   }
+  async function testProvider(service: "model" | "speech", signal: AbortSignal): Promise<ProviderProbe> {
+    if (!session || !config) throw new Error("请先登录并加载配置");
+    const selected = config.settings.filter(item => item.group === service);
+    const selectedEdits = Object.fromEntries(selected.filter(item => edits[item.key]).map(item => [item.key, edits[item.key]]));
+    const issue = providerIssue(selected, selectedEdits);
+    if (issue) throw new ApiError(400, "incomplete_configuration", issue);
+    try {
+      return await request<ProviderProbe>("/config/test-" + service, {
+        method: "POST", csrf: session.csrf_token, signal,
+        body: { expected_revision: config.revision, changes: configurationChanges(selected, selectedEdits) },
+      });
+    } catch (error) {
+      if (isSessionExpired(error)) handleError(error);
+      throw error;
+    }
+  }
   async function logout() {
     await operation(async () => {
       await mutate("/logout");
@@ -650,6 +667,8 @@ export function App() {
                 <SettingsPanel
                   settings={filteredSettings}
                   edits={edits}
+                  revision={config?.revision}
+                  onTest={page === "ai" ? testProvider : undefined}
                   onEdit={(key, edit) =>
                     setEdits((prev) => ({ ...prev, [key]: edit }))
                   }
@@ -1630,10 +1649,14 @@ function SettingsPanel({
   settings,
   edits,
   onEdit,
+  onTest,
+  revision = 0,
 }: {
   settings: Setting[];
   edits: Record<string, Edit>;
   onEdit: (key: string, edit: Edit) => void;
+  revision?: number;
+  onTest?: (service: "model" | "speech", signal: AbortSignal) => Promise<ProviderProbe>;
 }) {
   const groups = useMemo(() => {
     const result = new Map<string, Setting[]>();
@@ -1665,7 +1688,8 @@ function SettingsPanel({
   return (
     <div className="settings-panels">
       {[...groups.entries()].map(([group, items]) => ["model", "speech", "vision", "embedding"].includes(group) ? (
-        <ProviderPanel key={group} service={group as Service} settings={settings} edits={edits}
+        <ProviderPanel key={group + ":" + revision} service={group as Service} settings={settings} edits={edits}
+          onTest={onTest && (group === "model" || group === "speech") ? signal => onTest(group, signal) : undefined}
           onEdits={(changes) => Object.entries(changes).forEach(([key, edit]) => onEdit(key, edit))} />
       ) : (
         <section className="card" key={group}>

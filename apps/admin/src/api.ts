@@ -18,6 +18,16 @@ export type Setting = {
   restart_required?: boolean;
 };
 export type Config = { revision: number; settings: Setting[] };
+export type ProviderProbe = {
+  ok: boolean;
+  code: string;
+  message: string;
+  elapsed_ms: number;
+  upstream_status?: number | null;
+  model?: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+};
 export type Instance = {
   id?: string;
   instance_id?: string;
