@@ -106,6 +106,56 @@ test('a stalled provider is aborted by the runtime timeout', async () => {
     error => error instanceof RunError && error.code === 'timeout');
   assert.equal(fixture.effects.length, 0);
 });
+
+test('the deadline includes initial state reads, even when a custom bridge ignores cancellation', { timeout: 2000 }, async () => {
+  const fixture = bridge(); let stateSignal: AbortSignal | undefined;
+  fixture.value.state = async signal => { stateSignal = signal; return await new Promise(() => {}); };
+  const started = performance.now();
+  await assert.rejects(executeRun(input(), settings, fixture.value, undefined,
+    { turns: 5, tools: 5, timeoutMs: 35 }, fakeStream([call, final])),
+  error => error instanceof RunError && error.code === 'timeout');
+  assert.ok(performance.now() - started < 600);
+  assert.equal(stateSignal?.aborted, true);
+  assert.equal(fixture.events.length, 0); assert.equal(fixture.effects.length, 0);
+});
+
+test('the deadline cancels started and finished journal requests without returning late success', { timeout: 2500 }, async () => {
+  for (const kind of ['started', 'finished']) {
+    const fixture = bridge(); let journalSignal: AbortSignal | undefined;
+    fixture.value.event = async (event, signal) => {
+      fixture.events.push(event);
+      if (event.kind === kind) { journalSignal = signal; await new Promise(() => {}); }
+    };
+    const started = performance.now();
+    await assert.rejects(executeRun(input(), settings, fixture.value, undefined,
+      { turns: 5, tools: 5, timeoutMs: 35 }, fakeStream([final])),
+    error => error instanceof RunError && error.code === 'timeout');
+    assert.ok(performance.now() - started < 600);
+    assert.equal(journalSignal?.aborted, true);
+  }
+});
+
+test('a timed-out tool gets the shared abort signal and cannot continue the model loop', { timeout: 2000 }, async () => {
+  const fixture = bridge(); let toolSignal: AbortSignal | undefined; let modelCalls = 0;
+  fixture.value.tool = async (_name, _args, signal) => { toolSignal = signal; return await new Promise(() => {}); };
+  await assert.rejects(executeRun(input(), settings, fixture.value, undefined,
+    { turns: 5, tools: 5, timeoutMs: 35 }, fakeStream([call, final], () => { modelCalls++; })),
+  error => error instanceof RunError && error.code === 'timeout');
+  assert.equal(toolSignal?.aborted, true);
+  assert.equal(modelCalls, 1);
+  assert.equal(fixture.events.some(event => event.kind === 'finished'), false);
+});
+
+test('caller cancellation interrupts initialization and remains classified as cancellation', { timeout: 2000 }, async () => {
+  const fixture = bridge(); const controller = new AbortController(); let stateSignal: AbortSignal | undefined;
+  fixture.value.state = async signal => { stateSignal = signal; return await new Promise(() => {}); };
+  const running = executeRun(input(), settings, fixture.value, controller.signal,
+    { turns: 5, tools: 5, timeoutMs: 1000 }, fakeStream([final]));
+  const assertion = assert.rejects(running, error => error instanceof RunError && error.code === 'cancelled');
+  await new Promise(resolve => setTimeout(resolve, 15)); controller.abort();
+  await assertion;
+  assert.equal(stateSignal?.aborted, true); assert.equal(fixture.events.length, 0);
+});
 test('a replay conflict stops the remaining batch instead of trying a new write', async () => {
   const fixture = bridge(); let attempts = 0;
   fixture.value.tool = async () => { attempts++; throw new RunError('agent_replay_conflict', 'changed replay arguments'); };

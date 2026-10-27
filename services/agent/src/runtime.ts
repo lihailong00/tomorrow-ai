@@ -14,8 +14,8 @@ export type RunInput = {
 };
 export type RunEvent = { sequence: number; kind: string; body: Record<string, unknown> };
 export type Bridge = {
-  state(): Promise<{ next_sequence: number }>;
-  event(event: RunEvent): Promise<void>;
+  state(signal?: AbortSignal): Promise<{ next_sequence: number }>;
+  event(event: RunEvent, signal?: AbortSignal): Promise<void>;
   tool(name: string, args: unknown, signal?: AbortSignal, operationIndex?: number): Promise<unknown>;
 };
 export type Limits = { turns: number; tools: number; timeoutMs: number };
@@ -91,89 +91,131 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
   if (input.tools.some(tool => ['web_search', 'web_fetch'].includes(tool.name))) {
     throw new RunError('invalid_request', '联网工具名称由 Agent 服务保留');
   }
-  let sequence = (await bridge.state()).next_sequence;
-  const emit = async (kind: string, body: Record<string, unknown>) => {
-    await bridge.event({ sequence: sequence++, kind, body });
+  const controller = new AbortController();
+  const deadline = performance.now() + limits.timeoutMs;
+  let stopped: RunError | undefined;
+  let agent: Agent | undefined;
+  const stop = (error: RunError) => {
+    if (controller.signal.aborted) return;
+    stopped = error;
+    controller.abort(error);
+    agent?.abort();
   };
-  let turns = 0, calls = 0, limitHit = false, cancelled = false, timedOut = false;
-  let replayConflict = false;
-  const toolIndexes = new Map<string, number>();
-  const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0, total_tokens: 0,
-    model_requests: 0, tool_calls: 0, pricing: 'unavailable' };
-  const web = webProvider?.session(async toolSignal => {
-    signal?.throwIfAborted(); toolSignal?.throwIfAborted();
-    await bridge.state();
-    signal?.throwIfAborted(); toolSignal?.throwIfAborted();
-  });
-  const tools: AgentTool[] = input.tools.map(definition => ({
-    name: definition.name, label: definition.name, description: definition.description,
-    parameters: definition.parameters as AgentTool['parameters'], executionMode: 'sequential',
-    execute: async (_id, args, toolSignal) => {
-      const index = (toolIndexes.get(definition.name) ?? 0) + 1;
-      toolIndexes.set(definition.name, index);
-      try {
-        const value = await bridge.tool(definition.name, args, toolSignal, index);
-        return { content: [{ type: 'text', text: safeDetail(value) }], details: { tool: definition.name } };
-      } catch (error) {
-        if (error instanceof RunError && error.code === 'agent_replay_conflict') {
-          replayConflict = true; agent.abort();
-        }
-        throw error;
-      }
-    },
-  }));
-  if (web) tools.push(...web.tools);
-  const agent = new Agent({
-    initialState: { model: settings.model, thinkingLevel: 'off', tools, messages: transcript(input, settings.model, !!web) },
-    toolExecution: 'sequential',
-    streamFn: streamOverride ?? ((model, context, options) =>
-      streamSimple(model as Model<'openai-completions'>, context,
-        { ...options, apiKey: settings.apiKey, maxTokens: 4096, maxRetryDelayMs: 1000 })),
-    beforeToolCall: async (_context, internalSignal) => {
-      calls++;
-      if (calls > limits.tools || signal?.aborted || internalSignal?.aborted || cancelled || timedOut || replayConflict) {
-        limitHit = calls > limits.tools;
-        return { block: true, reason: '执行已取消或达到工具调用上限', terminate: true };
-      }
-      return undefined;
-    },
-    finishTurn: ({ message }) => {
-      turns++;
-      if (turns >= limits.turns && message.content.some(c => c.type === 'toolCall')) {
-        limitHit = true;
-        return { action: 'end' };
-      }
-      return undefined;
-    },
-  });
-  agent.subscribe(async event => {
-    if (event.type === 'tool_execution_start') {
-      await emit('tool_start', { tool: event.toolName, tool_call_id: event.toolCallId, arguments: event.args });
-    } else if (event.type === 'tool_execution_end') {
-      // Business effects have their own atomic journal in Rust. Never persist chain-of-thought.
-      await emit('tool_end', { tool: event.toolName, tool_call_id: event.toolCallId, is_error: event.isError });
-    } else if (event.type === 'turn_end' && event.message.role === 'assistant') {
-      const message = event.message;
-      usage.input += message.usage.input; usage.output += message.usage.output;
-      usage.cache_read += message.usage.cacheRead; usage.cache_write += message.usage.cacheWrite;
-      usage.total_tokens += message.usage.totalTokens; usage.model_requests++;
-      await emit('turn', { turn: usage.model_requests, stop_reason: message.stopReason,
-        tokens: message.usage.totalTokens });
-    }
-  });
-  const abort = () => { cancelled = true; agent.abort(); };
-  signal?.addEventListener('abort', abort, { once: true });
-  const timer = setTimeout(() => { timedOut = true; agent.abort(); }, limits.timeoutMs);
-  const poll = setInterval(() => { void bridge.state().catch(abort); }, 2000);
+  const timeout = () => stop(new RunError('timeout', 'Agent 执行超时，已保存的操作可在执行记录中查看'));
+  const cancel = () => stop(new RunError('cancelled', '执行已取消'));
+  const checkActive = () => {
+    // A sequence of already-resolved promises can postpone the timer callback.
+    // Check the monotonic deadline too, so it cannot produce a late success.
+    if (!controller.signal.aborted && performance.now() >= deadline) timeout();
+    if (controller.signal.aborted) throw stopped ?? new RunError('cancelled', '执行已取消');
+  };
+  const bounded = async <T>(operation: () => Promise<T>): Promise<T> => {
+    checkActive();
+    let abort!: () => void;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(stopped ?? new RunError('cancelled', '执行已取消'));
+      controller.signal.addEventListener('abort', abort, { once: true });
+    });
+    try {
+      // The race also bounds custom bridges/providers which ignore cancellation;
+      // the underlying promise remains observed if it settles after the run ends.
+      const result = await Promise.race([Promise.resolve().then(() => { checkActive(); return operation(); }), aborted]);
+      checkActive();
+      return result;
+    } finally { controller.signal.removeEventListener('abort', abort); }
+  };
+  const combinedSignal = (extra?: AbortSignal) => extra ? AbortSignal.any([controller.signal, extra]) : controller.signal;
+  const readState = (extra?: AbortSignal) => bounded(() => bridge.state(combinedSignal(extra)));
+  signal?.addEventListener('abort', cancel, { once: true });
+  if (signal?.aborted) cancel();
+  const timer = setTimeout(timeout, limits.timeoutMs);
+  let poll: ReturnType<typeof setInterval> | undefined;
   try {
-    if (signal?.aborted) throw new RunError('cancelled', '执行已取消');
+    let sequence = (await readState()).next_sequence;
+    const emit = async (kind: string, body: Record<string, unknown>) => {
+      checkActive();
+      await bounded(() => bridge.event({ sequence: sequence++, kind, body }, controller.signal));
+    };
+    let turns = 0, calls = 0, limitHit = false;
+    let replayConflict = false;
+    const toolIndexes = new Map<string, number>();
+    const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0, total_tokens: 0,
+      model_requests: 0, tool_calls: 0, pricing: 'unavailable' };
+    const web = webProvider?.session(async toolSignal => {
+      checkActive(); toolSignal?.throwIfAborted();
+      await readState(toolSignal);
+      checkActive(); toolSignal?.throwIfAborted();
+    });
+    const tools: AgentTool[] = input.tools.map(definition => ({
+      name: definition.name, label: definition.name, description: definition.description,
+      parameters: definition.parameters as AgentTool['parameters'], executionMode: 'sequential',
+      execute: async (_id, args, toolSignal) => {
+        const index = (toolIndexes.get(definition.name) ?? 0) + 1;
+        toolIndexes.set(definition.name, index);
+        try {
+          checkActive(); toolSignal?.throwIfAborted();
+          const value = await bounded(() => bridge.tool(definition.name, args, combinedSignal(toolSignal), index));
+          return { content: [{ type: 'text', text: safeDetail(value) }], details: { tool: definition.name } };
+        } catch (error) {
+          if (error instanceof RunError && error.code === 'agent_replay_conflict') {
+            replayConflict = true; agent?.abort();
+          }
+          throw error;
+        }
+      },
+    }));
+    if (web) tools.push(...web.tools);
+    const runningAgent = agent = new Agent({
+      initialState: { model: settings.model, thinkingLevel: 'off', tools, messages: transcript(input, settings.model, !!web) },
+      toolExecution: 'sequential',
+      streamFn: streamOverride ?? ((model, context, options) =>
+        streamSimple(model as Model<'openai-completions'>, context,
+          { ...options, apiKey: settings.apiKey, maxTokens: 4096, maxRetryDelayMs: 1000 })),
+      beforeToolCall: async (_context, internalSignal) => {
+        calls++;
+        if (calls > limits.tools || controller.signal.aborted || internalSignal?.aborted || replayConflict) {
+          limitHit = calls > limits.tools;
+          return { block: true, reason: '执行已取消或达到工具调用上限', terminate: true };
+        }
+        return undefined;
+      },
+      finishTurn: ({ message }) => {
+        turns++;
+        if (turns >= limits.turns && message.content.some(c => c.type === 'toolCall')) {
+          limitHit = true;
+          return { action: 'end' };
+        }
+        return undefined;
+      },
+    });
+    runningAgent.subscribe(async event => {
+      if (event.type === 'tool_execution_start') {
+        await emit('tool_start', { tool: event.toolName, tool_call_id: event.toolCallId, arguments: event.args });
+      } else if (event.type === 'tool_execution_end') {
+        // Business effects have their own atomic journal in Rust. Never persist chain-of-thought.
+        await emit('tool_end', { tool: event.toolName, tool_call_id: event.toolCallId, is_error: event.isError });
+      } else if (event.type === 'turn_end' && event.message.role === 'assistant') {
+        const message = event.message;
+        usage.input += message.usage.input; usage.output += message.usage.output;
+        usage.cache_read += message.usage.cacheRead; usage.cache_write += message.usage.cacheWrite;
+        usage.total_tokens += message.usage.totalTokens; usage.model_requests++;
+        await emit('turn', { turn: usage.model_requests, stop_reason: message.stopReason,
+          tokens: message.usage.totalTokens });
+      }
+    });
+    let polling = false;
+    poll = setInterval(() => {
+      if (polling || controller.signal.aborted) return;
+      polling = true;
+      void readState().catch(() => { if (!controller.signal.aborted) cancel(); }).finally(() => { polling = false; });
+    }, 2000);
+    checkActive();
     await emit('started', { harness: 'pi', model: settings.model.id, scope: input.scope });
-    await agent.continue();
+    await bounded(() => runningAgent.continue());
     if (replayConflict) throw new RunError('agent_replay_conflict', '重试参数与已执行操作不同，已停止以防重复操作');
-    if (timedOut) throw new RunError('timeout', 'Agent 执行超时，已保存的操作可在执行记录中查看');
-    if (cancelled || signal?.aborted) throw new RunError('cancelled', '执行已取消');
+    checkActive();
     if (limitHit) throw new RunError('step_limit', '已达到本次执行步数上限');
-    const last = [...agent.state.messages].reverse().find(m => m.role === 'assistant') as AssistantMessage | undefined;
+    const last = [...runningAgent.state.messages].reverse().find(m => m.role === 'assistant') as AssistantMessage | undefined;
     if (!last || last.stopReason !== 'stop') throw new RunError('model_failed', '模型调用失败或回复未完整生成');
     const content = last.content.filter(c => c.type === 'text').map(c => c.text).join('\n').trim();
     if (!content || content.length > 60000) throw new RunError('invalid_response', '模型未返回有效的最终回复');
@@ -181,8 +223,14 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
     const webUsage = web?.usage ?? { web_search_requests: 0, web_fetch_requests: 0 };
     await emit('finished', { model_requests: usage.model_requests, tool_calls: usage.tool_calls, ...webUsage });
     return { content, usage: { ...usage, ...webUsage } };
+  } catch (error) {
+    // Fetch and Pi can surface AbortError/model errors after cancellation. Keep
+    // the run's actual deadline/caller-cancellation reason authoritative.
+    if (stopped) throw stopped;
+    throw error;
   } finally {
-    clearTimeout(timer); clearInterval(poll); signal?.removeEventListener('abort', abort);
-    agent.abort();
+    clearTimeout(timer); if (poll) clearInterval(poll); signal?.removeEventListener('abort', cancel);
+    controller.abort();
+    agent?.abort();
   }
 }

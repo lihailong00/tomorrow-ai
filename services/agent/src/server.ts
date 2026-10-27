@@ -90,8 +90,8 @@ const server = createServer(async (request, response) => {
       return value;
     };
     const bridge: Bridge = {
-      state: async () => await callback('/state') as { next_sequence: number },
-      event: async event => { await callback('/events', event); },
+      state: async signal => await callback('/state', undefined, signal) as { next_sequence: number },
+      event: async (event, signal) => { await callback('/events', event, signal); },
       tool: (name, args, signal, operationIndex) => callback('/tools', { name, arguments: args, operation_index: operationIndex }, signal),
     };
     send(200, await executeRun(input, settings, bridge, controller.signal, snapshot.limits, undefined, webProvider));

@@ -124,3 +124,74 @@ test('Pi reflects dashboard revisions, honors cleared keys, and fails closed whe
     if (!backendClosed) await closeServer(backend);
   }
 });
+
+test('the configured run deadline cancels real state, journal and tool HTTP callbacks', { timeout: 25000 }, async () => {
+  let phase = 'state'; let modelCalls = 0; let toolCalls = 0;
+  const aborted: string[] = [];
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  const backend = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown> : {};
+    const kind = request.url?.endsWith('/state') ? 'state' : request.url?.endsWith('/tools') ? 'tool' : String(body.kind);
+    if (kind === 'tool') toolCalls++;
+    const send = () => {
+      if (response.destroyed) return;
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify(kind === 'state' ? { next_sequence: 1 } : { ok: true }));
+    };
+    if (kind === phase) {
+      const timer = setTimeout(() => { timers.delete(timer); send(); }, 850);
+      timers.add(timer);
+      response.on('close', () => {
+        clearTimeout(timer); timers.delete(timer);
+        if (!response.writableEnded) aborted.push(kind);
+      });
+    } else send();
+  });
+  const backendPort = await listen(backend);
+  const provider = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Consume the bounded fixture body. */ }
+    modelCalls++;
+    const tool = phase === 'tool';
+    const delta = tool ? { role: 'assistant', tool_calls: [{ index: 0, id: 'fixture-tool', type: 'function',
+      function: { name: 'save_memory', arguments: '{"content":"fixture"}' } }] } : { role: 'assistant', content: 'fixture complete' };
+    response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    const chunk = (value: unknown) => response.write(`data: ${JSON.stringify(value)}\n\n`);
+    const common = { id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'deadline-fixture' };
+    chunk({ ...common, choices: [{ index: 0, delta, finish_reason: null }] });
+    chunk({ ...common, choices: [{ index: 0, delta: {}, finish_reason: tool ? 'tool_calls' : 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
+    response.end('data: [DONE]\n\n');
+  });
+  const providerPort = await listen(provider);
+  const fixture = await start({ RUST_API_URL: `http://127.0.0.1:${backendPort}`,
+    MODEL_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, MODEL_NAME: 'deadline-fixture', MODEL_API_KEY: 'fixture-only',
+    AGENT_TIMEOUT_MS: '100', AGENT_MAX_CONCURRENT: '1' });
+  try {
+    for (phase of ['state', 'started', 'finished', 'tool']) {
+      modelCalls = 0; toolCalls = 0;
+      const value = { ...input, tools: phase === 'tool' ? [{ name: 'save_memory', description: 'fixture only',
+        parameters: { type: 'object', properties: { content: { type: 'string' } }, required: ['content'] } }] : [] };
+      const began = performance.now();
+      const result = await fetch(`${fixture.url}/v1/runs`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${serviceToken}` },
+        body: JSON.stringify(value), signal: AbortSignal.timeout(3000) });
+      assert.equal(result.status, 502, phase);
+      assert.equal((await result.json() as { error: { code: string } }).error.code, 'timeout', phase);
+      assert.ok(performance.now() - began < 600, `${phase} callback exceeded the run deadline`);
+      for (let i = 0; i < 20 && !aborted.includes(phase); i++) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.ok(aborted.includes(phase), `${phase} HTTP callback was not cancelled`);
+      if (phase === 'state' || phase === 'started') assert.equal(modelCalls, 0);
+      if (phase === 'tool') { assert.equal(toolCalls, 1); assert.equal(modelCalls, 1); }
+    }
+    phase = 'none';
+    const recovered = await run(fixture.url);
+    assert.equal(recovered.status, 200, 'the timed-out run must release its concurrency slot');
+    assert.equal((await recovered.json() as { content: string }).content, 'fixture complete');
+  } finally {
+    await fixture.stop();
+    for (const timer of timers) clearTimeout(timer);
+    await closeServer(provider); await closeServer(backend);
+  }
+});
