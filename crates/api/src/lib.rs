@@ -432,6 +432,18 @@ struct PageFilter {
     limit: Option<i64>,
 }
 #[derive(Deserialize)]
+struct MessageFilter {
+    offset: Option<i64>,
+    limit: Option<i64>,
+    before: Option<String>,
+}
+#[derive(serde::Serialize, ToSchema)]
+struct MessagePage {
+    items: Vec<Message>,
+    next_offset: Option<i64>,
+    next_before: Option<String>,
+}
+#[derive(Deserialize)]
 struct NotificationFilter {
     offset: Option<i64>,
     limit: Option<i64>,
@@ -591,15 +603,23 @@ async fn conversations(
     ).await?;
     Ok(Json(PagedItems { items, next_offset }))
 }
-#[utoipa::path(get,path="/v1/conversations/{id}/messages",params(("id"=String,Path)),responses((status=200,body=Items<Message>)))]
+#[utoipa::path(get,path="/v1/conversations/{id}/messages",params(("id"=String,Path),("offset"=Option<i64>,Query),("limit"=Option<i64>,Query),("before"=Option<String>,Query)),responses((status=200,body=MessagePage)))]
 async fn messages(
     State(state): State<Arc<AppState>>,
     auth: Auth,
     Path(id): Path<String>,
-) -> Result<Json<Items<Message>>> {
-    let mut items = state.repository.messages(&auth.user_id, &id).await?;
+    Query(filter): Query<MessageFilter>,
+) -> Result<Json<MessagePage>> {
+    // Keep existing clients' latest-1000 behavior and the agent's bounded context.
+    let (mut items, next_offset) = if filter.offset.is_none() && filter.limit.is_none() && filter.before.is_none() {
+        (state.repository.messages(&auth.user_id, &id).await?, None)
+    } else {
+        state.repository.messages_page(&auth.user_id, &id,
+            filter.offset.unwrap_or(0), filter.limit.unwrap_or(50), filter.before.as_deref()).await?
+    };
+    let next_before = next_offset.and_then(|_| items.first().map(|message| message.id.clone()));
     refresh_attachment_metadata(&state, &auth.user_id, &mut items).await?;
-    Ok(Json(Items { items }))
+    Ok(Json(MessagePage { items, next_offset, next_before }))
 }
 async fn refresh_attachment_metadata(
     state: &AppState,

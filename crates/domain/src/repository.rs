@@ -710,6 +710,56 @@ impl Repository {
         self.put_resource(user_id, "conversation", &conversation.id, &conversation)
             .await
     }
+    /// A bounded display-history page, independent of the agent's messages() context.
+    /// `before` is an exclusive message cursor, so new replies cannot move older pages.
+    pub async fn messages_page(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        offset: i64,
+        limit: i64,
+        before: Option<&str>,
+    ) -> Result<(Vec<Message>, Option<i64>), DomainError> {
+        self.conversation(user_id, conversation_id).await?;
+        validate_page(offset, limit)?;
+        if let Some(id) = before {
+            if id.is_empty() || id.len() > 200 {
+                return Err(DomainError::Validation("消息分页位置无效".into()));
+            }
+            let boundary: Message = self.resource(user_id, "message", id).await?;
+            if boundary.conversation_id != conversation_id {
+                return Err(DomainError::NotFound);
+            }
+        }
+        let mut connection = self.pool.acquire().await?;
+        let postgres = connection.backend_name() == "PostgreSQL";
+        let conversation = if postgres { "CAST(body AS JSONB)->>'conversation_id'" } else { "json_extract(body, '$.conversation_id')" };
+        let activity = if postgres { "CAST(body AS JSONB)->>'created_at'" } else { "json_extract(body, '$.created_at')" };
+        let seconds = if postgres { "EXTRACT(EPOCH FROM CAST(whole_seconds AS TIMESTAMPTZ))" } else { "CAST(strftime('%s', whole_seconds) AS BIGINT)" };
+        let query = format!("WITH activity_rows AS (
+            SELECT body,id,{activity} AS activity FROM resources
+            WHERE user_id=$1 AND kind='message' AND {conversation}=$2
+        ), normalized AS (
+            SELECT body,id,
+                substr(activity,1,19) || CASE WHEN upper(substr(activity,length(activity),1))='Z' THEN 'Z' ELSE substr(activity,length(activity)-5,6) END AS whole_seconds,
+                CASE WHEN substr(activity,20,1)='.' THEN substr(substr(activity,21,length(activity)-20-CASE WHEN upper(substr(activity,length(activity),1))='Z' THEN 1 ELSE 6 END) || '000000000',1,9) ELSE '000000000' END AS fractional_seconds
+            FROM activity_rows
+        ), ordered AS (
+            SELECT body,id,{seconds} AS seconds,fractional_seconds FROM normalized
+        ) SELECT body FROM ordered
+        WHERE $3='' OR (seconds,fractional_seconds,id)<(SELECT seconds,fractional_seconds,id FROM ordered WHERE id=$3)
+        ORDER BY seconds DESC,fractional_seconds DESC,id DESC LIMIT $4 OFFSET $5");
+        let rows = sqlx::query(&query).bind(user_id).bind(conversation_id)
+            .bind(before.unwrap_or("")).bind(limit + 1).bind(offset)
+            .fetch_all(&mut *connection).await?;
+        let items = rows.into_iter().map(|row| {
+            serde_json::from_str(row.get::<&str, _>("body"))
+                .map_err(|error| DomainError::Internal(error.to_string()))
+        }).collect::<Result<Vec<Message>, _>>()?;
+        let (mut items, next) = finish_page(items, offset, limit);
+        items.reverse();
+        Ok((items, next))
+    }
     pub async fn reserve_chat(
         &self,
         user_id: &str,
