@@ -663,12 +663,13 @@ async fn chat(
     let fingerprint = serde_json::to_string(&input)
         .map_err(|_| DomainError::Validation("消息格式无效".into()))?;
     let request_id = input.client_request_id.clone();
+    let mut reservation = None;
     if let Some(id) = &request_id {
-        if let Some(cached) = state
+        let mut owned = state
             .repository
-            .reserve_chat(&auth.user_id, id, &fingerprint)
-            .await?
-        {
+            .reserve_chat_owned(&auth.user_id, id, &fingerprint)
+            .await?;
+        if let Some(cached) = owned.cached.take() {
             let mut response: ChatResponse = serde_json::from_value(cached)
                 .map_err(|_| DomainError::Internal("消息缓存读取失败".into()))?;
             if let Some(message) = &mut response.user_message {
@@ -677,19 +678,19 @@ async fn chat(
             }
             return Ok(Json(response));
         }
+        reservation = Some(owned);
     }
-    let result = run_chat(&state, &auth.user_id, input).await;
-    if let Some(id) = request_id {
+    let result = run_chat(&state, &auth.user_id, input, reservation.as_ref().map(|r| r.attempt_token()).unwrap_or("")).await;
+    if let Some(reservation) = &mut reservation {
         if result.is_err() {
-            state
-                .repository
-                .release_chat(&auth.user_id, &id, &fingerprint)
-                .await?;
+            reservation.release().await?;
+        } else {
+            reservation.committed();
         }
     }
     result.map(Json)
 }
-async fn run_chat(state: &AppState, user_id: &str, input: ChatInput) -> Result<ChatResponse> {
+async fn run_chat(state: &AppState, user_id: &str, input: ChatInput, attempt_token: &str) -> Result<ChatResponse> {
     let content = validate_text(&input.message, "消息", 20000)?;
     let fingerprint = serde_json::to_string(&input)
         .map_err(|_| DomainError::Validation("消息格式无效".into()))?;
@@ -840,7 +841,7 @@ async fn run_chat(state: &AppState, user_id: &str, input: ChatInput) -> Result<C
     };
     state
         .repository
-        .commit_chat_turn(
+        .commit_chat_turn_attempt(
             user_id,
             &ChatTurn {
                 conversation,
@@ -852,6 +853,7 @@ async fn run_chat(state: &AppState, user_id: &str, input: ChatInput) -> Result<C
                     .map_err(|_| DomainError::Internal("消息缓存保存失败".into()))?,
             },
             &fingerprint,
+            attempt_token,
         )
         .await?;
     Ok(response)

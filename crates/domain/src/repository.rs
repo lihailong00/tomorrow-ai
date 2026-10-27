@@ -11,6 +11,58 @@ pub struct Repository {
     pub(crate) pool: AnyPool,
 }
 
+/// Owns a single HTTP chat reservation, including cancellation during acquisition.
+/// A completed response is never removed, even if its commit acknowledgement was lost.
+pub struct ChatReservation {
+    repository: Repository,
+    user_id: String,
+    request_id: String,
+    fingerprint: String,
+    attempt_token: String,
+    armed: bool,
+    pub cached: Option<serde_json::Value>,
+}
+
+impl ChatReservation {
+    pub fn attempt_token(&self) -> &str {
+        &self.attempt_token
+    }
+
+    pub fn committed(&mut self) {
+        self.armed = false;
+    }
+
+    pub async fn release(&mut self) -> Result<(), DomainError> {
+        self.repository
+            .release_chat_attempt(&self.user_id, &self.request_id, &self.fingerprint, &self.attempt_token)
+            .await?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for ChatReservation {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Drop can run during runtime shutdown too. Crash recovery still uses the TTL;
+        // while the server is alive, cleanup owns everything it needs independently.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let repository = self.repository.clone();
+            let user = self.user_id.clone();
+            let request = self.request_id.clone();
+            let fingerprint = self.fingerprint.clone();
+            let attempt = self.attempt_token.clone();
+            runtime.spawn(async move {
+                if let Err(error) = repository.release_chat_attempt(&user, &request, &fingerprint, &attempt).await {
+                    tracing::warn!(error=%error, "interrupted chat reservation cleanup failed");
+                }
+            });
+        }
+    }
+}
+
 pub const MAX_TASK_ATTEMPTS: i64 = 3;
 
 impl Repository {
@@ -636,6 +688,56 @@ impl Repository {
         request_id: &str,
         input_fingerprint: &str,
     ) -> Result<Option<serde_json::Value>, DomainError> {
+        self.reserve_chat_attempt(user_id, request_id, input_fingerprint, "").await
+    }
+
+    pub async fn reserve_chat_owned(
+        &self,
+        user_id: &str,
+        request_id: &str,
+        input_fingerprint: &str,
+    ) -> Result<ChatReservation, DomainError> {
+        let repository = self.clone();
+        let user_id = user_id.to_owned();
+        let request_id = request_id.to_owned();
+        let input_fingerprint = input_fingerprint.to_owned();
+        // Acquisition must finish even when its caller disconnects during COMMIT.
+        // A detached task drops its returned guard after the row becomes visible;
+        // cleanup cannot run too early and miss a not-yet-visible inserted row.
+        tokio::spawn(async move {
+            repository.acquire_chat_owned(&user_id, &request_id, &input_fingerprint).await
+        }).await.map_err(|_| DomainError::Internal("消息请求预留中断".into()))?
+    }
+
+    async fn acquire_chat_owned(
+        &self,
+        user_id: &str,
+        request_id: &str,
+        input_fingerprint: &str,
+    ) -> Result<ChatReservation, DomainError> {
+        let mut reservation = ChatReservation {
+            repository: self.clone(),
+            user_id: user_id.to_owned(),
+            request_id: request_id.to_owned(),
+            fingerprint: input_fingerprint.to_owned(),
+            attempt_token: new_id(),
+            armed: true,
+            cached: None,
+        };
+        reservation.cached = self.reserve_chat_attempt(user_id, request_id, input_fingerprint, &reservation.attempt_token).await?;
+        if reservation.cached.is_some() {
+            reservation.armed = false;
+        }
+        Ok(reservation)
+    }
+
+    async fn reserve_chat_attempt(
+        &self,
+        user_id: &str,
+        request_id: &str,
+        input_fingerprint: &str,
+        attempt_token: &str,
+    ) -> Result<Option<serde_json::Value>, DomainError> {
         let key = chat_request_key(user_id, request_id)?;
         let fingerprint = auth::hash_token(input_fingerprint);
         let mut transaction = self.pool.begin().await?;
@@ -644,6 +746,10 @@ impl Repository {
         if inserted > 0 {
             sqlx::query("INSERT INTO chat_request_inputs(request_key,user_id,fingerprint)VALUES($1,$2,$3)")
                 .bind(&key).bind(user_id).bind(&fingerprint).execute(&mut *transaction).await?;
+            if !attempt_token.is_empty() {
+                sqlx::query("INSERT INTO chat_request_attempts(request_key,user_id,attempt_token)VALUES($1,$2,$3)")
+                    .bind(&key).bind(user_id).bind(attempt_token).execute(&mut *transaction).await?;
+            }
             transaction.commit().await?;
             return Ok(None);
         }
@@ -675,6 +781,16 @@ impl Repository {
         turn: &ChatTurn,
         input_fingerprint: &str,
     ) -> Result<(), DomainError> {
+        self.commit_chat_turn_attempt(user_id, turn, input_fingerprint, "").await
+    }
+
+    pub async fn commit_chat_turn_attempt(
+        &self,
+        user_id: &str,
+        turn: &ChatTurn,
+        input_fingerprint: &str,
+        attempt_token: &str,
+    ) -> Result<(), DomainError> {
         let mut memory = turn.memory.clone();
         if let Some(memory) = &mut memory {
             memory.content = validate_text(&memory.content, "记忆内容", 10000)?;
@@ -704,8 +820,8 @@ impl Repository {
             }
         }
         if let Some(key) = request_key {
-            let changed=sqlx::query("UPDATE chat_requests SET response=$1 WHERE request_key=$2 AND user_id=$3 AND response IS NULL AND EXISTS(SELECT 1 FROM chat_request_inputs i WHERE i.request_key=$2 AND i.user_id=$3 AND i.fingerprint=$4)")
-                .bind(turn.response.to_string()).bind(key).bind(user_id).bind(auth::hash_token(input_fingerprint)).execute(&mut *transaction).await?.rows_affected();
+            let changed=sqlx::query("UPDATE chat_requests SET response=$1 WHERE request_key=$2 AND user_id=$3 AND response IS NULL AND EXISTS(SELECT 1 FROM chat_request_inputs i WHERE i.request_key=$2 AND i.user_id=$3 AND i.fingerprint=$4) AND (EXISTS(SELECT 1 FROM chat_request_attempts a WHERE a.request_key=$2 AND a.user_id=$3 AND a.attempt_token=$5) OR ($5='' AND NOT EXISTS(SELECT 1 FROM chat_request_attempts a WHERE a.request_key=$2)))")
+                .bind(turn.response.to_string()).bind(key).bind(user_id).bind(auth::hash_token(input_fingerprint)).bind(attempt_token).execute(&mut *transaction).await?.rows_affected();
             if changed != 1 {
                 return Err(DomainError::Conflict(
                     "消息请求已被处理，请重试获取结果".into(),
@@ -752,7 +868,7 @@ impl Repository {
         input_fingerprint: &str,
     ) -> Result<(), DomainError> {
         let key = chat_request_key(user_id, request_id)?;
-        let changed = sqlx::query("UPDATE chat_requests SET response=$1 WHERE request_key=$2 AND user_id=$3 AND response IS NULL AND EXISTS(SELECT 1 FROM chat_request_inputs i WHERE i.request_key=$2 AND i.user_id=$3 AND i.fingerprint=$4)")
+        let changed = sqlx::query("UPDATE chat_requests SET response=$1 WHERE request_key=$2 AND user_id=$3 AND response IS NULL AND EXISTS(SELECT 1 FROM chat_request_inputs i WHERE i.request_key=$2 AND i.user_id=$3 AND i.fingerprint=$4) AND NOT EXISTS(SELECT 1 FROM chat_request_attempts a WHERE a.request_key=$2)")
             .bind(response.to_string())
             .bind(key)
             .bind(user_id)
@@ -773,13 +889,24 @@ impl Repository {
         request_id: &str,
         input_fingerprint: &str,
     ) -> Result<(), DomainError> {
+        self.release_chat_attempt(user_id, request_id, input_fingerprint, "").await
+    }
+
+    async fn release_chat_attempt(
+        &self,
+        user_id: &str,
+        request_id: &str,
+        input_fingerprint: &str,
+        attempt_token: &str,
+    ) -> Result<(), DomainError> {
         let key = chat_request_key(user_id, request_id)?;
         sqlx::query(
-            "DELETE FROM chat_requests WHERE request_key=$1 AND user_id=$2 AND response IS NULL AND EXISTS(SELECT 1 FROM chat_request_inputs i WHERE i.request_key=$1 AND i.user_id=$2 AND i.fingerprint=$3)",
+            "DELETE FROM chat_requests WHERE request_key=$1 AND user_id=$2 AND response IS NULL AND EXISTS(SELECT 1 FROM chat_request_inputs i WHERE i.request_key=$1 AND i.user_id=$2 AND i.fingerprint=$3) AND (EXISTS(SELECT 1 FROM chat_request_attempts a WHERE a.request_key=$1 AND a.user_id=$2 AND a.attempt_token=$4) OR ($4='' AND NOT EXISTS(SELECT 1 FROM chat_request_attempts a WHERE a.request_key=$1)))",
         )
         .bind(key)
         .bind(user_id)
         .bind(auth::hash_token(input_fingerprint))
+        .bind(attempt_token)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -883,6 +1010,11 @@ impl Repository {
         .await?;
         sqlx::raw_sql(include_str!(
             "../../../migrations/sqlite/010_resource_creation_requests.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/011_chat_request_attempts.sql"
         ))
         .execute(&pool)
         .await?;

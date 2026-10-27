@@ -362,15 +362,64 @@ impl AttachmentsState {
                 return Err(s3_not_configured());
             }
         }
-        let file = tokio::fs::File::open(self.path(id)?).await?;
+        let file = match tokio::fs::File::open(self.path(id)?).await {
+            Ok(file) => file,
+            Err(error) => return Err(self.local_read_error(user_id, id, error).await),
+        };
         let mut bytes = Vec::new();
-        file.take(limit.saturating_add(1))
+        if let Err(error) = file.take(limit.saturating_add(1))
             .read_to_end(&mut bytes)
-            .await?;
+            .await
+        {
+            return Err(self.local_read_error(user_id, id, error).await);
+        }
         if bytes.len() as u64 > limit {
             return Err(AttachmentError::too_large());
         }
         Ok(bytes)
+    }
+
+    async fn local_read_error(
+        &self,
+        _user_id: &str,
+        _id: &str,
+        error: std::io::Error,
+    ) -> AttachmentError {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return AttachmentError::not_found();
+        }
+        #[cfg(windows)]
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            // Windows can deny a new open while a deleted file still has an
+            // existing handle. Deletion removes bytes before committing metadata;
+            // allow that short transaction to finish, but require owner-scoped
+            // database evidence before reclassifying an ambiguous access error.
+            let deleted = async {
+                for attempt in 0..3 {
+                    if attempt > 0 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    let remaining: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM uploads WHERE user_id=$1 AND id=$2",
+                    )
+                    .bind(_user_id)
+                    .bind(_id)
+                    .fetch_one(&self.pool)
+                    .await?;
+                    if remaining == 0 {
+                        return Ok::<_, sqlx::Error>(true);
+                    }
+                }
+                Ok(false)
+            };
+            if matches!(
+                tokio::time::timeout(Duration::from_millis(100), deleted).await,
+                Ok(Ok(true))
+            ) {
+                return AttachmentError::not_found();
+            }
+        }
+        error.into()
     }
 
     async fn download_body(&self, user_id: &str, id: &str) -> Result<Body, AttachmentError> {
@@ -384,15 +433,10 @@ impl AttachmentsState {
                 return Err(s3_not_configured());
             }
         }
-        let file = tokio::fs::File::open(self.path(id)?)
-            .await
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    AttachmentError::not_found()
-                } else {
-                    error.into()
-                }
-            })?;
+        let file = match tokio::fs::File::open(self.path(id)?).await {
+            Ok(file) => file,
+            Err(error) => return Err(self.local_read_error(user_id, id, error).await),
+        };
         let stream = futures_util::stream::try_unfold(file, |mut file| async move {
             let mut buffer = vec![0u8; 64 * 1024];
             let read = file.read(&mut buffer).await?;
@@ -627,16 +671,20 @@ impl AttachmentsState {
             .collect::<Vec<_>>();
         let mut owned = std::collections::HashMap::new();
         for chunk in ids.chunks(200) {
-            let mut query = sqlx::QueryBuilder::<sqlx::Any>::new(
-                "SELECT id,name,mime_type,size,created_at FROM uploads WHERE user_id=",
+            // Any's QueryBuilder emits '?' parameters, which Postgres rejects.
+            // Only bounded parameter numbers enter SQL; upload IDs stay bound.
+            let parameters = (2..=chunk.len() + 1)
+                .map(|index| format!("${index}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT id,name,mime_type,size,created_at FROM uploads WHERE user_id=$1 AND id IN ({parameters})"
             );
-            query.push_bind(user_id).push(" AND id IN (");
-            let mut values = query.separated(",");
+            let mut query = sqlx::query(&sql).bind(user_id);
             for id in chunk {
-                values.push_bind(id);
+                query = query.bind(id);
             }
-            values.push_unseparated(")");
-            for row in query.build().fetch_all(&self.pool).await? {
+            for row in query.fetch_all(&self.pool).await? {
                 let upload = upload_from_row(&row)?;
                 owned.insert(upload.id.clone(), upload);
             }

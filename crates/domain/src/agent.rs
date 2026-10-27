@@ -42,6 +42,34 @@ pub struct RunTicket {
     pub token: String,
     pub conversation_id: Option<String>,
     pub cached: Option<String>,
+    _cleanup: RunCleanup,
+}
+
+// Keep Drop on a private field so existing callers can still move ticket fields.
+// The token fences cleanup against retries, and status fences it against success
+// or an explicit user cancellation. Install it before awaiting the begin commit.
+struct RunCleanup {
+    repository: Repository,
+    id: String,
+    token: String,
+}
+
+impl Drop for RunCleanup {
+    fn drop(&mut self) {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let repository = self.repository.clone();
+            let id = self.id.clone();
+            let token = self.token.clone();
+            runtime.spawn(async move {
+                let result = sqlx::query("UPDATE agent_runs SET status='failed',error=$1,lease_until=0,updated_at=$2 WHERE id=$3 AND token_hash=$4 AND status='running'")
+                    .bind("连接已断开或执行已中断；请检查记录后重试").bind(now()).bind(id).bind(auth::hash_token(&token))
+                    .execute(&repository.pool).await;
+                if let Err(error) = result {
+                    tracing::warn!(error=%error, "interrupted agent attempt cleanup failed");
+                }
+            });
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -230,10 +258,37 @@ impl Repository {
         conversation_id: Option<&str>,
         task: Option<(&str, i64)>,
     ) -> Result<RunTicket, DomainError> {
+        let repository = self.clone();
+        let user_id = user_id.to_owned();
+        let request_key = request_key.to_owned();
+        let fingerprint = fingerprint.to_owned();
+        let conversation_id = conversation_id.map(str::to_owned);
+        let task = task.map(|(id, attempt)| (id.to_owned(), attempt));
+        // A disconnected caller detaches acquisition. Its ticket is dropped after
+        // COMMIT is acknowledged, so cleanup cannot miss an invisible inserted run.
+        tokio::spawn(async move {
+            repository.acquire_agent_run(&user_id, &request_key, &fingerprint, conversation_id.as_deref(),
+                task.as_ref().map(|(id, attempt)| (id.as_str(), *attempt))).await
+        }).await.map_err(|_| DomainError::Internal("执行预留中断".into()))?
+    }
+
+    async fn acquire_agent_run(
+        &self,
+        user_id: &str,
+        request_key: &str,
+        fingerprint: &str,
+        conversation_id: Option<&str>,
+        task: Option<(&str, i64)>,
+    ) -> Result<RunTicket, DomainError> {
         let key = format!("{user_id}:{}", validate_text(request_key, "执行编号", 160)?);
         let fingerprint = auth::hash_token(fingerprint);
         let token = auth::generate_token();
         let id = new_id();
+        let mut cleanup = RunCleanup {
+            repository: self.clone(),
+            id: id.clone(),
+            token: token.clone(),
+        };
         let (scope, task_id, task_attempt) = match task {
             Some((id, attempt)) => ("task", Some(id), Some(attempt)),
             None => ("chat", None, None),
@@ -254,6 +309,7 @@ impl Repository {
             return Err(DomainError::Conflict("同一执行编号不能用于不同指令".into()));
         }
         let id: String = row.get("id");
+        cleanup.id = id.clone();
         let conversation_id = row.get("conversation_id");
         let result: Option<String> = row.get("result");
         if result.is_some() {
@@ -263,6 +319,7 @@ impl Repository {
                 token,
                 conversation_id,
                 cached: result,
+                _cleanup: cleanup,
             });
         }
         if inserted == 0 {
@@ -288,6 +345,7 @@ impl Repository {
             token,
             conversation_id,
             cached: None,
+            _cleanup: cleanup,
         })
     }
 

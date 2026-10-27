@@ -1076,3 +1076,62 @@ async fn photo_index_is_opt_in_scoped_idempotent_and_revocable() {
     );
     remove_fixture(state).await;
 }
+
+#[tokio::test]
+async fn text_read_missing_local_bytes_is_not_found_and_other_io_and_limits_stay_strict() {
+    let (state, owner, token, other) = fixture(DEFAULT_MAX_BYTES, None).await;
+    let upload: Upload = serde_json::from_value(json_body(
+        post_file(&state, &token, "race.txt", "text/plain", b"race-source").await,
+    ).await).unwrap();
+    let path = state.path(&upload.id).unwrap();
+    let request = |token: &str| Request::builder()
+        .uri(format!("/v1/uploads/{}/text", upload.id))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty()).unwrap();
+    assert_eq!(router(state.clone()).oneshot(request(&token)).await.unwrap().status(), StatusCode::OK);
+    // Keep metadata present to model deletion between its lookup and local open.
+    tokio::fs::remove_file(&path).await.unwrap();
+    let response = router(state.clone()).oneshot(request(&token)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(json_body(response).await["error"]["code"], "not_found");
+    assert_eq!(state.chat_context(&owner, &[upload.id.clone()]).await.unwrap_err().status(), StatusCode::NOT_FOUND);
+    assert_eq!(router(state.clone()).oneshot(request(&other)).await.unwrap().status(), StatusCode::NOT_FOUND);
+    tokio::fs::write(&path, b"12345").await.unwrap();
+    assert_eq!(state.read_bytes(&owner, &upload.id, 4).await.unwrap_err().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(router(state.clone()).oneshot(request(&other)).await.unwrap().status(), StatusCode::NOT_FOUND);
+    tokio::fs::remove_file(&path).await.unwrap();
+    tokio::fs::create_dir(&path).await.unwrap();
+    let response = router(state.clone()).oneshot(request(&token)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(json_body(response).await["error"]["code"], "storage_error");
+    remove_fixture(state).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_access_denied_is_not_found_only_after_owned_metadata_disappears() {
+    let (state, owner, token, _) = fixture(DEFAULT_MAX_BYTES, None).await;
+    let upload: Upload = serde_json::from_value(json_body(
+        post_file(&state, &token, "delete-pending.txt", "text/plain", b"source").await,
+    ).await).unwrap();
+    let path = state.path(&upload.id).unwrap();
+    // Opening a directory as a file forces real Windows access-denied (error 5).
+    // Delete-pending can produce the same kind, but its timing is not stable
+    // enough to require in a deterministic fixture on every Windows filesystem.
+    tokio::fs::remove_file(&path).await.unwrap();
+    tokio::fs::create_dir(&path).await.unwrap();
+    assert_eq!(std::fs::File::open(&path).unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+    // A permission error alone cannot justify hiding a surviving upload row.
+    assert_eq!(state.read_bytes(&owner, &upload.id, 100).await.unwrap_err().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(state.download_body(&owner, &upload.id).await.unwrap_err().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // Model the API delete committing metadata shortly after unlinking the file.
+    let delete = async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        sqlx::query("DELETE FROM uploads WHERE user_id=$1 AND id=$2")
+            .bind(&owner).bind(&upload.id).execute(&state.pool).await.unwrap();
+    };
+    let ((), download) = tokio::join!(delete, state.download_body(&owner, &upload.id));
+    assert_eq!(download.unwrap_err().status(), StatusCode::NOT_FOUND);
+    assert_eq!(state.read_bytes(&owner, &upload.id, 100).await.unwrap_err().status(), StatusCode::NOT_FOUND);
+    remove_fixture(state).await;
+}

@@ -194,3 +194,73 @@ async fn deleted_and_foreign_uploads_are_unavailable_without_reading_their_text(
     assert!(!context.contains("FOREIGN_SECRET_MARKER"));
     assert!(!context.contains("foreign-private-name"));
 }
+
+async fn refresh_metadata_batch_contract(database_url: &str) {
+    let directory = TestDirectory(
+        std::env::temp_dir().join(format!("tada-e03-context-{}", uuid::Uuid::new_v4())),
+    );
+    let repo = Repository::connect(database_url).await.unwrap();
+    let suffix = uuid::Uuid::new_v4();
+    let owner = repo
+        .create_user(&format!("batch-owner-{suffix}@example.test"), "unused", "Owner", "UTC")
+        .await.unwrap().id;
+    let other = repo
+        .create_user(&format!("batch-other-{suffix}@example.test"), "unused", "Other", "UTC")
+        .await.unwrap().id;
+    let state = AttachmentsState::initialize(repo, directory.0.clone(), DEFAULT_MAX_BYTES, None)
+        .await.unwrap();
+    let mut history = Vec::new();
+    for number in 0..205 {
+        let name = format!("current-{number}.txt");
+        let id = file(&state, &owner, &name, "source").await;
+        history.push(message(MessageAttachment {
+            upload_id: id,
+            name: "stale.txt".into(),
+            mime_type: "application/stale".into(),
+            size: 999,
+            unavailable: true,
+        }));
+    }
+    let foreign = file(&state, &other, "foreign-private-name.txt", "private").await;
+    for id in [foreign, tomorrow_domain::new_id(), "x') OR 1=1 --".into()] {
+        history.push(message(MessageAttachment {
+            upload_id: id,
+            name: "saved-provenance.txt".into(),
+            mime_type: "text/saved".into(),
+            size: 42,
+            unavailable: false,
+        }));
+    }
+    history.push(history[0].clone());
+    state.refresh_message_attachments(&owner, &mut history).await.unwrap();
+    for (number, message) in history[..205].iter().enumerate() {
+        let item = &message.attachments[0];
+        assert_eq!(item.name, format!("current-{number}.txt"));
+        assert_eq!(item.mime_type, "text/plain");
+        assert_eq!(item.size, 6);
+        assert!(!item.unavailable);
+    }
+    for message in &history[205..208] {
+        let item = &message.attachments[0];
+        assert!(item.unavailable);
+        assert_eq!(item.name, "saved-provenance.txt");
+        assert_eq!(item.mime_type, "text/saved");
+        assert_eq!(item.size, 42);
+    }
+    assert_eq!(history[208].attachments[0].name, "current-0.txt");
+    assert!(!history[208].attachments[0].unavailable);
+    state.refresh_message_attachments(&owner, &mut []).await.unwrap();
+}
+
+#[tokio::test]
+async fn metadata_refresh_batches_preserve_ownership_and_provenance_sqlite() {
+    refresh_metadata_batch_contract("sqlite::memory:").await;
+}
+
+#[tokio::test]
+#[ignore = "requires TADA_ATTACHMENT_TEST_DATABASE_URL pointing to an isolated PostgreSQL database"]
+async fn metadata_refresh_batches_preserve_ownership_and_provenance_postgres() {
+    let url = std::env::var("TADA_ATTACHMENT_TEST_DATABASE_URL").unwrap();
+    assert!(url.starts_with("postgres://") || url.starts_with("postgresql://"));
+    refresh_metadata_batch_contract(&url).await;
+}
