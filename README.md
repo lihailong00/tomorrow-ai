@@ -1,10 +1,12 @@
-# 明日 Tomorrow AI
+# 妥啦（Tada）
+
+GitHub 仓库：[lihailong00/Tada](https://github.com/lihailong00/Tada)。App 显示名称为“妥啦”，现有安装可覆盖升级。
 
 Android 首发的个人 AI 助手首版。客户端使用 React Native / TypeScript，Android 系统能力使用 Kotlin；业务 API、持久任务执行器、文件服务和 Google 连接器使用 Rust，Agent 执行循环使用独立的 TypeScript + Pi 服务。此版本提供可安装、可连接后端的实际工作流程，功能范围与后续产品规划分别记录。
 
 ## 开始体验
 
-在 Android 10 或更新手机安装 `artifacts/apk/tomorrow-ai-latest.apk`。安装包已包含界面资源，无需 Metro，默认连接已部署的云端 HTTPS 服务：
+在 Android 10 或更新手机安装 `artifacts/apk/tada-latest.apk`。安装包已包含界面资源，无需 Metro，默认连接已部署的云端 HTTPS 服务：
 
 `https://api.example.invalid`
 
@@ -72,7 +74,7 @@ MODEL_NAME=your-provider-model-name
 
 语音使用后端 ASR：阿里云百炼配置 `ASR_PROTOCOL=qwen_asr`、`ASR_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`、`ASR_MODEL=qwen3-asr-flash`，`ASR_API_KEY` 只放后端私有环境。也保留 `openai_transcriptions` multipart 协议。手机录音结束后自动转为可编辑文字，用户确认后发送；失败可重试或取消。未配置时明确提示不可转写。文件大小、配额与转写边界见 [文件服务说明](crates/attachments/README.md)。
 
-2026-10-27 语音更新：云端已接入 Qwen3-ASR-Flash，用合成中文 M4A/AAC 录音完成真实转写、缓存复用、跨用户拒绝和临时音频删除验证；只发起一次识别请求，没有发送短信或调用聊天模型。手机端 45 项测试（含 5 项录音转文字流程）通过，APK 0.1.2 / versionCode 3 已同步到 `artifacts/apk/tomorrow-ai-latest.apk`。本次未做真机麦克风到云端的整链路验收。
+2026-10-27 语音更新：云端已接入 Qwen3-ASR-Flash，用合成中文 M4A/AAC 录音完成真实转写、缓存复用、跨用户拒绝和临时音频删除验证；只发起一次识别请求，没有发送短信或调用聊天模型。手机端 45 项测试（含 5 项录音转文字流程）通过，APK 0.1.2 / versionCode 3 已同步到 `artifacts/apk/tada-latest.apk`。本次未做真机麦克风到云端的整链路验收。
 
 Google OAuth 的回调、只读权限、加密密钥及断开连接语义见 [连接器说明](crates/connectors/README.md)。本机代码测试不能代替 Google 项目审核或真实账号授权验证。
 
@@ -112,13 +114,13 @@ cargo check -p tomorrow-worker --features temporal --locked
 
 ### APK 存放与清理约定
 
-所有交付 APK 统一保存在 `artifacts/apk/`，不再放在 `artifacts/` 根目录或散落到其他项目目录。每次使用 `./scripts/Build-Android.ps1` 构建时，保留 `tomorrow-ai-v<版本号>-<北京时间 yyyyMMdd-HHmmss-fff>.apk`，同时更新固定入口 `tomorrow-ai-latest.apk`。版本号读取 `apps/mobile/package.json`。
+所有交付 APK 统一保存在 `artifacts/apk/`，不再放在 `artifacts/` 根目录或散落到其他项目目录。每次使用 `./scripts/Build-Android.ps1` 构建时，保留 `tada-v<版本号>-<北京时间 yyyyMMdd-HHmmss-fff>.apk`，同时更新固定入口 `tada-latest.apk`。旧入口 `tomorrow-ai-latest.apk` 同步指向同一最新版，兼容已有下载路径。版本号读取 `apps/mobile/package.json`。
 
 清理历史安装包、仅保留最新版时，在项目根目录执行：
 
 ```powershell
 Get-ChildItem -LiteralPath ./artifacts/apk -File -Filter '*.apk' |
-  Where-Object Name -ne 'tomorrow-ai-latest.apk' |
+  Where-Object Name -ne 'tada-latest.apk' |
   Remove-Item -Force
 ```
 
@@ -145,7 +147,7 @@ OpenAPI：运行中的 `GET /v1/openapi.json`；也可用 `cargo run -p tomorrow
 ## 产品与路线文档
 
 - [Today.ai 功能梳理与对标范围](docs/01-today-ai-功能梳理与对标范围.md)
-- [Tomorrow AI 技术路线与实施计划](docs/02-tomorrow-ai-技术路线与实施计划.md)
+- [妥啦（Tada）技术路线与实施计划](docs/02-tomorrow-ai-技术路线与实施计划.md)
 - [首版接口协作契约](docs/implementation-contract.md)
 
 路线文档中的浏览器执行、跨外部服务的多步工具调用、语义检索、完整离线队列、远程推送、正式渠道发布与三端验证仍需后续实现和验收；当前 Pi 工具限于本产品的记忆、任务、计划和文本附件。

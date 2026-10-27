@@ -67,7 +67,7 @@ export function IntroScreen({
           },
         ]}
       >
-        你好，我是 Tomorrow
+        你好，我是妥啦
       </Text>
       <Text
         style={[
@@ -707,7 +707,7 @@ export function SettingsScreen() {
       <ErrorNotice message={action.error} />
       {notice ? <Notice>{notice}</Notice> : null}
       <Text style={[s.small, { textAlign: 'center', marginTop: 24 }]}>
-        Tomorrow · 0.1
+        妥啦 · 0.1.3
       </Text>
     </ScrollView>
   );

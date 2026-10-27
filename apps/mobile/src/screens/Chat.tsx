@@ -290,7 +290,7 @@ export function ChatScreen({
             <View key={message.id} style={chat.assistantMessage}>
               <View style={chat.messageIdentity}>
                 <AssistantOrb size={22} />
-                <Text style={chat.assistantName}>Tomorrow</Text>
+                <Text style={chat.assistantName}>妥啦</Text>
                 {message.model_mode === 'local' && (
                   <Pill tone="neutral">本地生成</Pill>
                 )}

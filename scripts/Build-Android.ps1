@@ -141,10 +141,12 @@ try {
     throw 'package.json 中的版本号无效，无法生成安装包文件名。'
   }
   $buildStamp = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString('yyyyMMdd-HHmmss-fff')
-  $apkPath = Join-Path $artifactPath "tomorrow-ai-v$packageVersion-$buildStamp.apk"
+  $apkPath = Join-Path $artifactPath "tada-v$packageVersion-$buildStamp.apk"
   Copy-Item -LiteralPath (Join-Path $mobilePath 'android/app/build/outputs/apk/debug/app-debug.apk') -Destination $apkPath -Force
-  $latestApkPath = Join-Path $artifactPath 'tomorrow-ai-latest.apk'
+  $latestApkPath = Join-Path $artifactPath 'tada-latest.apk'
   Copy-Item -LiteralPath $apkPath -Destination $latestApkPath -Force
+  # Preserve the existing fixed download path after the product rename.
+  Copy-Item -LiteralPath $apkPath -Destination (Join-Path $artifactPath 'tomorrow-ai-latest.apk') -Force
   Write-Output ('测试安装包已生成：' + $apkPath)
   Write-Output ('最新版固定入口：' + $latestApkPath)
 } finally {

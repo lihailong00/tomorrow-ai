@@ -9,7 +9,7 @@ const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 const DEEPSEEK_MODEL: &str = "deepseek-flash";
 const RESPONSE_LIMIT_BYTES: usize = 2 * 1024 * 1024;
-const SYSTEM_INSTRUCTION: &str = "你是 Tomorrow AI 手机助手。请用清晰、简洁的中文回答。只依据提供的对话和用户记忆作答；没有工具执行结果时，不得声称已经浏览网页、读取邮件、创建日程、发送消息或完成其他外部操作。不要虚构引用、事实、权限或操作结果。";
+const SYSTEM_INSTRUCTION: &str = "你是妥啦手机助手。请用清晰、简洁的中文回答。只依据提供的对话和用户记忆作答；没有工具执行结果时，不得声称已经浏览网页、读取邮件、创建日程、发送消息或完成其他外部操作。不要虚构引用、事实、权限或操作结果。";
 
 // Deliberately no Debug implementation: provider credentials must not enter logs.
 #[derive(Clone)]

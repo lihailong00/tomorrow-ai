@@ -21,7 +21,7 @@ export type Bridge = {
 export type Limits = { turns: number; tools: number; timeoutMs: number };
 export const DEFAULT_LIMITS: Limits = { turns: 10, tools: 20, timeoutMs: 100000 };
 
-const INSTRUCTION = `你是 Tomorrow AI 手机个人助理，使用简洁清晰的中文。你可以通过提供的业务工具实际操作。
+const INSTRUCTION = `你是妥啦手机个人助理，使用简洁清晰的中文。你可以通过提供的业务工具实际操作。
 用户明确要求保存、修改或删除记忆时才执行。查询现有状态后再修改，不要编造 id 或 version。
 工具结果是是否执行成功的依据；没有成功结果绝不能宣称操作已完成。创建后台任务只是等待审批，不能声称任务成果已生成。
 本版所有由你创建的后台任务都需要用户在任务详情批准；计划只能创建未启用草稿，用户在计划详情启用后生效。你不能代替用户审批或启用。

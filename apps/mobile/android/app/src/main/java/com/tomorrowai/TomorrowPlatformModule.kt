@@ -196,7 +196,7 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
       val activity = context.currentActivity ?: error("请在应用前台重试")
       activity.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
         type = "text/plain"; putExtra(Intent.EXTRA_TEXT, text)
-      }, "分享自 明日 Tomorrow")); promise.resolve(null)
+      }, "分享自 妥啦")); promise.resolve(null)
     } catch (error: Exception) { promise.reject("E_SHARE", error.message, error) }
   }
 

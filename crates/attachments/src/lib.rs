@@ -7,7 +7,6 @@ use std::{
     time::Duration,
 };
 mod asr;
-mod photo_index;
 
 use axum::{
     Json, Router,
@@ -233,7 +232,6 @@ impl AttachmentsState {
         .execute(&pool)
         .await?;
         asr::initialize(&pool).await?;
-        photo_index::initialize(&pool).await?;
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(120))
@@ -518,7 +516,6 @@ pub fn router(state: AttachmentsState) -> Router {
         .route("/v1/uploads/{id}/transcribe", post(transcribe))
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state.clone())
-        .merge(photo_index::router(state))
 }
 
 async fn list(

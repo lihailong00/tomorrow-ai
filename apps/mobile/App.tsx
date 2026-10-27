@@ -310,13 +310,13 @@ function Application() {
             {main ? (
               <View style={s.row}>
                 <AssistantOrb size={34} />
-                <Text style={[s.wordmark, shell.brand]}>Tomorrow</Text>
+                <Text style={[s.wordmark, shell.brand]}>妥啦</Text>
               </View>
             ) : (
               <View style={[s.row, { gap: 8 }]}>
                 <IconButton label="返回" icon="back" onPress={back} />
                 {route.name === 'chat' && (
-                  <Text style={shell.chatTitle}>Tomorrow</Text>
+                  <Text style={shell.chatTitle}>妥啦</Text>
                 )}
               </View>
             )}

@@ -1,4 +1,4 @@
-# 明日 Tomorrow — Android 首版
+# 妥啦（Tada）— Android 首版
 
 React Native 0.82.1、React 19.1.1、TypeScript；原生 Android 包 `com.tomorrowai`，最低 Android 10（API 29）。[React Native 0.82 已停止上游支持](https://reactnative.dev/releases/)，当前固定版本用于首版构建，后续升级需验证原生依赖和鸿蒙迁移矩阵。
 
@@ -24,7 +24,7 @@ pnpm android
 
 ## 生成可独立启动的测试安装包
 
-在仓库根目录运行 `./scripts/Build-Android.ps1`，会查找 Node、JDK 17/21 与 Android SDK，安装锁定依赖、检查类型并构建双架构测试包。所有交付 APK 统一输出到仓库根目录的 `artifacts/apk/`：每次保留带版本号与北京时间的 `tomorrow-ai-v<版本号>-yyyyMMdd-HHmmss-fff.apk`，同时覆盖 `tomorrow-ai-latest.apk` 作为最新版固定入口。版本号读取本目录 `package.json`。不要再向 `artifacts/` 根目录或其他位置复制交付 APK。可通过 `-NodePath`、`-JavaHome`、`-AndroidHome` 指定本机工具；网络代理通过环境变量 `HTTPS_PROXY` / `HTTP_PROXY` 或 `-ProxyUrl` 临时传入。
+在仓库根目录运行 `./scripts/Build-Android.ps1`，会查找 Node、JDK 17/21 与 Android SDK，安装锁定依赖、检查类型并构建双架构测试包。所有交付 APK 统一输出到仓库根目录的 `artifacts/apk/`：每次保留带版本号与北京时间的 `tada-v<版本号>-yyyyMMdd-HHmmss-fff.apk`，同时覆盖 `tada-latest.apk` 作为最新版固定入口。版本号读取本目录 `package.json`。不要再向 `artifacts/` 根目录或其他位置复制交付 APK。可通过 `-NodePath`、`-JavaHome`、`-AndroidHome` 指定本机工具；网络代理通过环境变量 `HTTPS_PROXY` / `HTTP_PROXY` 或 `-ProxyUrl` 临时传入。
 
 也可直接使用 Gradle：
 
