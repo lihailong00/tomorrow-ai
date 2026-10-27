@@ -46,6 +46,7 @@ async fn check_memory_titles(repository: &Repository) {
                 content: "Original content".into(),
                 kind: "fact".into(),
                 source: None,
+                client_request_id: None,
             },
         )
         .await;
@@ -60,6 +61,7 @@ async fn check_memory_titles(repository: &Repository) {
                     content: "x".repeat(150),
                     kind: "fact".into(),
                     source: None,
+                    client_request_id: None,
                 },
             )
             .await
@@ -74,6 +76,7 @@ async fn check_memory_titles(repository: &Repository) {
                 content: "Content".into(),
                 kind: "fact".into(),
                 source: None,
+                client_request_id: None,
             },
         )
         .await

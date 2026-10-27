@@ -200,6 +200,7 @@ async fn schedules_coalesce_missed_runs_and_do_not_dispatch_twice() {
                 time: "08:00".into(),
                 timezone: "Asia/Shanghai".into(),
                 enabled: Some(true),
+                client_request_id: None,
             },
         )
         .await
@@ -236,6 +237,7 @@ async fn local_document_uses_only_actual_data_and_labels_capability() {
                 content: "完成安卓首版".into(),
                 kind: "project".into(),
                 source: None,
+                client_request_id: None,
             },
         )
         .await
@@ -258,6 +260,7 @@ async fn execution_reads_current_memories_and_persists_results_once() {
                 content: "不该再出现的私人资料".into(),
                 kind: "fact".into(),
                 source: None,
+                client_request_id: None,
             },
         )
         .await
@@ -277,6 +280,7 @@ async fn execution_reads_current_memories_and_persists_results_once() {
                 content: "完成记忆管理功能".into(),
                 kind: "goal".into(),
                 source: None,
+                client_request_id: None,
             },
         )
         .await

@@ -157,6 +157,7 @@ pub struct CreateMemory {
     pub content: String,
     pub kind: String,
     pub source: Option<String>,
+    pub client_request_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UpdateMemory {
@@ -181,6 +182,7 @@ pub struct CreateSchedule {
     pub time: String,
     pub timezone: String,
     pub enabled: Option<bool>,
+    pub client_request_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct UpdateSchedule {

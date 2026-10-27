@@ -80,9 +80,48 @@ function transcript(input: RunInput, model: Model<'openai-completions'>, webEnab
   return result;
 }
 
-function safeDetail(value: unknown): string {
-  const text = JSON.stringify(value);
-  return text.length > 48000 ? `${text.slice(0, 48000)}\n[结果过长，已截断]` : text;
+const TOOL_RESULT_LIMIT = 48000;
+const MUTATING_TOOLS = new Set(['save_memory', 'update_memory', 'delete_memory', 'create_task',
+  'cancel_task', 'create_schedule', 'pause_schedule']);
+
+/** Never cut serialized JSON: it can remove IDs, escape boundaries and continuation metadata. */
+export function safeToolResult(value: unknown, tool: string): string {
+  const text = JSON.stringify(value) ?? 'null';
+  if (text.length <= TOOL_RESULT_LIMIT) return text;
+  const object = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const sourceNext = (typeof object.next_offset === 'number' && Number.isSafeInteger(object.next_offset)) ||
+    (typeof object.next_offset === 'string' && object.next_offset.length <= 1000) ? object.next_offset : null;
+  if (Array.isArray(object.items) && Number.isSafeInteger(object.offset) && (object.offset as number) >= 0) {
+    const items = [...object.items];
+    while (items.length) {
+      items.pop();
+      const page = { ...object, items, next_offset: (object.offset as number) + items.length,
+        has_more: true, truncated: true, result_budget_chars: TOOL_RESULT_LIMIT };
+      const result = JSON.stringify(page);
+      if (items.length && result.length <= TOOL_RESULT_LIMIT) return result;
+    }
+  }
+  const identifiers = (source: Record<string, unknown>) => Object.fromEntries(
+    ['id', 'operation_id', 'task_id', 'schedule_id', 'version', 'status', 'enabled', 'replayed',
+      'offset', 'limit', 'has_more', 'detail_tool', 'content_next_offset', 'instruction_next_offset', 'result_next_offset']
+      .filter(key => ['string', 'number', 'boolean'].includes(typeof source[key]) &&
+        (typeof source[key] !== 'string' || (source[key] as string).length <= 1000))
+      .map(key => [key, source[key]]));
+  const inner = object.value && typeof object.value === 'object' && !Array.isArray(object.value)
+    ? object.value as Record<string, unknown> : undefined;
+  if (MUTATING_TOOLS.has(tool) && inner) {
+    // Rust has already committed this operation. Preserve confirmation and durable identity
+    // even if an unexpectedly large echoed value cannot fit in model context.
+    const readTool = tool.endsWith('memory') ? 'get_memory' : tool.endsWith('task') ? 'get_task' : 'get_schedule';
+    return JSON.stringify({ ...identifiers(object), value: identifiers(inner), operation_succeeded: true,
+      truncated: true, message: '操作已成功，较长结果未完整显示。',
+      ...(tool !== 'delete_memory' && typeof inner.id === 'string' && inner.id.length <= 1000 ? { retrieval: { tool: readTool, arguments: { id: inner.id } } } : {}) });
+  }
+  return JSON.stringify({ ...identifiers(object), truncated: true,
+    error: { code: 'tool_result_too_large', message: '本次结果未完整提供；请缩小查询范围、limit，或按编号和正文偏移读取。' },
+    // Returning the same page offset is deliberate: no omitted item has been consumed.
+    ...(Number.isSafeInteger(object.offset) ? { next_offset: object.offset, has_more: true,
+      source_next_offset: sourceNext } : { next_offset: sourceNext }) });
 }
 
 export async function executeRun(input: RunInput, settings: ModelSettings, bridge: Bridge,
@@ -155,7 +194,7 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
         try {
           checkActive(); toolSignal?.throwIfAborted();
           const value = await bounded(() => bridge.tool(definition.name, args, combinedSignal(toolSignal), index));
-          return { content: [{ type: 'text', text: safeDetail(value) }], details: { tool: definition.name } };
+          return { content: [{ type: 'text', text: safeToolResult(value, definition.name) }], details: { tool: definition.name } };
         } catch (error) {
           if (error instanceof RunError && error.code === 'agent_replay_conflict') {
             replayConflict = true; agent?.abort();

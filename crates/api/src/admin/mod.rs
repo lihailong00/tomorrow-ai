@@ -975,8 +975,8 @@ async fn users(
     let pool = state.repository.pool();
     let total: i64 = sqlx::query_scalar("SELECT CAST(COUNT(*) AS BIGINT) FROM users")
         .fetch_one(&pool).await?;
-    let rows=sqlx::query("SELECT u.id,u.email,u.name,u.created_at,COALESCE(c.disabled,0) AS disabled,COALESCE(r.role,'user') AS role FROM users u LEFT JOIN admin_user_controls c ON c.user_id=u.id LEFT JOIN admin_roles r ON r.user_id=u.id ORDER BY u.created_at DESC,u.id LIMIT $1 OFFSET $2").bind(limit).bind(offset).fetch_all(&pool).await?;
-    let items:Vec<Value>=rows.into_iter().map(|row|json!({"id":row.get::<String,_>("id"),"email":row.get::<String,_>("email"),"name":row.get::<String,_>("name"),"created_at":timestamp(row.get::<i64,_>("created_at")),"disabled":row.get::<i64,_>("disabled")!=0,"role":row.get::<String,_>("role")})).collect();
+    let rows=sqlx::query("SELECT u.id,u.email,u.name,p.phone,u.created_at,COALESCE(c.disabled,0) AS disabled,COALESCE(r.role,'user') AS role FROM users u LEFT JOIN phone_identities p ON p.user_id=u.id LEFT JOIN admin_user_controls c ON c.user_id=u.id LEFT JOIN admin_roles r ON r.user_id=u.id ORDER BY u.created_at DESC,u.id LIMIT $1 OFFSET $2").bind(limit).bind(offset).fetch_all(&pool).await?;
+    let items:Vec<Value>=rows.into_iter().map(|row|json!({"id":row.get::<String,_>("id"),"email":row.get::<String,_>("email"),"phone":row.get::<Option<String>,_>("phone"),"name":row.get::<String,_>("name"),"created_at":timestamp(row.get::<i64,_>("created_at")),"disabled":row.get::<i64,_>("disabled")!=0,"role":row.get::<String,_>("role")})).collect();
     let has_more = offset.saturating_add(items.len() as i64) < total;
     Ok(Json(json!({"items":items,"offset":offset,"limit":limit,"total":total,"has_more":has_more})))
 }
@@ -1426,6 +1426,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn users_list_includes_real_phone_identities_without_changing_email_roles_or_pagination() {
+        let f = fixture().await;
+        let (cookie, csrf, owner_id) = owner(&f.state).await;
+        let first = f.state.repository.create_phone_user("13800138000", "Same name", "Asia/Shanghai").await.unwrap();
+        let second = f.state.repository.create_phone_user("13900139000", "Same name", "Asia/Shanghai").await.unwrap();
+        let mut listed = HashMap::new();
+        for offset in [0, 2] {
+            let (status, _, body) = call(&f.state, Method::GET,
+                &format!("/admin/api/users?offset={offset}&limit=2"), None,
+                Some(&cookie), None, "https://unit.test").await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["total"], 3);
+            assert_eq!(body["offset"], offset);
+            assert_eq!(body["has_more"], offset == 0);
+            for item in body["items"].as_array().unwrap() {
+                assert!(listed.insert(item["id"].as_str().unwrap().to_owned(), item.clone()).is_none());
+            }
+        }
+        assert_eq!(listed.len(), 3);
+        assert_eq!(listed[&first.id]["phone"], "+8613800138000");
+        assert_eq!(listed[&second.id]["phone"], "+8613900139000");
+        assert_eq!(listed[&first.id]["name"], listed[&second.id]["name"]);
+        assert_eq!(listed[&first.id]["email"], first.email);
+        assert_eq!(listed[&first.id]["role"], "user");
+        assert_eq!(listed[&owner_id]["email"], "owner@example.test");
+        assert_eq!(listed[&owner_id]["phone"], Value::Null);
+        assert_eq!(listed[&owner_id]["role"], "owner");
+        let (status, _, _) = call(&f.state, Method::POST,
+            &format!("/admin/api/users/{}/reset-password", first.id),
+            Some(json!({"new_password":"new phone fixture password"})),
+            Some(&cookie), Some(&csrf), "https://unit.test").await;
+        assert_eq!(status, StatusCode::OK);
+        let credentials: Vec<String> = sqlx::query_scalar("SELECT user_id FROM phone_credentials")
+            .fetch_all(&f.state.repository.pool()).await.unwrap();
+        assert_eq!(credentials, vec![first.id]);
+    }
+
+    #[tokio::test]
     async fn users_pagination_reaches_accounts_beyond_five_hundred() {
         let f = fixture().await;
         let (cookie, _, _) = owner(&f.state).await;
@@ -1778,6 +1816,7 @@ mod tests {
                     time: "09:00".into(),
                     timezone: "Asia/Shanghai".into(),
                     enabled: Some(true),
+                    client_request_id: None,
                 },
             )
             .await

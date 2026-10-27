@@ -4,7 +4,7 @@ import type { StreamFn } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 import { resolveModel } from './config.js';
-import { executeRun, RunError, validateRun, type Bridge, type RunEvent, type RunInput } from './runtime.js';
+import { executeRun, RunError, safeToolResult, validateRun, type Bridge, type RunEvent, type RunInput } from './runtime.js';
 import { createDeepSeekWeb } from './web.js';
 
 const settings = resolveModel({ DEEPSEEK_API_KEY: 'model-key-never-in-transcript' });
@@ -37,6 +37,44 @@ function bridge(fail = false) {
 }
 const call: AssistantMessage['content'] = [{ type: 'toolCall', id: 'call-1', name: 'save_memory', arguments: { content: '喜欢简洁回答' } }];
 const final: AssistantMessage['content'] = [{ type: 'text', text: '已保存你的回答偏好。' }];
+
+test('large read pages remain valid JSON with continuation at the first omitted item', () => {
+  const value = { items: Array.from({ length: 30 }, (_, id) => ({ id: `id-${id}`, content: '中文😀\\\"\n'.repeat(200) })),
+    offset: 500, next_offset: 530, has_more: true, detail_tool: 'get_memory' };
+  const text = safeToolResult(value, 'list_memories');
+  assert.ok(text.length <= 48000);
+  const result = JSON.parse(text);
+  assert.ok(result.items.length > 0 && result.items.length < 30);
+  assert.equal(result.next_offset, 500 + result.items.length);
+  assert.equal(result.detail_tool, 'get_memory');
+  assert.equal(result.has_more, true);
+  assert.equal(result.truncated, true);
+  assert.deepEqual(result.items, value.items.slice(0, result.items.length));
+});
+
+test('a single oversized read result is explicit and never advances past unread data', () => {
+  const result = JSON.parse(safeToolResult({ items: [{ id: 'long', content: '😀'.repeat(50000) }],
+    offset: 500, next_offset: 501, has_more: true, detail_tool: 'get_memory' }, 'list_memories'));
+  assert.equal(result.error.code, 'tool_result_too_large');
+  assert.equal(result.next_offset, 500);
+  assert.equal(result.source_next_offset, 501);
+  assert.equal(result.detail_tool, 'get_memory');
+});
+
+test('large committed mutation responses preserve confirmation, operation identity and retrieval', () => {
+  for (const [tool, read] of [['save_memory', 'get_memory'], ['create_task', 'get_task'], ['create_schedule', 'get_schedule']]) {
+    const result = JSON.parse(safeToolResult({ value: { id: 'committed-id', status: 'waiting_approval',
+      enabled: false, version: 4, content: 'x'.repeat(60000) }, replayed: false, operation_id: 'effect-id' }, tool!));
+    assert.equal(result.operation_succeeded, true);
+    assert.equal(result.operation_id, 'effect-id');
+    assert.equal(result.value.id, 'committed-id');
+    assert.equal(result.value.status, 'waiting_approval');
+    assert.equal(result.value.enabled, false);
+    assert.equal(result.value.version, 4);
+    assert.equal(result.replayed, false);
+    assert.equal(result.retrieval.tool, read);
+  }
+});
 
 test('the real Pi loop executes a tool, observes its result and continues', async () => {
   const fixture = bridge(); const contexts: string[] = [];

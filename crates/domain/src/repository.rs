@@ -48,21 +48,30 @@ impl Repository {
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Memory>, Option<i64>), DomainError> {
+        self.search_memories_page(user_id, kind, None, offset, limit).await
+    }
+    /// Literal, case-sensitive Unicode search. Tenant/category/search all precede LIMIT.
+    pub async fn search_memories_page(
+        &self, user_id: &str, kind: Option<&str>, query: Option<&str>, offset: i64, limit: i64,
+    ) -> Result<(Vec<Memory>, Option<i64>), DomainError> {
         validate_page(offset, limit)?;
+        if query.is_some_and(|value| value.chars().count() > 200) {
+            return Err(DomainError::Validation("记忆查询最多 200 字".into()));
+        }
         if let Some(kind) = kind {
             memory_kind(kind)?;
         }
         let mut connection = self.pool.acquire().await?;
         // Memory categories live in JSON; apply them in SQL before the page limit.
-        let category = if connection.backend_name() == "PostgreSQL" {
-            "CAST(body AS JSONB)->>'kind'"
+        let (category, search) = if connection.backend_name() == "PostgreSQL" {
+            ("CAST(body AS JSONB)->>'kind'", "strpos(CAST(body AS JSONB)->>'title',$5)>0 OR strpos(CAST(body AS JSONB)->>'content',$5)>0")
         } else {
-            "json_extract(body, '$.kind')"
+            ("json_extract(body, '$.kind')", "instr(json_extract(body,'$.title'),$5)>0 OR instr(json_extract(body,'$.content'),$5)>0")
         };
-        let query = format!("SELECT body FROM resources WHERE user_id=$1 AND kind='memory' AND ($2='' OR {category}=$2) ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4");
-        let rows = sqlx::query(&query)
+        let sql = format!("SELECT body FROM resources WHERE user_id=$1 AND kind='memory' AND ($2='' OR {category}=$2) AND ($5='' OR {search}) ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4");
+        let rows = sqlx::query(&sql)
             .bind(user_id).bind(kind.unwrap_or(""))
-            .bind(limit + 1).bind(offset)
+            .bind(limit + 1).bind(offset).bind(query.unwrap_or(""))
             .fetch_all(&mut *connection).await?;
         let items = rows.into_iter().map(|row| {
             serde_json::from_str(row.get::<&str, _>("body"))
@@ -77,24 +86,60 @@ impl Repository {
     ) -> Result<Memory, DomainError> {
         memory_kind(&input.kind)?;
         let content = validate_text(&input.content, "记忆内容", 10000)?;
-        let title = match input.title.as_deref().filter(|value| !value.trim().is_empty()) {
+        let title = match input
+            .title
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
             Some(value) => validate_text(value, "标题", 120)?,
             None => validate_text(&content, "标题", 120)
                 .unwrap_or_else(|_| content.chars().take(40).collect()),
         };
+        let request_id = input
+            .client_request_id
+            .as_deref()
+            .map(|value| validate_text(value, "请求编号", 120))
+            .transpose()?;
+        let source = input.source.unwrap_or_else(|| "用户手动创建".into());
+        let fingerprint = creation_fingerprint(&(&title, &content, &input.kind, &source))?;
         let time = timestamp(now());
         let memory = Memory {
             id: new_id(),
             title,
             content,
             kind: input.kind,
-            source: input.source.unwrap_or_else(|| "用户手动创建".into()),
+            source,
             created_at: time.clone(),
             updated_at: time,
             version: 1,
         };
-        self.put_resource(user_id, "memory", &memory.id, &memory)
-            .await?;
+        let mut transaction = self.pool.begin().await?;
+        let (id, created) = reserve_creation(
+            &mut transaction,
+            user_id,
+            "memory",
+            request_id.as_deref(),
+            &fingerprint,
+            &memory.id,
+        )
+        .await?;
+        if !created {
+            let row = sqlx::query(
+                "SELECT body FROM resources WHERE user_id=$1 AND kind='memory' AND id=$2",
+            )
+            .bind(user_id)
+            .bind(&id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(deleted_creation_conflict)?;
+            let existing = serde_json::from_str(row.get::<&str, _>("body"))
+                .map_err(|error| DomainError::Internal(error.to_string()))?;
+            transaction.commit().await?;
+            return Ok(existing);
+        }
+        sqlx::query("INSERT INTO resources(id,user_id,kind,body,created_at,updated_at)VALUES($1,$2,'memory',$3,$4,$4)")
+            .bind(&memory.id).bind(user_id).bind(serde_json::to_string(&memory).map_err(|error|DomainError::Internal(error.to_string()))?).bind(now()).execute(&mut *transaction).await?;
+        transaction.commit().await?;
         Ok(memory)
     }
     pub async fn update_memory(
@@ -184,15 +229,26 @@ impl Repository {
         offset: i64,
         limit: i64,
     ) -> Result<(Vec<Task>, Option<i64>), DomainError> {
+        self.search_tasks_page(user_id, status, None, offset, limit).await
+    }
+    pub async fn search_tasks_page(
+        &self, user_id: &str, status: &str, query: Option<&str>, offset: i64, limit: i64,
+    ) -> Result<(Vec<Task>, Option<i64>), DomainError> {
         validate_page(offset, limit)?;
+        if query.is_some_and(|value| value.chars().count() > 200) {
+            return Err(DomainError::Validation("任务查询最多 200 字".into()));
+        }
         if !["all", "active", "done", "queued", "running", "waiting_approval", "succeeded", "failed", "cancelled", "uncertain"].contains(&status) {
             return Err(DomainError::Validation("无效的任务状态".into()));
         }
-        let items = sqlx::query(
-            "SELECT * FROM tasks WHERE user_id=$1 AND ($2='all' OR status=$2 OR ($2='active' AND status IN ('queued','running','waiting_approval','uncertain')) OR ($2='done' AND status='succeeded')) ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4",
-        )
-        .bind(user_id).bind(status).bind(limit + 1).bind(offset)
-        .fetch_all(&self.pool)
+        let mut connection = self.pool.acquire().await?;
+        let search = if connection.backend_name() == "PostgreSQL" {
+            "strpos(title,$5)>0 OR strpos(prompt,$5)>0 OR strpos(COALESCE(result,''),$5)>0"
+        } else { "instr(title,$5)>0 OR instr(prompt,$5)>0 OR instr(COALESCE(result,''),$5)>0" };
+        let sql = format!("SELECT * FROM tasks WHERE user_id=$1 AND ($2='all' OR status=$2 OR ($2='active' AND status IN ('queued','running','waiting_approval','uncertain')) OR ($2='done' AND status='succeeded')) AND ($5='' OR {search}) ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4");
+        let items = sqlx::query(&sql)
+        .bind(user_id).bind(status).bind(limit + 1).bind(offset).bind(query.unwrap_or(""))
+        .fetch_all(&mut *connection)
         .await?
         .iter()
         .map(task_from)
@@ -340,6 +396,22 @@ impl Repository {
             .map(schedule_from)
             .collect()
     }
+    pub async fn search_schedules_page(
+        &self, user_id: &str, query: Option<&str>, offset: i64, limit: i64,
+    ) -> Result<(Vec<Schedule>, Option<i64>), DomainError> {
+        validate_page(offset, limit)?;
+        if query.is_some_and(|value| value.chars().count() > 200) {
+            return Err(DomainError::Validation("计划查询最多 200 字".into()));
+        }
+        let mut connection = self.pool.acquire().await?;
+        let search = if connection.backend_name() == "PostgreSQL" {
+            "strpos(title,$4)>0 OR strpos(prompt,$4)>0"
+        } else { "instr(title,$4)>0 OR instr(prompt,$4)>0" };
+        let sql = format!("SELECT * FROM schedules WHERE user_id=$1 AND ($4='' OR {search}) ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3");
+        let items = sqlx::query(&sql).bind(user_id).bind(limit + 1).bind(offset).bind(query.unwrap_or(""))
+            .fetch_all(&mut *connection).await?.iter().map(schedule_from).collect::<Result<Vec<_>,_>>()?;
+        Ok(finish_page(items, offset, limit))
+    }
     pub async fn schedule(&self, user_id: &str, id: &str) -> Result<Schedule, DomainError> {
         let row = sqlx::query("SELECT * FROM schedules WHERE user_id=$1 AND id=$2")
             .bind(user_id)
@@ -357,10 +429,52 @@ impl Repository {
         let title = validate_text(&input.title, "计划名称", 120)?;
         let instruction = validate_text(&input.instruction, "计划内容", 20000)?;
         let next = next_execution(&input.frequency, &input.time, &input.timezone, now(), false)?;
+        let request_id = input
+            .client_request_id
+            .as_deref()
+            .map(|value| validate_text(value, "请求编号", 120))
+            .transpose()?;
+        let enabled = input.enabled.unwrap_or(true);
+        let fingerprint = creation_fingerprint(&(
+            &title,
+            &instruction,
+            &input.frequency,
+            &input.time,
+            &input.timezone,
+            enabled,
+        ))?;
         let id = new_id();
+        let mut transaction = self.pool.begin().await?;
+        let (id, created) = reserve_creation(
+            &mut transaction,
+            user_id,
+            "schedule",
+            request_id.as_deref(),
+            &fingerprint,
+            &id,
+        )
+        .await?;
+        if !created {
+            let row = sqlx::query("SELECT * FROM schedules WHERE user_id=$1 AND id=$2")
+                .bind(user_id)
+                .bind(&id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or_else(deleted_creation_conflict)?;
+            let existing = schedule_from(&row)?;
+            transaction.commit().await?;
+            return Ok(existing);
+        }
         sqlx::query("INSERT INTO schedules(id,user_id,title,prompt,frequency,time_of_day,timezone,enabled,next_run_at,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)")
-            .bind(&id).bind(user_id).bind(title).bind(instruction).bind(input.frequency).bind(input.time).bind(input.timezone).bind(if input.enabled.unwrap_or(true){1_i64}else{0}).bind(next).bind(now()).execute(&self.pool).await?;
-        self.schedule(user_id, &id).await
+            .bind(&id).bind(user_id).bind(title).bind(instruction).bind(input.frequency).bind(input.time).bind(input.timezone).bind(if enabled{1_i64}else{0}).bind(next).bind(now()).execute(&mut *transaction).await?;
+        let row = sqlx::query("SELECT * FROM schedules WHERE user_id=$1 AND id=$2")
+            .bind(user_id)
+            .bind(&id)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let schedule = schedule_from(&row)?;
+        transaction.commit().await?;
+        Ok(schedule)
     }
     pub async fn update_schedule(
         &self,
@@ -755,6 +869,11 @@ impl Repository {
         ))
         .execute(&pool)
         .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/010_resource_creation_requests.sql"
+        ))
+        .execute(&pool)
+        .await?;
         // Authentication checks this table even in non-admin processes such as
         // attachment and connector services; it must exist before any login.
         sqlx::query("CREATE TABLE IF NOT EXISTS admin_user_controls(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,disabled BIGINT NOT NULL DEFAULT 0,updated_at BIGINT NOT NULL)")
@@ -964,6 +1083,39 @@ impl Repository {
     }
 }
 
+fn creation_fingerprint(value: &impl Serialize) -> Result<String, DomainError> {
+    serde_json::to_string(value)
+        .map(|value| auth::hash_token(&value))
+        .map_err(|error| DomainError::Internal(error.to_string()))
+}
+fn deleted_creation_conflict() -> DomainError {
+    DomainError::Conflict(
+        "上次保存的记录已被删除。请返回列表确认；需要再次创建时，请打开新的表单。".into(),
+    )
+}
+async fn reserve_creation(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Any>,
+    user_id: &str,
+    kind: &str,
+    request_id: Option<&str>,
+    fingerprint: &str,
+    resource_id: &str,
+) -> Result<(String, bool), DomainError> {
+    let Some(request_id) = request_id else {
+        return Ok((resource_id.to_owned(), true));
+    };
+    let inserted = sqlx::query("INSERT INTO resource_creation_requests(user_id,kind,request_id,fingerprint,resource_id,created_at)VALUES($1,$2,$3,$4,$5,$6)ON CONFLICT(user_id,kind,request_id)DO NOTHING")
+        .bind(user_id).bind(kind).bind(request_id).bind(fingerprint).bind(resource_id).bind(now()).execute(&mut **transaction).await?.rows_affected();
+    if inserted == 1 {
+        return Ok((resource_id.to_owned(), true));
+    }
+    let row = sqlx::query("SELECT fingerprint,resource_id FROM resource_creation_requests WHERE user_id=$1 AND kind=$2 AND request_id=$3")
+        .bind(user_id).bind(kind).bind(request_id).fetch_one(&mut **transaction).await?;
+    if row.get::<&str, _>("fingerprint") != fingerprint {
+        return Err(DomainError::Conflict("这次保存已对应其他内容。请先返回列表确认上次保存结果，再打开新表单创建；当前草稿请保留。".into()));
+    }
+    Ok((row.get("resource_id"), false))
+}
 fn chat_request_key(user_id: &str, request_id: &str) -> Result<String, DomainError> {
     Ok(format!("{user_id}:{}", validate_text(request_id, "请求编号", 120)?))
 }
@@ -1221,6 +1373,7 @@ mod administration_auth_tests {
                     time: "09:00".into(),
                     timezone: "Asia/Shanghai".into(),
                     enabled: Some(true),
+                    client_request_id: None,
                 },
             )
             .await

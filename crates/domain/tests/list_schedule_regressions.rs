@@ -187,6 +187,7 @@ async fn check_weekly_timezone(repository: &Repository) {
                 time: "23:30".into(),
                 timezone: "Pacific/Honolulu".into(),
                 enabled: Some(false),
+                client_request_id: None,
             },
         )
         .await
