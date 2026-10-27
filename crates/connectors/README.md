@@ -1,4 +1,8 @@
-# Google read-only connectors
+# Read-only account connectors and reviewed phone imports
+
+Chinese integrations use `/v1/integrations` and the `domestic` module. Native notifications and shares remain on the phone until explicitly imported. User-scoped imports work without vendor developer keys; optional mailbox authorization codes and personal platform tokens are held in the server's AES-GCM vault. OAuth adapters use one-time state and account generations; SQL account leases prevent refresh-token races across API replicas. Read attempts are limited to 30 per user/minute, with eight outbound operations per process; each user's imported library is bounded to 500 entries. See the root README for each adapter's actual supported scope and configuration requirements. No integration sends messages, pays, purchases or changes external documents.
+
+## Google connectors
 
 This Rust crate exposes authenticated `/v1/connectors` routes for Google Calendar,
 Gmail and Google Drive metadata. It does not implement external write operations.

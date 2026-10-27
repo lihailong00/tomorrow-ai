@@ -148,12 +148,13 @@ try {
   $buildStamp = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString('yyyyMMdd-HHmmss-fff')
   $apkPath = Join-Path $artifactPath "tada-v$packageVersion-$buildStamp.apk"
   Copy-Item -LiteralPath (Join-Path $mobilePath 'android/app/build/outputs/apk/debug/app-debug.apk') -Destination $apkPath -Force
-  $latestApkPath = Join-Path $artifactPath 'tada-latest.apk'
-  Copy-Item -LiteralPath $apkPath -Destination $latestApkPath -Force
-  # Preserve the existing fixed download path after the product rename.
-  Copy-Item -LiteralPath $apkPath -Destination (Join-Path $artifactPath 'tomorrow-ai-latest.apk') -Force
+  $publication = & (Join-Path $PSScriptRoot 'Publish-AndroidApk.ps1') -ApkPath $apkPath -OutputDirectory $artifactPath -AndroidHome $AndroidHome
   Write-Output ('测试安装包已生成：' + $apkPath)
-  Write-Output ('最新版固定入口：' + $latestApkPath)
+  if ($publication.Published) {
+    Write-Output ('最新版固定入口：' + $publication.LatestApkPath)
+  } else {
+    Write-Output ('此安装包的 versionCode ' + $publication.VersionCode + ' 低于已发布的 ' + $publication.LatestVersionCode + '，已保留带日期的安装包，未替换最新版。')
+  }
 } finally {
   Set-Location -LiteralPath $previousLocation
   foreach ($name in $previousEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process') }
