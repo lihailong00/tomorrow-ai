@@ -241,6 +241,8 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/api/config/check", post(check_config))
         .route("/admin/api/config/test-model", post(model_probe::test_model))
         .route("/admin/api/config/test-speech", post(model_probe::test_speech))
+        .route("/admin/api/config/test-vision", post(model_probe::test_vision))
+        .route("/admin/api/config/test-embedding", post(model_probe::test_embedding))
         .route("/admin/api/users", get(users).post(create_user))
         .route("/admin/api/users/{id}", axum::routing::patch(update_user))
         .route(
@@ -1448,6 +1450,35 @@ mod tests {
         sqlx::query("UPDATE admin_roles SET role='admin' WHERE user_id=$1").bind(user_id).execute(&f.state.repository.pool()).await.unwrap();
         let (status, _, _) = call(&f.state, Method::POST, path, Some(input), Some(&cookie), Some(&csrf), "https://unit.test").await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    #[tokio::test]
+    async fn auxiliary_probes_require_owner_csrf_revision_and_never_save_or_enable_features() {
+        for service in ["vision", "embedding"] {
+            let f = fixture().await;
+            let (cookie, csrf, user_id) = owner(&f.state).await;
+            let revision = f.state.settings.revision().await.unwrap();
+            let before = f.state.settings.effective_values().await.unwrap();
+            let input = json!({"expected_revision":revision,"changes":{}});
+            let path = format!("/admin/api/config/test-{service}");
+            let (status, _, _) = call(&f.state,Method::POST,&path,Some(input.clone()),None,None,"https://unit.test").await;
+            assert_eq!(status,StatusCode::UNAUTHORIZED);
+            let (status, _, _) = call(&f.state,Method::POST,&path,Some(input.clone()),Some(&cookie),None,"https://unit.test").await;
+            assert_eq!(status,StatusCode::FORBIDDEN);
+            let (status, _, body) = call(&f.state,Method::POST,&path,Some(input.clone()),Some(&cookie),Some(&csrf),"https://unit.test").await;
+            assert_eq!(status,StatusCode::OK); assert_eq!(body["code"],"not_configured");
+            let (status, _, _) = call(&f.state,Method::POST,&path,Some(json!({"expected_revision":revision+1,"changes":{}})),Some(&cookie),Some(&csrf),"https://unit.test").await;
+            assert_eq!(status,StatusCode::CONFLICT);
+            let (status, _, _) = call(&f.state,Method::POST,&path,Some(json!({"expected_revision":revision,"changes":{"SMS_PROVIDER":"disabled"}})),Some(&cookie),Some(&csrf),"https://unit.test").await;
+            assert_eq!(status,StatusCode::BAD_REQUEST);
+            let held = f.state.model_probe_jobs.clone().acquire_owned().await.unwrap();
+            let (status, _, _) = call(&f.state,Method::POST,&path,Some(input.clone()),Some(&cookie),Some(&csrf),"https://unit.test").await;
+            assert_eq!(status,StatusCode::TOO_MANY_REQUESTS); drop(held);
+            assert_eq!(f.state.settings.revision().await.unwrap(),revision);
+            assert_eq!(f.state.settings.effective_values().await.unwrap(),before);
+            sqlx::query("UPDATE admin_roles SET role='admin' WHERE user_id=$1").bind(user_id).execute(&f.state.repository.pool()).await.unwrap();
+            let (status, _, _) = call(&f.state,Method::POST,&path,Some(input),Some(&cookie),Some(&csrf),"https://unit.test").await;
+            assert_eq!(status,StatusCode::FORBIDDEN);
+        }
     }
     #[tokio::test]
     async fn setup_is_one_use_separate_session_and_cookie_is_revoked() {

@@ -335,7 +335,7 @@ async fn reserve(
     Ok(true)
 }
 
-fn valid_vector(mut vector: Vec<f64>, dimension: usize) -> Result<Vec<f64>, AttachmentError> {
+pub(crate) fn valid_vector(mut vector: Vec<f64>, dimension: usize) -> Result<Vec<f64>, AttachmentError> {
     if vector.len() != dimension || vector.iter().any(|x| !x.is_finite() || x.abs() > 1e6) {
         return Err(unavailable());
     }

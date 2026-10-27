@@ -26,7 +26,7 @@ export function ProviderPanel({ service, settings, edits, onEdits, onTest }: {
     service === "embedding" ? presets.find(preset => preset.id === "qwen-embedding")?.models : []) ?? [];
   const key = settings.find(item => item.key === state.keys.key);
   const keyEdit = edits[state.keys.key];
-  const testFingerprint = JSON.stringify(settings.filter(item => item.group === service)
+  const testFingerprint = JSON.stringify(settings.filter(item => item.group === service || state.inherited && ["ASR_BASE_URL", "ASR_API_KEY", "ASR_PROTOCOL"].includes(item.key))
     .map(item => [item.key, item.value, item.configured, item.locked, edits[item.key]]));
   useEffect(() => {
     testController.current?.abort(); testController.current = null;
@@ -197,12 +197,15 @@ export function ProviderPanel({ service, settings, edits, onEdits, onTest }: {
               <button type="button" className="button button-secondary" disabled={testing}
                 onClick={() => void testConnection()} aria-label={titles[service] + "测试连接"}>
                 <Icon name={service === "speech" ? "phone" : "spark"} size={16} />
-                {testing ? (service === "speech" ? "正在校验转写…" : "正在连接模型…") : "测试连接"}
+                {testing ? ({ model: "正在连接模型…", speech: "正在校验转写…", vision: "正在校验识图…", embedding: "正在校验向量…" }[service]) : "测试连接"}
               </button>
-              <p>{service === "speech" ? "使用内置短音频，可能产生少量语音识别费用。" : "发送一条简短测试消息，可能产生少量模型费用。"}
+              <p>{{ model: "发送一条简短测试消息，可能产生少量模型费用。", speech: "使用内置短音频，可能产生少量语音识别费用。",
+                vision: "发送内置测试图片，实际校验识图结果，可能产生少量模型费用。", embedding: "发送一段内置短文本，实际校验向量结果，可能产生少量模型费用。" }[service]}
                 <small>测试当前填写的配置，不会自动保存。</small></p>
             </div>
             {service === "speech" && <p className="provider-test-sample">测试音频：“明天上午九点提醒我开会。” · 当前支持千问 ASR Flash</p>}
+            {service === "vision" && <p className="provider-test-sample">测试图片：白底红色圆形 · 校验颜色和形状 · 测试不会自动开启图片理解</p>}
+            {service === "embedding" && <p className="provider-test-sample">测试短文本：“明天上午九点提醒我开会。” · 校验 1024 维有效向量 · 测试不会自动开启向量检索</p>}
             <div aria-live="polite">
               {testResult && <div className={"provider-test-result " + (testResult.ok ? "probe-success" : "probe-failure")} role="status">
                 <strong>{testResult.ok ? "✓ " : "!"} {testResult.message}</strong>

@@ -8,6 +8,7 @@ use std::{
 };
 mod asr;
 pub mod asr_probe;
+pub mod service_probe;
 mod ai_history;
 mod office;
 mod photo_index;

@@ -26,7 +26,7 @@ import {
 } from "./api";
 import { Icon, Orb } from "./icons";
 import { ProviderPanel } from "./ProviderPanel";
-import { providerIssue, type Service } from "./providers";
+import { currentService, providerIssue, type Service } from "./providers";
 
 type Page = "overview" | "ai" | "connections" | "users" | "maintenance";
 const navigation: {
@@ -382,9 +382,10 @@ export function App() {
       }
     });
   }
-  async function testProvider(service: "model" | "speech", signal: AbortSignal): Promise<ProviderProbe> {
+  async function testProvider(service: Service, signal: AbortSignal): Promise<ProviderProbe> {
     if (!session || !config) throw new Error("请先登录并加载配置");
-    const selected = config.settings.filter(item => item.group === service);
+    const inherited = (service === "vision" || service === "embedding") && currentService(config.settings, edits, service).inherited;
+    const selected = config.settings.filter(item => item.group === service || inherited && ["ASR_BASE_URL", "ASR_API_KEY", "ASR_PROTOCOL"].includes(item.key));
     const selectedEdits = Object.fromEntries(selected.filter(item => edits[item.key]).map(item => [item.key, edits[item.key]]));
     const issue = providerIssue(selected, selectedEdits);
     if (issue) throw new ApiError(400, "incomplete_configuration", issue);
@@ -1656,7 +1657,7 @@ function SettingsPanel({
   edits: Record<string, Edit>;
   onEdit: (key: string, edit: Edit) => void;
   revision?: number;
-  onTest?: (service: "model" | "speech", signal: AbortSignal) => Promise<ProviderProbe>;
+  onTest?: (service: Service, signal: AbortSignal) => Promise<ProviderProbe>;
 }) {
   const groups = useMemo(() => {
     const result = new Map<string, Setting[]>();
@@ -1689,7 +1690,7 @@ function SettingsPanel({
     <div className="settings-panels">
       {[...groups.entries()].map(([group, items]) => ["model", "speech", "vision", "embedding"].includes(group) ? (
         <ProviderPanel key={group + ":" + revision} service={group as Service} settings={settings} edits={edits}
-          onTest={onTest && (group === "model" || group === "speech") ? signal => onTest(group, signal) : undefined}
+          onTest={onTest ? signal => onTest(group as Service, signal) : undefined}
           onEdits={(changes) => Object.entries(changes).forEach(([key, edit]) => onEdit(key, edit))} />
       ) : (
         <section className="card" key={group}>

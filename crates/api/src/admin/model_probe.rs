@@ -38,6 +38,41 @@ pub(super) async fn test_speech(
     Ok(Json(serde_json::to_value(result).map_err(|_| internal())?))
 }
 
+pub(super) async fn test_vision(
+    State(state): State<AdminState>, session: AdminSession, Json(input): Json<ConfigInput>,
+) -> Result<Json<Value>> {
+    test_auxiliary(state, session, input, true).await
+}
+
+pub(super) async fn test_embedding(
+    State(state): State<AdminState>, session: AdminSession, Json(input): Json<ConfigInput>,
+) -> Result<Json<Value>> {
+    test_auxiliary(state, session, input, false).await
+}
+
+async fn test_auxiliary(state: AdminState, session: AdminSession, input: ConfigInput, vision: bool) -> Result<Json<Value>> {
+    require_owner(&session)?;
+    let prefix = if vision { "PHOTO_VISION" } else { "PHOTO_EMBEDDING" };
+    let base = format!("{prefix}_BASE_URL");
+    let key = format!("{prefix}_API_KEY");
+    let keys = [base.clone(), key.clone(), format!("{prefix}_MODEL"), format!("{prefix}_ENABLED"),
+        "ASR_BASE_URL".into(), "ASR_API_KEY".into(), "ASR_PROTOCOL".into()];
+    if input.changes.keys().any(|key| !keys.contains(key)) { return Err(invalid()); }
+    let _permit = state.model_probe_jobs.clone().try_acquire_owned().map_err(|_| busy())?;
+    rate_limit(&state, &format!("provider-probe:{}", session.user_id), 5).await?;
+    let (revision, saved) = state.settings.effective_snapshot().await?;
+    if revision != input.expected_revision { return Err(ConfigError::Conflict.into()); }
+    let values = state.settings.preview_effective_values(input.expected_revision, &input.changes).await?;
+    protect_key_scope(&saved, &values, &input.changes, &base, &key, "")?;
+    if values.get(&base).is_none_or(|base| base.trim().is_empty()) {
+        protect_key_scope(&saved, &values, &input.changes, "ASR_BASE_URL", "ASR_API_KEY", "")?;
+    }
+    let get = |name: &str| values.get(name).cloned();
+    let result = if vision { tomorrow_attachments::service_probe::vision(get).await }
+        else { tomorrow_attachments::service_probe::embedding(get).await };
+    Ok(Json(serde_json::to_value(result).map_err(|_| internal())?))
+}
+
 fn protect_saved_key(
     saved: &HashMap<String, String>, draft: &HashMap<String, String>, changes: &HashMap<String, Option<String>>,
 ) -> Result<()> {
