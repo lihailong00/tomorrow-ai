@@ -394,7 +394,7 @@ impl AttachmentsState {
         let token = headers
             .get(header::AUTHORIZATION)
             .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer "))
+            .and_then(tomorrow_domain::auth::bearer_token)
             .filter(|h| !h.is_empty() && h.len() <= 512)
             .ok_or_else(|| {
                 AttachmentError::new(

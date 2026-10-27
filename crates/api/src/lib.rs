@@ -257,7 +257,7 @@ impl FromRequestParts<Arc<AppState>> for Auth {
             .headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
+            .and_then(auth::bearer_token)
             .ok_or(DomainError::Unauthorized)?
             .to_owned();
         let user_id = state.repository.authenticate(&token).await?;
@@ -602,11 +602,23 @@ struct ChatResponse {
 async fn chat(
     State(state): State<Arc<AppState>>,
     auth: Auth,
-    Json(input): Json<ChatInput>,
+    Json(mut input): Json<ChatInput>,
 ) -> Result<Json<ChatResponse>> {
+    input.message = validate_text(&input.message, "消息", 20000)?;
+    input.client_request_id = input
+        .client_request_id
+        .map(|value| validate_text(&value, "请求编号", 120))
+        .transpose()?;
+    input.remember = Some(input.remember.unwrap_or(false));
+    let fingerprint = serde_json::to_string(&input)
+        .map_err(|_| DomainError::Validation("消息格式无效".into()))?;
     let request_id = input.client_request_id.clone();
     if let Some(id) = &request_id {
-        if let Some(cached) = state.repository.reserve_chat(&auth.user_id, id).await? {
+        if let Some(cached) = state
+            .repository
+            .reserve_chat(&auth.user_id, id, &fingerprint)
+            .await?
+        {
             return Ok(Json(
                 serde_json::from_value(cached)
                     .map_err(|_| DomainError::Internal("消息缓存读取失败".into()))?,
@@ -616,7 +628,10 @@ async fn chat(
     let result = run_chat(&state, &auth.user_id, input).await;
     if let Some(id) = request_id {
         if result.is_err() {
-            state.repository.release_chat(&auth.user_id, &id).await?;
+            state
+                .repository
+                .release_chat(&auth.user_id, &id, &fingerprint)
+                .await?;
         }
     }
     result.map(Json)
@@ -772,6 +787,7 @@ async fn run_chat(state: &AppState, user_id: &str, input: ChatInput) -> Result<C
                 response: serde_json::to_value(&response)
                     .map_err(|_| DomainError::Internal("消息缓存保存失败".into()))?,
             },
+            &fingerprint,
         )
         .await?;
     Ok(response)

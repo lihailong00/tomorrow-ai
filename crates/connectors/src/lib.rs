@@ -703,7 +703,7 @@ impl FromRequestParts<ConnectorState> for Auth {
             .headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
+            .and_then(tomorrow_domain::auth::bearer_token)
             .ok_or_else(ConnectorError::unauthorized)?;
         let user_id = state
             .inner

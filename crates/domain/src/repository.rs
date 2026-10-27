@@ -46,15 +46,15 @@ impl Repository {
     ) -> Result<Memory, DomainError> {
         memory_kind(&input.kind)?;
         let content = validate_text(&input.content, "记忆内容", 10000)?;
+        let title = match input.title.as_deref().filter(|value| !value.trim().is_empty()) {
+            Some(value) => validate_text(value, "标题", 120)?,
+            None => validate_text(&content, "标题", 120)
+                .unwrap_or_else(|_| content.chars().take(40).collect()),
+        };
         let time = timestamp(now());
         let memory = Memory {
             id: new_id(),
-            title: validate_text(
-                input.title.as_deref().unwrap_or_else(|| content.as_str()),
-                "标题",
-                120,
-            )
-            .unwrap_or_else(|_| content.chars().take(40).collect()),
+            title,
             content,
             kind: input.kind,
             source: input.source.unwrap_or_else(|| "用户手动创建".into()),
@@ -119,13 +119,22 @@ impl Repository {
         let time = now();
         let approval = input.approval_required.unwrap_or(false);
         sqlx::query("INSERT INTO tasks (id,user_id,title,prompt,kind,status,requires_approval,approval_summary,created_at,updated_at,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10) ON CONFLICT(idempotency_key) DO NOTHING")
-            .bind(&id).bind(user_id).bind(title).bind(&instruction).bind(kind).bind(if approval{"waiting_approval"}else{"queued"}).bind(if approval{1_i64}else{0}).bind(if approval{Some(instruction.as_str())}else{None}).bind(time).bind(&key).execute(&self.pool).await?;
+            .bind(&id).bind(user_id).bind(&title).bind(&instruction).bind(&kind).bind(if approval{"waiting_approval"}else{"queued"}).bind(if approval{1_i64}else{0}).bind(if approval{Some(instruction.as_str())}else{None}).bind(time).bind(&key).execute(&self.pool).await?;
         if let Some(key) = key {
             let row = sqlx::query("SELECT * FROM tasks WHERE user_id=$1 AND idempotency_key=$2")
                 .bind(user_id)
                 .bind(key)
                 .fetch_one(&self.pool)
                 .await?;
+            if row.get::<String, _>("title") != title
+                || row.get::<String, _>("prompt") != instruction
+                || row.get::<String, _>("kind") != kind
+                || (row.get::<i64, _>("requires_approval") != 0) != approval
+            {
+                return Err(DomainError::Conflict(
+                    "同一任务请求编号不能用于不同内容，请使用新的请求编号".into(),
+                ));
+            }
             return task_from(&row);
         }
         self.task(user_id, &id).await
@@ -371,7 +380,24 @@ impl Repository {
         Ok(count)
     }
     pub async fn conversations(&self, user_id: &str) -> Result<Vec<Conversation>, DomainError> {
-        self.resources(user_id, "conversation").await
+        let rows = sqlx::query("SELECT body FROM resources WHERE user_id=$1 AND kind='conversation' ORDER BY updated_at DESC,id DESC LIMIT 500")
+            .bind(user_id).fetch_all(&self.pool).await?;
+        let mut conversations = rows
+            .into_iter()
+            .map(|row| {
+                serde_json::from_str::<Conversation>(row.get::<&str, _>("body"))
+                    .map_err(|error| DomainError::Internal(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Resource timestamps retain second precision for existing databases;
+        // the conversation timestamp also orders activity within the same second.
+        conversations.sort_by(|a, b| {
+            chrono::DateTime::parse_from_rfc3339(&b.updated_at)
+                .ok()
+                .cmp(&chrono::DateTime::parse_from_rfc3339(&a.updated_at).ok())
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        Ok(conversations)
     }
     pub async fn conversation(&self, user_id: &str, id: &str) -> Result<Conversation, DomainError> {
         self.resource(user_id, "conversation", id).await
@@ -423,20 +449,34 @@ impl Repository {
         &self,
         user_id: &str,
         request_id: &str,
+        input_fingerprint: &str,
     ) -> Result<Option<serde_json::Value>, DomainError> {
-        let key = format!("{user_id}:{}", validate_text(request_id, "请求编号", 120)?);
-        sqlx::query("DELETE FROM chat_requests WHERE request_key=$1 AND user_id=$2 AND response IS NULL AND created_at<$3").bind(&key).bind(user_id).bind(now()-300).execute(&self.pool).await?;
-        let inserted=sqlx::query("INSERT INTO chat_requests(request_key,user_id,created_at)VALUES($1,$2,$3)ON CONFLICT(request_key)DO NOTHING").bind(&key).bind(user_id).bind(now()).execute(&self.pool).await?.rows_affected();
+        let key = chat_request_key(user_id, request_id)?;
+        let fingerprint = auth::hash_token(input_fingerprint);
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM chat_requests WHERE request_key=$1 AND user_id=$2 AND response IS NULL AND created_at<$3").bind(&key).bind(user_id).bind(now()-300).execute(&mut *transaction).await?;
+        let inserted=sqlx::query("INSERT INTO chat_requests(request_key,user_id,created_at)VALUES($1,$2,$3)ON CONFLICT(request_key)DO NOTHING").bind(&key).bind(user_id).bind(now()).execute(&mut *transaction).await?.rows_affected();
         if inserted > 0 {
+            sqlx::query("INSERT INTO chat_request_inputs(request_key,user_id,fingerprint)VALUES($1,$2,$3)")
+                .bind(&key).bind(user_id).bind(&fingerprint).execute(&mut *transaction).await?;
+            transaction.commit().await?;
             return Ok(None);
         }
-        let row =
-            sqlx::query("SELECT response FROM chat_requests WHERE request_key=$1 AND user_id=$2")
-                .bind(key)
+        let row = sqlx::query("SELECT c.response,i.fingerprint FROM chat_requests c LEFT JOIN chat_request_inputs i ON i.request_key=c.request_key AND i.user_id=c.user_id WHERE c.request_key=$1 AND c.user_id=$2")
+                .bind(&key)
                 .bind(user_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *transaction)
                 .await?;
+        let stored_fingerprint: Option<String> = row.get("fingerprint");
+        if stored_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+            // Older cached rows cannot prove which attachments, memory flag or
+            // conversation the original caller supplied. Never guess or replay.
+            return Err(DomainError::Conflict(
+                "同一消息请求编号不能用于不同内容；旧版请求请使用新的请求编号".into(),
+            ));
+        }
         let response: Option<String> = row.get("response");
+        transaction.commit().await?;
         match response {
             Some(value) => serde_json::from_str(&value)
                 .map(Some)
@@ -448,11 +488,17 @@ impl Repository {
         &self,
         user_id: &str,
         turn: &ChatTurn,
+        input_fingerprint: &str,
     ) -> Result<(), DomainError> {
+        let request_key = turn
+            .request_id
+            .as_deref()
+            .map(|request_id| chat_request_key(user_id, request_id))
+            .transpose()?;
         let mut transaction = self.pool.begin().await?;
-        if let Some(request_id) = &turn.request_id {
-            let changed=sqlx::query("UPDATE chat_requests SET response=$1 WHERE request_key=$2 AND user_id=$3 AND response IS NULL")
-                .bind(turn.response.to_string()).bind(format!("{user_id}:{request_id}")).bind(user_id).execute(&mut *transaction).await?.rows_affected();
+        if let Some(key) = request_key {
+            let changed=sqlx::query("UPDATE chat_requests SET response=$1 WHERE request_key=$2 AND user_id=$3 AND response IS NULL AND EXISTS(SELECT 1 FROM chat_request_inputs i WHERE i.request_key=$2 AND i.user_id=$3 AND i.fingerprint=$4)")
+                .bind(turn.response.to_string()).bind(key).bind(user_id).bind(auth::hash_token(input_fingerprint)).execute(&mut *transaction).await?.rows_affected();
             if changed != 1 {
                 return Err(DomainError::Conflict(
                     "消息请求已被处理，请重试获取结果".into(),
@@ -496,21 +542,37 @@ impl Repository {
         user_id: &str,
         request_id: &str,
         response: &serde_json::Value,
+        input_fingerprint: &str,
     ) -> Result<(), DomainError> {
-        sqlx::query("UPDATE chat_requests SET response=$1 WHERE request_key=$2 AND user_id=$3")
+        let key = chat_request_key(user_id, request_id)?;
+        let changed = sqlx::query("UPDATE chat_requests SET response=$1 WHERE request_key=$2 AND user_id=$3 AND response IS NULL AND EXISTS(SELECT 1 FROM chat_request_inputs i WHERE i.request_key=$2 AND i.user_id=$3 AND i.fingerprint=$4)")
             .bind(response.to_string())
-            .bind(format!("{user_id}:{request_id}"))
+            .bind(key)
             .bind(user_id)
+            .bind(auth::hash_token(input_fingerprint))
             .execute(&self.pool)
-            .await?;
+            .await?
+            .rows_affected();
+        if changed != 1 {
+            return Err(DomainError::Conflict(
+                "消息请求已被处理，请重试获取结果".into(),
+            ));
+        }
         Ok(())
     }
-    pub async fn release_chat(&self, user_id: &str, request_id: &str) -> Result<(), DomainError> {
+    pub async fn release_chat(
+        &self,
+        user_id: &str,
+        request_id: &str,
+        input_fingerprint: &str,
+    ) -> Result<(), DomainError> {
+        let key = chat_request_key(user_id, request_id)?;
         sqlx::query(
-            "DELETE FROM chat_requests WHERE request_key=$1 AND user_id=$2 AND response IS NULL",
+            "DELETE FROM chat_requests WHERE request_key=$1 AND user_id=$2 AND response IS NULL AND EXISTS(SELECT 1 FROM chat_request_inputs i WHERE i.request_key=$1 AND i.user_id=$2 AND i.fingerprint=$3)",
         )
-        .bind(format!("{user_id}:{request_id}"))
+        .bind(key)
         .bind(user_id)
+        .bind(auth::hash_token(input_fingerprint))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -592,6 +654,11 @@ impl Repository {
         ))
         .execute(&pool)
         .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/008_chat_request_inputs.sql"
+        ))
+        .execute(&pool)
+        .await?;
         // Authentication checks this table even in non-admin processes such as
         // attachment and connector services; it must exist before any login.
         sqlx::query("CREATE TABLE IF NOT EXISTS admin_user_controls(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,disabled BIGINT NOT NULL DEFAULT 0,updated_at BIGINT NOT NULL)")
@@ -611,10 +678,7 @@ impl Repository {
         name: &str,
         timezone: &str,
     ) -> Result<User, DomainError> {
-        let email = email.trim().to_lowercase();
-        if !email.contains('@') || email.len() > 254 {
-            return Err(DomainError::Validation("请输入有效邮箱".into()));
-        }
+        let email = auth::normalize_email(email)?;
         let name = validate_text(name, "昵称", 80)?;
         if timezone.parse::<chrono_tz::Tz>().is_err() {
             return Err(DomainError::Validation("无效的 IANA 时区".into()));
@@ -775,6 +839,10 @@ impl Repository {
         }
         Ok(())
     }
+}
+
+fn chat_request_key(user_id: &str, request_id: &str) -> Result<String, DomainError> {
+    Ok(format!("{user_id}:{}", validate_text(request_id, "请求编号", 120)?))
 }
 
 fn user_from(row: &AnyRow) -> User {

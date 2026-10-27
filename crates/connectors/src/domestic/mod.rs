@@ -661,7 +661,7 @@ impl FromRequestParts<IntegrationState> for User {
             .headers
             .get(header::AUTHORIZATION)
             .and_then(|header| header.to_str().ok())
-            .and_then(|header| header.strip_prefix("Bearer "))
+            .and_then(tomorrow_domain::auth::bearer_token)
             .ok_or_else(ConnectorError::unauthorized)?;
         Ok(Self(
             state
