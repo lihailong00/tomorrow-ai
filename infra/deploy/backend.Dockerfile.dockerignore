@@ -1,0 +1,18 @@
+# This is an allowlist. Never send .env, personal data, credentials or APKs.
+**
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/**
+!migrations/
+!migrations/**
+!services/
+!services/agent/
+!services/agent/package.json
+!services/agent/pnpm-lock.yaml
+!services/agent/tsconfig.json
+!services/agent/src/
+!services/agent/src/**
+!infra/
+!infra/deploy/
+!infra/deploy/**

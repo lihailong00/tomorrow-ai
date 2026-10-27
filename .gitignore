@@ -1,0 +1,21 @@
+/target/
+/data/
+/.tools/
+/.cache/
+/artifacts/
+**/node_modules/
+/services/agent/dist/
+**/.gradle/
+**/build/
+**/local.properties
+**/.DS_Store
+.env
+.env.*
+!.env.example
+**/__pycache__/
+*.py[cod]
+# Downloaded benchmark corpus; fetch with scripts/Prepare-MemoryBenchmarks.py.
+/research/benchmarks/longmemeval_s_cleaned.json
+*.log
+*.keystore
+!**/debug.keystore

@@ -1,0 +1,41 @@
+[Unit]
+Description=Tomorrow Rust API
+Wants=network-online.target postgresql.service tomorrow-agent.service
+After=network-online.target postgresql.service tomorrow-agent.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=tomorrow
+Group=tomorrow
+WorkingDirectory=/var/lib/tomorrow
+EnvironmentFile=/etc/tomorrow/runtime.env
+EnvironmentFile=/etc/tomorrow/database.env
+EnvironmentFile=-/etc/tomorrow/sms.env
+EnvironmentFile=-/etc/tomorrow/asr.env
+ExecStartPre=/usr/bin/curl --fail --silent --show-error --retry 15 --retry-delay 2 --retry-connrefused --max-time 5 --output /dev/null http://127.0.0.1:8090/health
+ExecStart=/opt/tomorrow/bin/tomorrow-api
+TimeoutStartSec=120
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGINT
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tomorrow
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SyslogIdentifier=tomorrow-api
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

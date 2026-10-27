@@ -1,0 +1,191 @@
+{
+  "benchmark": "Toolathlon-Verified",
+  "source_repo": "https://github.com/hkust-nlp/Toolathlon",
+  "source_commit": "9be8d8fe07a497b18ee61e3f2ae694e9797f39eb",
+  "leaderboard": "https://toolathlon.xyz/docs/leaderboard",
+  "official_image": "lockon0927/toolathlon-task-image:1016beta",
+  "download_method": "Fixed-commit codeload ZIP; git transport failed; SOURCE_COMMIT.txt retained.",
+  "selection_note": "Feasibility-selected local-file subset, not random or full leaderboard score.",
+  "interaction_note": "Official single-user-turn execution with multiple agent/tool rounds; does not demonstrate multi-user-turn conversation or dynamic tool discovery.",
+  "protocol": {
+    "gateway_local_tools": "Only claim_done is added by official decoupled gateway; terminal MCP provides Python execution.",
+    "gateway_sse": "GET /sse",
+    "user_prompt": "bundle.task_str",
+    "mcp_methods": [
+      "initialize",
+      "notifications/initialized",
+      "tools/list",
+      "tools/call"
+    ],
+    "bundle_schema_version": 2,
+    "gateway_post": "POST /messages/?session_id=<from endpoint event>",
+    "stop_tool": "local-claim_done",
+    "success_condition": "Assistant final turn without tools or stop tool; official state grader must then pass.",
+    "system_prompt": "bundle.system_prompts.agent"
+  },
+  "official_commands": {
+    "evaluate": "uv run python -m scripts.decoupled.container_eval --bundle_file /run/private_bundle.json --require_resolved_task_config --boolean_evaluation_status --consume_bundle",
+    "gateway": "uv run python -m scripts.decoupled.container_tool_gateway --bundle_file /run/private_bundle.json --host 0.0.0.0 --port <port>",
+    "preprocess": "uv run python -m scripts.decoupled.container_preprocess --eval_config <config.json> --task_dir <source_id> --model_short_name <model> --provider unified --max_steps_under_single_turn_mode <limit> --bundle_file /run/private_bundle.json --host_output_folder <host_run_dir>"
+  },
+  "integrity_requirements": [
+    "Do not expose groundtruth/evaluation source or full trusted bundle to agent tools. Follow official task_artifact_guard in run_single_decoupled.sh.",
+    "Do not replace official evaluator or pre-populate answers.",
+    "Run Pi harness with full actual tools/list schemas; do not select the correct tool for the model.",
+    "Keep original task prompt, fixtures, evaluator; label budget/turn limits and selected subset.",
+    "Route every paid model request through root budget gateway; no paid model request made during this research."
+  ],
+  "tasks": [
+    {
+      "source_id": "finalpool/excel-data-transformation",
+      "label_zh": "按示例重整家电销售表",
+      "priority": 1,
+      "official_source": "https://github.com/hkust-nlp/Toolathlon/tree/9be8d8fe07a497b18ee61e3f2ae694e9797f39eb/tasks/finalpool/excel-data-transformation",
+      "needed_mcp_servers": [
+        "excel",
+        "filesystem",
+        "terminal"
+      ],
+      "candidate_tool_count": null,
+      "candidate_tool_count_source": "Populate from actual gateway /health and tools/list before each run; never infer from total benchmark catalog.",
+      "prompt_path": "tasks/finalpool/excel-data-transformation/docs/task.md",
+      "official_preprocess_module": null,
+      "official_evaluation_module": "tasks.finalpool.excel-data-transformation.evaluation.main",
+      "additional_personal_cloud_credentials": false,
+      "evaluator_uses_model_api": false,
+      "fixture_total_bytes": 30933.0
+    },
+    {
+      "source_id": "finalpool/excel-market-research",
+      "label_zh": "按Methodology跨表计算增长率",
+      "priority": 2,
+      "official_source": "https://github.com/hkust-nlp/Toolathlon/tree/9be8d8fe07a497b18ee61e3f2ae694e9797f39eb/tasks/finalpool/excel-market-research",
+      "needed_mcp_servers": [
+        "excel",
+        "filesystem",
+        "terminal"
+      ],
+      "candidate_tool_count": null,
+      "candidate_tool_count_source": "Populate from actual gateway /health and tools/list before each run; never infer from total benchmark catalog.",
+      "prompt_path": "tasks/finalpool/excel-market-research/docs/task.md",
+      "official_preprocess_module": null,
+      "official_evaluation_module": "tasks.finalpool.excel-market-research.evaluation.main",
+      "additional_personal_cloud_credentials": false,
+      "evaluator_uses_model_api": false,
+      "fixture_total_bytes": 17544.0
+    },
+    {
+      "source_id": "finalpool/paper-checker",
+      "label_zh": "修复多文件LaTeX交叉引用",
+      "priority": 3,
+      "official_source": "https://github.com/hkust-nlp/Toolathlon/tree/9be8d8fe07a497b18ee61e3f2ae694e9797f39eb/tasks/finalpool/paper-checker",
+      "needed_mcp_servers": [
+        "filesystem",
+        "terminal"
+      ],
+      "candidate_tool_count": null,
+      "candidate_tool_count_source": "Populate from actual gateway /health and tools/list before each run; never infer from total benchmark catalog.",
+      "prompt_path": "tasks/finalpool/paper-checker/docs/task.md",
+      "official_preprocess_module": "tasks.finalpool.paper-checker.preprocess.main",
+      "official_evaluation_module": "tasks.finalpool.paper-checker.evaluation.main",
+      "additional_personal_cloud_credentials": false,
+      "evaluator_uses_model_api": false,
+      "fixture_total_bytes": 83633.0
+    },
+    {
+      "source_id": "finalpool/privacy-desensitization",
+      "label_zh": "多文档指定隐私脱敏且保持其余内容",
+      "priority": 4,
+      "official_source": "https://github.com/hkust-nlp/Toolathlon/tree/9be8d8fe07a497b18ee61e3f2ae694e9797f39eb/tasks/finalpool/privacy-desensitization",
+      "needed_mcp_servers": [
+        "filesystem",
+        "terminal"
+      ],
+      "candidate_tool_count": null,
+      "candidate_tool_count_source": "Populate from actual gateway /health and tools/list before each run; never infer from total benchmark catalog.",
+      "prompt_path": "tasks/finalpool/privacy-desensitization/docs/task.md",
+      "official_preprocess_module": "tasks.finalpool.privacy-desensitization.preprocess.main",
+      "official_evaluation_module": "tasks.finalpool.privacy-desensitization.evaluation.main",
+      "additional_personal_cloud_credentials": false,
+      "evaluator_uses_model_api": false,
+      "fixture_total_bytes": 9706.0
+    },
+    {
+      "source_id": "finalpool/interview-report",
+      "label_zh": "读取简历及面评并生成格式化Word报告",
+      "priority": 5,
+      "official_source": "https://github.com/hkust-nlp/Toolathlon/tree/9be8d8fe07a497b18ee61e3f2ae694e9797f39eb/tasks/finalpool/interview-report",
+      "needed_mcp_servers": [
+        "filesystem",
+        "word"
+      ],
+      "candidate_tool_count": null,
+      "candidate_tool_count_source": "Populate from actual gateway /health and tools/list before each run; never infer from total benchmark catalog.",
+      "prompt_path": "tasks/finalpool/interview-report/docs/task.md",
+      "official_preprocess_module": "tasks.finalpool.interview-report.preprocess.main",
+      "official_evaluation_module": "tasks.finalpool.interview-report.evaluation.main",
+      "additional_personal_cloud_credentials": false,
+      "evaluator_uses_model_api": false,
+      "fixture_total_bytes": 38920.0
+    },
+    {
+      "source_id": "finalpool/reimbursement-form-filler",
+      "label_zh": "从票据PDF填写报销Excel且保持格式",
+      "priority": 6,
+      "official_source": "https://github.com/hkust-nlp/Toolathlon/tree/9be8d8fe07a497b18ee61e3f2ae694e9797f39eb/tasks/finalpool/reimbursement-form-filler",
+      "needed_mcp_servers": [
+        "filesystem",
+        "excel",
+        "pdf-tools",
+        "terminal"
+      ],
+      "candidate_tool_count": null,
+      "candidate_tool_count_source": "Populate from actual gateway /health and tools/list before each run; never infer from total benchmark catalog.",
+      "prompt_path": "tasks/finalpool/reimbursement-form-filler/docs/task.md",
+      "official_preprocess_module": "tasks.finalpool.reimbursement-form-filler.preprocess.main",
+      "official_evaluation_module": "tasks.finalpool.reimbursement-form-filler.evaluation.main",
+      "additional_personal_cloud_credentials": false,
+      "evaluator_uses_model_api": false,
+      "fixture_total_bytes": 32621.0
+    },
+    {
+      "source_id": "finalpool/detect-revised-terms",
+      "label_zh": "比较判决PDF与新法生成逐条CSV",
+      "priority": 7,
+      "official_source": "https://github.com/hkust-nlp/Toolathlon/tree/9be8d8fe07a497b18ee61e3f2ae694e9797f39eb/tasks/finalpool/detect-revised-terms",
+      "needed_mcp_servers": [
+        "filesystem",
+        "pdf-tools"
+      ],
+      "candidate_tool_count": null,
+      "candidate_tool_count_source": "Populate from actual gateway /health and tools/list before each run; never infer from total benchmark catalog.",
+      "prompt_path": "tasks/finalpool/detect-revised-terms/docs/task.md",
+      "official_preprocess_module": null,
+      "official_evaluation_module": "tasks.finalpool.detect-revised-terms.evaluation.main",
+      "additional_personal_cloud_credentials": false,
+      "evaluator_uses_model_api": false,
+      "fixture_total_bytes": 1944587.0
+    },
+    {
+      "source_id": "finalpool/arrange-workspace",
+      "label_zh": "理解文件内容并按目录目标整理",
+      "priority": 8,
+      "official_source": "https://github.com/hkust-nlp/Toolathlon/tree/9be8d8fe07a497b18ee61e3f2ae694e9797f39eb/tasks/finalpool/arrange-workspace",
+      "needed_mcp_servers": [
+        "filesystem",
+        "terminal",
+        "pdf-tools",
+        "excel"
+      ],
+      "candidate_tool_count": null,
+      "candidate_tool_count_source": "Populate from actual gateway /health and tools/list before each run; never infer from total benchmark catalog.",
+      "prompt_path": "tasks/finalpool/arrange-workspace/docs/task.md",
+      "official_preprocess_module": "tasks.finalpool.arrange-workspace.preprocess.main",
+      "official_evaluation_module": "tasks.finalpool.arrange-workspace.evaluation.main",
+      "additional_personal_cloud_credentials": false,
+      "evaluator_uses_model_api": false,
+      "fixture_total_bytes": 60961653.0
+    }
+  ]
+}
+

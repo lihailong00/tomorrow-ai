@@ -1,0 +1,30 @@
+[package]
+name = "tomorrow-worker"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.92"
+
+[features]
+default = []
+temporal = ["dep:temporalio-sdk", "dep:temporalio-client", "dep:temporalio-macros", "dep:temporalio-common", "dep:temporalio-workflow", "dep:futures"]
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+dotenvy.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tomorrow-domain = { path = "../domain" }
+temporalio-sdk = { version = "=1.1.0", default-features = false, optional = true }
+temporalio-client = { version = "=1.1.0", features = ["vendored-protox"], optional = true }
+temporalio-macros = { version = "=1.1.0", optional = true }
+temporalio-common = { version = "=1.1.0", features = ["vendored-protox"], optional = true }
+temporalio-workflow = { version = "=1.1.0", optional = true }
+futures = { version = "0.3", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+sqlx.workspace = true
+

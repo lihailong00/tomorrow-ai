@@ -1,0 +1,14 @@
+{
+  "platform": "harmony-next",
+  "status": "planned",
+  "verified_on_device": false,
+  "shared_boundary": "src/platform",
+  "capabilities": {
+    "secure_storage": "planned",
+    "audio_recording": "planned",
+    "document_picker": "planned",
+    "sharing": "planned",
+    "local_notifications": "planned",
+    "remote_push": "not_configured"
+  }
+}

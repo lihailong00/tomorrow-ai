@@ -1,0 +1,904 @@
+use crate::dto::*;
+use crate::{auth, new_id, now, timestamp, validate_text, DomainError};
+use serde::{de::DeserializeOwned, Serialize};
+use sqlx::{
+    any::{AnyPoolOptions, AnyRow},
+    AnyPool, Row,
+};
+
+#[derive(Clone)]
+pub struct Repository {
+    pub(crate) pool: AnyPool,
+}
+
+impl Repository {
+    pub fn pool(&self) -> AnyPool {
+        self.pool.clone()
+    }
+    pub async fn update_user(
+        &self,
+        user_id: &str,
+        name: Option<&str>,
+        timezone: Option<&str>,
+    ) -> Result<User, DomainError> {
+        let old = self.user(user_id).await?;
+        let name = validate_text(name.unwrap_or(&old.name), "昵称", 80)?;
+        let timezone = timezone.unwrap_or(&old.timezone);
+        if timezone.parse::<chrono_tz::Tz>().is_err() {
+            return Err(DomainError::Validation("无效的 IANA 时区".into()));
+        }
+        sqlx::query("UPDATE users SET name=$1,timezone=$2 WHERE id=$3")
+            .bind(name)
+            .bind(timezone)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        self.user(user_id).await
+    }
+
+    pub async fn memories(&self, user_id: &str) -> Result<Vec<Memory>, DomainError> {
+        self.resources(user_id, "memory").await
+    }
+    pub async fn create_memory(
+        &self,
+        user_id: &str,
+        input: CreateMemory,
+    ) -> Result<Memory, DomainError> {
+        memory_kind(&input.kind)?;
+        let content = validate_text(&input.content, "记忆内容", 10000)?;
+        let time = timestamp(now());
+        let memory = Memory {
+            id: new_id(),
+            title: validate_text(
+                input.title.as_deref().unwrap_or_else(|| content.as_str()),
+                "标题",
+                120,
+            )
+            .unwrap_or_else(|_| content.chars().take(40).collect()),
+            content,
+            kind: input.kind,
+            source: input.source.unwrap_or_else(|| "用户手动创建".into()),
+            created_at: time.clone(),
+            updated_at: time,
+            version: 1,
+        };
+        self.put_resource(user_id, "memory", &memory.id, &memory)
+            .await?;
+        Ok(memory)
+    }
+    pub async fn update_memory(
+        &self,
+        user_id: &str,
+        id: &str,
+        input: UpdateMemory,
+    ) -> Result<Memory, DomainError> {
+        let old: Memory = self.resource(user_id, "memory", id).await?;
+        if input.version.is_some_and(|v| v != old.version) {
+            return Err(DomainError::Conflict("记忆已被更新，请刷新后再修改".into()));
+        }
+        let mut memory = old.clone();
+        if let Some(value) = input.title {
+            memory.title = validate_text(&value, "标题", 120)?;
+        }
+        if let Some(value) = input.content {
+            memory.content = validate_text(&value, "记忆内容", 10000)?;
+        }
+        if let Some(value) = input.kind {
+            memory_kind(&value)?;
+            memory.kind = value;
+        }
+        memory.updated_at = timestamp(now());
+        memory.version += 1;
+        let old_json =
+            serde_json::to_string(&old).map_err(|e| DomainError::Internal(e.to_string()))?;
+        let new_json =
+            serde_json::to_string(&memory).map_err(|e| DomainError::Internal(e.to_string()))?;
+        let changed=sqlx::query("UPDATE resources SET body=$1,updated_at=$2 WHERE user_id=$3 AND id=$4 AND kind='memory' AND body=$5")
+            .bind(new_json).bind(now()).bind(user_id).bind(id).bind(old_json).execute(&self.pool).await?.rows_affected();
+        if changed == 0 {
+            return Err(DomainError::Conflict("记忆已被更新，请刷新后再修改".into()));
+        }
+        Ok(memory)
+    }
+    pub async fn create_task(&self, user_id: &str, input: CreateTask) -> Result<Task, DomainError> {
+        let instruction = validate_text(&input.instruction, "任务要求", 20000)?;
+        let title = input
+            .title
+            .map(|s| validate_text(&s, "标题", 120))
+            .transpose()?
+            .unwrap_or_else(|| instruction.chars().take(32).collect());
+        let kind = input.kind.unwrap_or_else(|| "general".into());
+        if !["general", "research", "briefing", "draft", "organize"].contains(&kind.as_str()) {
+            return Err(DomainError::Validation("不支持的任务类型".into()));
+        }
+        let key = input
+            .client_request_id
+            .map(|v| validate_text(&v, "请求编号", 120).map(|v| format!("{user_id}:{v}")))
+            .transpose()?;
+        let id = new_id();
+        let time = now();
+        let approval = input.approval_required.unwrap_or(false);
+        sqlx::query("INSERT INTO tasks (id,user_id,title,prompt,kind,status,requires_approval,approval_summary,created_at,updated_at,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10) ON CONFLICT(idempotency_key) DO NOTHING")
+            .bind(&id).bind(user_id).bind(title).bind(&instruction).bind(kind).bind(if approval{"waiting_approval"}else{"queued"}).bind(if approval{1_i64}else{0}).bind(if approval{Some(instruction.as_str())}else{None}).bind(time).bind(&key).execute(&self.pool).await?;
+        if let Some(key) = key {
+            let row = sqlx::query("SELECT * FROM tasks WHERE user_id=$1 AND idempotency_key=$2")
+                .bind(user_id)
+                .bind(key)
+                .fetch_one(&self.pool)
+                .await?;
+            return task_from(&row);
+        }
+        self.task(user_id, &id).await
+    }
+    pub async fn tasks(&self, user_id: &str) -> Result<Vec<Task>, DomainError> {
+        sqlx::query(
+            "SELECT * FROM tasks WHERE user_id=$1 ORDER BY created_at DESC,id DESC LIMIT 500",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(task_from)
+        .collect()
+    }
+    pub async fn task(&self, user_id: &str, id: &str) -> Result<Task, DomainError> {
+        let row = sqlx::query("SELECT * FROM tasks WHERE user_id=$1 AND id=$2")
+            .bind(user_id)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+        task_from(&row)
+    }
+    pub async fn cancel_task(&self, user_id: &str, id: &str) -> Result<Task, DomainError> {
+        let old = self.task(user_id, id).await?;
+        if ["succeeded", "failed", "cancelled", "uncertain"].contains(&old.status.as_str()) {
+            return Ok(old);
+        }
+        sqlx::query("UPDATE tasks SET status='cancelled',updated_at=$1,claimed_until=0 WHERE user_id=$2 AND id=$3 AND status IN ('queued','running','waiting_approval')").bind(now()).bind(user_id).bind(id).execute(&self.pool).await?;
+        self.task(user_id, id).await
+    }
+    pub async fn approve_task(&self, user_id: &str, id: &str) -> Result<Task, DomainError> {
+        let old = self.task(user_id, id).await?;
+        if old.approved_at.is_some() {
+            return Ok(old);
+        }
+        if old.status != "waiting_approval" {
+            return Err(DomainError::Conflict("任务当前不在等待确认".into()));
+        }
+        sqlx::query("UPDATE tasks SET status='queued',approved_at=$1,updated_at=$2 WHERE user_id=$3 AND id=$4 AND status='waiting_approval' AND approval_summary=prompt")
+            .bind(timestamp(now())).bind(now()).bind(user_id).bind(id).execute(&self.pool).await?;
+        self.task(user_id, id).await
+    }
+    pub async fn claim_task(&self, lease_seconds: i64) -> Result<Option<ClaimedTask>, DomainError> {
+        let time = now();
+        let rows=sqlx::query("SELECT * FROM tasks WHERE ((status='queued' AND next_attempt_at<=$1) OR (status='running' AND claimed_until<$1)) AND (requires_approval=0 OR approved_at IS NOT NULL) ORDER BY created_at LIMIT 10").bind(time).fetch_all(&self.pool).await?;
+        for row in rows {
+            let id: String = row.get("id");
+            let attempts: i64 = row.get("attempts");
+            let user_id: String = row.get("user_id");
+            if attempts >= 3 {
+                sqlx::query("UPDATE tasks SET status='failed',error='任务执行多次中断，请重新发起',updated_at=$1 WHERE id=$2 AND attempts=$3 AND status='running' AND claimed_until<$1").bind(time).bind(&id).bind(attempts).execute(&self.pool).await?;
+                continue;
+            }
+            let updated=sqlx::query("UPDATE tasks SET status='running',progress=15,attempts=attempts+1,claimed_until=$1,updated_at=$2,error=NULL WHERE id=$3 AND attempts=$4 AND ((status='queued' AND next_attempt_at<=$2) OR (status='running' AND claimed_until<$2)) AND (requires_approval=0 OR approved_at IS NOT NULL)")
+                .bind(time+lease_seconds.clamp(10,3600)).bind(time).bind(&id).bind(attempts).execute(&self.pool).await?.rows_affected();
+            if updated > 0 {
+                return Ok(Some(ClaimedTask {
+                    task: self.task(&user_id, &id).await?,
+                    user_id,
+                    attempt: attempts + 1,
+                }));
+            }
+        }
+        Ok(None)
+    }
+    pub async fn renew_task(
+        &self,
+        claim: &ClaimedTask,
+        lease_seconds: i64,
+    ) -> Result<bool, DomainError> {
+        Ok(sqlx::query("UPDATE tasks SET claimed_until=$1 WHERE id=$2 AND user_id=$3 AND status='running' AND attempts=$4 AND claimed_until>=$5").bind(now()+lease_seconds.clamp(10,3600)).bind(&claim.task.id).bind(&claim.user_id).bind(claim.attempt).bind(now()).execute(&self.pool).await?.rows_affected()>0)
+    }
+    pub async fn complete_task(
+        &self,
+        claim: &ClaimedTask,
+        content: &str,
+        model_mode: &str,
+    ) -> Result<bool, DomainError> {
+        let mut transaction = self.pool.begin().await?;
+        let time = now();
+        let artifact_id = new_id();
+        let changed=sqlx::query("UPDATE tasks SET status='succeeded',progress=100,result=$1,summary=$2,model_mode=$3,artifact_id=$4,error=NULL,claimed_until=0,updated_at=$5 WHERE id=$6 AND user_id=$7 AND status='running' AND attempts=$8 AND claimed_until>=$5")
+            .bind(content).bind(content.chars().take(160).collect::<String>()).bind(model_mode).bind(&artifact_id).bind(time).bind(&claim.task.id).bind(&claim.user_id).bind(claim.attempt).execute(&mut *transaction).await?.rows_affected();
+        if changed == 0 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        let artifact = Artifact {
+            id: artifact_id,
+            title: claim.task.title.clone(),
+            task_id: claim.task.id.clone(),
+            content: content.to_owned(),
+            mime_type: "text/markdown; charset=utf-8".into(),
+            created_at: timestamp(time),
+        };
+        let notification = Notification {
+            id: new_id(),
+            title: "任务已完成".into(),
+            body: claim.task.title.clone(),
+            task_id: Some(claim.task.id.clone()),
+            read: false,
+            created_at: timestamp(time),
+        };
+        for (kind, id, body) in [
+            (
+                "artifact",
+                artifact.id.clone(),
+                serde_json::to_string(&artifact),
+            ),
+            (
+                "notification",
+                notification.id.clone(),
+                serde_json::to_string(&notification),
+            ),
+        ] {
+            let body = body.map_err(|e| DomainError::Internal(e.to_string()))?;
+            sqlx::query("INSERT INTO resources(id,user_id,kind,body,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$5)").bind(id).bind(&claim.user_id).bind(kind).bind(body).bind(time).execute(&mut *transaction).await?;
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
+    pub async fn fail_task(
+        &self,
+        claim: &ClaimedTask,
+        error: &str,
+        retry: bool,
+    ) -> Result<bool, DomainError> {
+        let retry = retry && claim.attempt < 3;
+        Ok(sqlx::query("UPDATE tasks SET status=$1,error=$2,progress=0,next_attempt_at=$3,claimed_until=0,updated_at=$4 WHERE id=$5 AND user_id=$6 AND status='running' AND attempts=$7 AND claimed_until>=$4")
+            .bind(if retry{"queued"}else{"failed"}).bind(error.chars().take(500).collect::<String>()).bind(now()+5*2_i64.pow(claim.attempt.min(6)as u32)).bind(now()).bind(&claim.task.id).bind(&claim.user_id).bind(claim.attempt).execute(&self.pool).await?.rows_affected()>0)
+    }
+    pub async fn schedules(&self, user_id: &str) -> Result<Vec<Schedule>, DomainError> {
+        sqlx::query("SELECT * FROM schedules WHERE user_id=$1 ORDER BY created_at DESC")
+            .bind(user_id)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(schedule_from)
+            .collect()
+    }
+    pub async fn schedule(&self, user_id: &str, id: &str) -> Result<Schedule, DomainError> {
+        let row = sqlx::query("SELECT * FROM schedules WHERE user_id=$1 AND id=$2")
+            .bind(user_id)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+        schedule_from(&row)
+    }
+    pub async fn create_schedule(
+        &self,
+        user_id: &str,
+        input: CreateSchedule,
+    ) -> Result<Schedule, DomainError> {
+        let title = validate_text(&input.title, "计划名称", 120)?;
+        let instruction = validate_text(&input.instruction, "计划内容", 20000)?;
+        let next = next_execution(&input.frequency, &input.time, &input.timezone, now(), false)?;
+        let id = new_id();
+        sqlx::query("INSERT INTO schedules(id,user_id,title,prompt,frequency,time_of_day,timezone,enabled,next_run_at,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)")
+            .bind(&id).bind(user_id).bind(title).bind(instruction).bind(input.frequency).bind(input.time).bind(input.timezone).bind(if input.enabled.unwrap_or(true){1_i64}else{0}).bind(next).bind(now()).execute(&self.pool).await?;
+        self.schedule(user_id, &id).await
+    }
+    pub async fn update_schedule(
+        &self,
+        user_id: &str,
+        id: &str,
+        input: UpdateSchedule,
+    ) -> Result<Schedule, DomainError> {
+        let old = self.schedule(user_id, id).await?;
+        let title = validate_text(
+            input.title.as_deref().unwrap_or(&old.title),
+            "计划名称",
+            120,
+        )?;
+        let instruction = validate_text(
+            input.instruction.as_deref().unwrap_or(&old.instruction),
+            "计划内容",
+            20000,
+        )?;
+        let previous_frequency = old.frequency.clone();
+        let frequency = input.frequency.unwrap_or(old.frequency);
+        let time = input.time.unwrap_or(old.time);
+        let timezone = input.timezone.unwrap_or(old.timezone);
+        let next = if frequency == "weekly" && previous_frequency == "weekly" {
+            let anchor = chrono::DateTime::parse_from_rfc3339(&old.next_run_at)
+                .map_err(|_| DomainError::Internal("计划时间无效".into()))?
+                .timestamp();
+            next_weekly_execution(&time, &timezone, anchor, now())?
+        } else {
+            next_execution(&frequency, &time, &timezone, now(), false)?
+        };
+        sqlx::query("UPDATE schedules SET title=$1,prompt=$2,frequency=$3,time_of_day=$4,timezone=$5,enabled=$6,next_run_at=$7,updated_at=$8 WHERE user_id=$9 AND id=$10")
+            .bind(title).bind(instruction).bind(frequency).bind(time).bind(timezone).bind(if input.enabled.unwrap_or(old.enabled){1_i64}else{0}).bind(next).bind(now()).bind(user_id).bind(id).execute(&self.pool).await?;
+        self.schedule(user_id, id).await
+    }
+    pub async fn delete_schedule(&self, user_id: &str, id: &str) -> Result<(), DomainError> {
+        let rows = sqlx::query("DELETE FROM schedules WHERE user_id=$1 AND id=$2")
+            .bind(user_id)
+            .bind(id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if rows == 0 {
+            return Err(DomainError::NotFound);
+        }
+        Ok(())
+    }
+    pub async fn tick_schedules(&self) -> Result<usize, DomainError> {
+        let time = now();
+        let rows=sqlx::query("SELECT * FROM schedules WHERE enabled=1 AND next_run_at<=$1 ORDER BY next_run_at LIMIT 100").bind(time).fetch_all(&self.pool).await?;
+        let mut count = 0;
+        for row in rows {
+            let schedule = schedule_from(&row)?;
+            let user_id: String = row.get("user_id");
+            let due: i64 = row.get("next_run_at");
+            // Coalesce missed recurring runs into one; a persisted occurrence key prevents duplicate dispatch.
+            let next = if schedule.frequency == "weekly" {
+                next_weekly_execution(&schedule.time, &schedule.timezone, due, time)?
+            } else {
+                next_execution(
+                    &schedule.frequency,
+                    &schedule.time,
+                    &schedule.timezone,
+                    time,
+                    true,
+                )?
+            };
+            let mut transaction = self.pool.begin().await?;
+            let changed=sqlx::query("UPDATE schedules SET next_run_at=$1,last_run_at=$2,enabled=$3,updated_at=$2 WHERE id=$4 AND user_id=$5 AND enabled=1 AND next_run_at=$6")
+                .bind(next).bind(time).bind(if schedule.frequency=="once"{0_i64}else{1}).bind(&schedule.id).bind(&user_id).bind(due).execute(&mut *transaction).await?.rows_affected();
+            if changed == 0 {
+                transaction.rollback().await?;
+                continue;
+            }
+            let key = format!("schedule:{}:{due}", schedule.id);
+            sqlx::query("INSERT INTO tasks(id,user_id,title,prompt,kind,status,created_at,updated_at,schedule_id,idempotency_key)VALUES($1,$2,$3,$4,'briefing','queued',$5,$5,$6,$7)ON CONFLICT(idempotency_key)DO NOTHING")
+                .bind(new_id()).bind(user_id).bind(schedule.title).bind(schedule.instruction).bind(time).bind(schedule.id).bind(key).execute(&mut *transaction).await?;
+            transaction.commit().await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+    pub async fn conversations(&self, user_id: &str) -> Result<Vec<Conversation>, DomainError> {
+        self.resources(user_id, "conversation").await
+    }
+    pub async fn conversation(&self, user_id: &str, id: &str) -> Result<Conversation, DomainError> {
+        self.resource(user_id, "conversation", id).await
+    }
+    pub async fn create_conversation(
+        &self,
+        user_id: &str,
+        title: &str,
+    ) -> Result<Conversation, DomainError> {
+        let conversation = Conversation {
+            id: new_id(),
+            title: title.chars().take(40).collect(),
+            updated_at: timestamp(now()),
+        };
+        self.put_resource(user_id, "conversation", &conversation.id, &conversation)
+            .await?;
+        Ok(conversation)
+    }
+    pub async fn messages(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<Message>, DomainError> {
+        self.conversation(user_id, conversation_id).await?;
+        // Filter by conversation before limiting, so activity in other chats
+        // cannot evict the visible history of an older conversation.
+        let rows=sqlx::query("SELECT body FROM resources WHERE user_id=$1 AND kind='message' AND body LIKE $2 ORDER BY created_at DESC,id DESC LIMIT 1000")
+            .bind(user_id).bind(format!("%\"conversation_id\":\"{conversation_id}\"%" )).fetch_all(&self.pool).await?;
+        let mut messages: Vec<Message> = rows
+            .into_iter()
+            .map(|row| {
+                serde_json::from_str(row.get::<&str, _>("body"))
+                    .map_err(|e| DomainError::Internal(e.to_string()))
+            })
+            .collect::<Result<_, _>>()?;
+        messages.retain(|m| m.conversation_id == conversation_id);
+        messages.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        Ok(messages)
+    }
+    pub async fn save_message(&self, user_id: &str, message: &Message) -> Result<(), DomainError> {
+        let mut conversation = self.conversation(user_id, &message.conversation_id).await?;
+        self.put_resource(user_id, "message", &message.id, message)
+            .await?;
+        conversation.updated_at = message.created_at.clone();
+        self.put_resource(user_id, "conversation", &conversation.id, &conversation)
+            .await
+    }
+    pub async fn reserve_chat(
+        &self,
+        user_id: &str,
+        request_id: &str,
+    ) -> Result<Option<serde_json::Value>, DomainError> {
+        let key = format!("{user_id}:{}", validate_text(request_id, "请求编号", 120)?);
+        sqlx::query("DELETE FROM chat_requests WHERE request_key=$1 AND user_id=$2 AND response IS NULL AND created_at<$3").bind(&key).bind(user_id).bind(now()-300).execute(&self.pool).await?;
+        let inserted=sqlx::query("INSERT INTO chat_requests(request_key,user_id,created_at)VALUES($1,$2,$3)ON CONFLICT(request_key)DO NOTHING").bind(&key).bind(user_id).bind(now()).execute(&self.pool).await?.rows_affected();
+        if inserted > 0 {
+            return Ok(None);
+        }
+        let row =
+            sqlx::query("SELECT response FROM chat_requests WHERE request_key=$1 AND user_id=$2")
+                .bind(key)
+                .bind(user_id)
+                .fetch_one(&self.pool)
+                .await?;
+        let response: Option<String> = row.get("response");
+        match response {
+            Some(value) => serde_json::from_str(&value)
+                .map(Some)
+                .map_err(|e| DomainError::Internal(e.to_string())),
+            None => Err(DomainError::Conflict("这条消息正在处理，请稍后重试".into())),
+        }
+    }
+    pub async fn commit_chat_turn(
+        &self,
+        user_id: &str,
+        turn: &ChatTurn,
+    ) -> Result<(), DomainError> {
+        let mut transaction = self.pool.begin().await?;
+        if let Some(request_id) = &turn.request_id {
+            let changed=sqlx::query("UPDATE chat_requests SET response=$1 WHERE request_key=$2 AND user_id=$3 AND response IS NULL")
+                .bind(turn.response.to_string()).bind(format!("{user_id}:{request_id}")).bind(user_id).execute(&mut *transaction).await?.rows_affected();
+            if changed != 1 {
+                return Err(DomainError::Conflict(
+                    "消息请求已被处理，请重试获取结果".into(),
+                ));
+            }
+        }
+        let mut conversation = turn.conversation.clone();
+        conversation.updated_at = turn.assistant_message.created_at.clone();
+        let mut resources = vec![
+            (
+                "conversation",
+                conversation.id.clone(),
+                serde_json::to_string(&conversation),
+            ),
+            (
+                "message",
+                turn.user_message.id.clone(),
+                serde_json::to_string(&turn.user_message),
+            ),
+            (
+                "message",
+                turn.assistant_message.id.clone(),
+                serde_json::to_string(&turn.assistant_message),
+            ),
+        ];
+        if let Some(memory) = &turn.memory {
+            resources.push(("memory", memory.id.clone(), serde_json::to_string(memory)));
+        }
+        for (kind, id, body) in resources {
+            let changed=sqlx::query("INSERT INTO resources(id,user_id,kind,body,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$5)ON CONFLICT(id)DO UPDATE SET body=$4,updated_at=$5 WHERE resources.user_id=$2 AND resources.kind=$3")
+                .bind(id).bind(user_id).bind(kind).bind(body.map_err(|e|DomainError::Internal(e.to_string()))?).bind(now()).execute(&mut *transaction).await?.rows_affected();
+            if changed != 1 {
+                return Err(DomainError::Forbidden);
+            }
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+    pub async fn complete_chat(
+        &self,
+        user_id: &str,
+        request_id: &str,
+        response: &serde_json::Value,
+    ) -> Result<(), DomainError> {
+        sqlx::query("UPDATE chat_requests SET response=$1 WHERE request_key=$2 AND user_id=$3")
+            .bind(response.to_string())
+            .bind(format!("{user_id}:{request_id}"))
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+    pub async fn release_chat(&self, user_id: &str, request_id: &str) -> Result<(), DomainError> {
+        sqlx::query(
+            "DELETE FROM chat_requests WHERE request_key=$1 AND user_id=$2 AND response IS NULL",
+        )
+        .bind(format!("{user_id}:{request_id}"))
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+    pub async fn artifacts(&self, user_id: &str) -> Result<Vec<Artifact>, DomainError> {
+        self.resources(user_id, "artifact").await
+    }
+    pub async fn artifact(&self, user_id: &str, id: &str) -> Result<Artifact, DomainError> {
+        self.resource(user_id, "artifact", id).await
+    }
+    pub async fn notifications(&self, user_id: &str) -> Result<Vec<Notification>, DomainError> {
+        self.resources(user_id, "notification").await
+    }
+    pub async fn read_notification(&self, user_id: &str, id: &str) -> Result<(), DomainError> {
+        let mut notification: Notification = self.resource(user_id, "notification", id).await?;
+        notification.read = true;
+        self.put_resource(user_id, "notification", id, &notification)
+            .await
+    }
+    pub async fn connect(database_url: &str) -> Result<Self, DomainError> {
+        sqlx::any::install_default_drivers();
+        if database_url.starts_with("sqlite:") && !database_url.contains(":memory:") {
+            let path = database_url
+                .trim_start_matches("sqlite:")
+                .split('?')
+                .next()
+                .unwrap_or("");
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| DomainError::Internal(e.to_string()))?;
+                }
+            }
+        }
+        let url = if database_url.starts_with("sqlite:")
+            && !database_url.contains('?')
+            && !database_url.contains(":memory:")
+        {
+            format!("{database_url}?mode=rwc")
+        } else {
+            database_url.to_owned()
+        };
+        let sqlite = url.starts_with("sqlite:");
+        let pool = AnyPoolOptions::new()
+            .max_connections(if sqlite { 1 } else { 10 })
+            .connect(&url)
+            .await?;
+        if sqlite {
+            sqlx::query("PRAGMA foreign_keys = ON")
+                .execute(&pool)
+                .await?;
+            sqlx::query("PRAGMA busy_timeout = 5000")
+                .execute(&pool)
+                .await?;
+        }
+        sqlx::raw_sql(include_str!("../../../migrations/sqlite/001_initial.sql"))
+            .execute(&pool)
+            .await?;
+        sqlx::raw_sql(include_str!("../../../migrations/sqlite/002_agent.sql"))
+            .execute(&pool)
+            .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/003_phone_auth.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/004_phone_sms_limits.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/005_phone_sms_attempts.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/sqlite/006_phone_password.sql"
+        ))
+        .execute(&pool)
+        .await?;
+        Ok(Self { pool })
+    }
+
+    pub async fn ping(&self) -> Result<(), DomainError> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn create_user(
+        &self,
+        email: &str,
+        password_hash: &str,
+        name: &str,
+        timezone: &str,
+    ) -> Result<User, DomainError> {
+        let email = email.trim().to_lowercase();
+        if !email.contains('@') || email.len() > 254 {
+            return Err(DomainError::Validation("请输入有效邮箱".into()));
+        }
+        let name = validate_text(name, "昵称", 80)?;
+        if timezone.parse::<chrono_tz::Tz>().is_err() {
+            return Err(DomainError::Validation("无效的 IANA 时区".into()));
+        }
+        let id = new_id();
+        let created = now();
+        let result = sqlx::query("INSERT INTO users (id,email,password_hash,name,timezone,created_at) VALUES ($1,$2,$3,$4,$5,$6)")
+            .bind(&id).bind(&email).bind(password_hash).bind(&name).bind(timezone).bind(created).execute(&self.pool).await;
+        if let Err(error) = result {
+            if error
+                .as_database_error()
+                .map(|e| e.is_unique_violation())
+                .unwrap_or(false)
+            {
+                return Err(DomainError::Conflict("该邮箱已注册".into()));
+            }
+            return Err(error.into());
+        }
+        Ok(User {
+            id,
+            email,
+            phone: None,
+            name,
+            timezone: timezone.to_owned(),
+            created_at: timestamp(created),
+        })
+    }
+
+    pub async fn credentials(&self, email: &str) -> Result<Option<(User, String)>, DomainError> {
+        let row = sqlx::query("SELECT * FROM users WHERE email=$1")
+            .bind(email.trim().to_lowercase())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|row| (user_from(&row), row.get("password_hash"))))
+    }
+    pub async fn user(&self, id: &str) -> Result<User, DomainError> {
+        let row = sqlx::query("SELECT u.*,p.phone FROM users u LEFT JOIN phone_identities p ON p.user_id=u.id WHERE u.id=$1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+        Ok(user_from(&row))
+    }
+    pub async fn create_session(&self, user_id: &str) -> Result<String, DomainError> {
+        let token = auth::generate_token();
+        sqlx::query(
+            "INSERT INTO sessions (token_hash,user_id,expires_at,created_at) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(auth::hash_token(&token))
+        .bind(user_id)
+        .bind(now() + 30 * 86400)
+        .bind(now())
+        .execute(&self.pool)
+        .await?;
+        Ok(token)
+    }
+    pub async fn authenticate(&self, token: &str) -> Result<String, DomainError> {
+        if token.len() < 32 || token.len() > 256 {
+            return Err(DomainError::Unauthorized);
+        }
+        let row = sqlx::query("SELECT user_id FROM sessions WHERE token_hash=$1 AND expires_at>$2")
+            .bind(auth::hash_token(token))
+            .bind(now())
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(DomainError::Unauthorized)?;
+        Ok(row.get("user_id"))
+    }
+    pub async fn logout(&self, token: &str) -> Result<(), DomainError> {
+        sqlx::query("DELETE FROM sessions WHERE token_hash=$1")
+            .bind(auth::hash_token(token))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn put_resource<T: Serialize>(
+        &self,
+        user_id: &str,
+        kind: &str,
+        id: &str,
+        body: &T,
+    ) -> Result<(), DomainError> {
+        let body = serde_json::to_string(body).map_err(|e| DomainError::Internal(e.to_string()))?;
+        sqlx::query("INSERT INTO resources (id,user_id,kind,body,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$5) ON CONFLICT(id) DO UPDATE SET body=$4,updated_at=$5 WHERE resources.user_id=$2 AND resources.kind=$3")
+            .bind(id).bind(user_id).bind(kind).bind(body).bind(now()).execute(&self.pool).await?;
+        Ok(())
+    }
+    pub(crate) async fn resources<T: DeserializeOwned>(
+        &self,
+        user_id: &str,
+        kind: &str,
+    ) -> Result<Vec<T>, DomainError> {
+        let rows = sqlx::query("SELECT body FROM resources WHERE user_id=$1 AND kind=$2 ORDER BY created_at DESC,id DESC LIMIT 500")
+            .bind(user_id).bind(kind).fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                serde_json::from_str(row.get::<&str, _>("body"))
+                    .map_err(|e| DomainError::Internal(e.to_string()))
+            })
+            .collect()
+    }
+    pub(crate) async fn resource<T: DeserializeOwned>(
+        &self,
+        user_id: &str,
+        kind: &str,
+        id: &str,
+    ) -> Result<T, DomainError> {
+        let row = sqlx::query("SELECT body FROM resources WHERE user_id=$1 AND kind=$2 AND id=$3")
+            .bind(user_id)
+            .bind(kind)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(DomainError::NotFound)?;
+        serde_json::from_str(row.get::<&str, _>("body"))
+            .map_err(|e| DomainError::Internal(e.to_string()))
+    }
+    pub async fn delete_resource(
+        &self,
+        user_id: &str,
+        kind: &str,
+        id: &str,
+    ) -> Result<(), DomainError> {
+        let result = sqlx::query("DELETE FROM resources WHERE user_id=$1 AND kind=$2 AND id=$3")
+            .bind(user_id)
+            .bind(kind)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(DomainError::NotFound);
+        }
+        Ok(())
+    }
+}
+
+fn user_from(row: &AnyRow) -> User {
+    User {
+        id: row.get("id"),
+        email: row.get("email"),
+        phone: row.try_get("phone").unwrap_or(None),
+        name: row.get("name"),
+        timezone: row.get("timezone"),
+        created_at: timestamp(row.get("created_at")),
+    }
+}
+
+pub(crate) fn memory_kind(value: &str) -> Result<(), DomainError> {
+    if ["preference", "person", "project", "goal", "fact"].contains(&value) {
+        Ok(())
+    } else {
+        Err(DomainError::Validation("无效的记忆类型".into()))
+    }
+}
+fn task_from(row: &AnyRow) -> Result<Task, DomainError> {
+    let status: String = row.get("status");
+    let steps = vec![
+        Step {
+            id: "context".into(),
+            title: "读取当前记忆与任务要求".into(),
+            status: if status == "queued" || status == "waiting_approval" {
+                "pending"
+            } else if status == "running" {
+                "running"
+            } else if status == "succeeded" {
+                "completed"
+            } else {
+                "pending"
+            }
+            .into(),
+            detail: None,
+        },
+        Step {
+            id: "generate".into(),
+            title: "组织内容并保存成果".into(),
+            status: if status == "succeeded" {
+                "completed"
+            } else if status == "failed" {
+                "failed"
+            } else {
+                "pending"
+            }
+            .into(),
+            detail: None,
+        },
+    ];
+    Ok(Task {
+        id: row.get("id"),
+        title: row.get("title"),
+        instruction: row.get("prompt"),
+        kind: row.get("kind"),
+        status,
+        progress: row.get("progress"),
+        summary: row.get("summary"),
+        result: row.get("result"),
+        error: row.get("error"),
+        created_at: timestamp(row.get("created_at")),
+        updated_at: timestamp(row.get("updated_at")),
+        steps,
+        model_mode: row.get("model_mode"),
+        approval_required: row.get::<i64, _>("requires_approval") != 0,
+        approved_at: row.get("approved_at"),
+        artifact_id: row.get("artifact_id"),
+    })
+}
+fn schedule_from(row: &AnyRow) -> Result<Schedule, DomainError> {
+    Ok(Schedule {
+        id: row.get("id"),
+        title: row.get("title"),
+        instruction: row.get("prompt"),
+        frequency: row.get("frequency"),
+        time: row.get("time_of_day"),
+        timezone: row.get("timezone"),
+        enabled: row.get::<i64, _>("enabled") != 0,
+        next_run_at: timestamp(row.get("next_run_at")),
+        last_run_at: row.get::<Option<i64>, _>("last_run_at").map(timestamp),
+        created_at: timestamp(row.get("created_at")),
+    })
+}
+
+pub fn next_execution(
+    frequency: &str,
+    time: &str,
+    timezone: &str,
+    after: i64,
+    recurring: bool,
+) -> Result<i64, DomainError> {
+    use chrono::{Datelike, TimeZone};
+    if !["daily", "weekdays", "weekly", "once"].contains(&frequency) {
+        return Err(DomainError::Validation("无效的计划频率".into()));
+    }
+    let timezone: chrono_tz::Tz = timezone
+        .parse()
+        .map_err(|_| DomainError::Validation("无效的 IANA 时区".into()))?;
+    let clock = chrono::NaiveTime::parse_from_str(time, "%H:%M")
+        .map_err(|_| DomainError::Validation("时间格式应为 HH:MM".into()))?;
+    let base = chrono::DateTime::from_timestamp(after, 0)
+        .ok_or_else(|| DomainError::Validation("无效的时间戳".into()))?
+        .with_timezone(&timezone);
+    for offset in 0..15 {
+        if recurring && frequency == "weekly" && offset < 7 {
+            continue;
+        }
+        let date = base.date_naive() + chrono::Duration::days(offset);
+        if frequency == "weekdays" && date.weekday().number_from_monday() > 5 {
+            continue;
+        }
+        let mut local = date.and_time(clock);
+        // During DST spring-forward, select the first existing minute after the requested clock time.
+        for _ in 0..180 {
+            if let Some(candidate) = timezone.from_local_datetime(&local).earliest() {
+                if candidate.timestamp() > after {
+                    return Ok(candidate.timestamp());
+                }
+                break;
+            }
+            local += chrono::Duration::minutes(1);
+        }
+    }
+    Err(DomainError::Validation("无法计算下一次运行时间".into()))
+}
+
+pub fn next_weekly_execution(
+    time: &str,
+    timezone: &str,
+    anchor: i64,
+    after: i64,
+) -> Result<i64, DomainError> {
+    use chrono::Datelike;
+    let zone: chrono_tz::Tz = timezone
+        .parse()
+        .map_err(|_| DomainError::Validation("无效的 IANA 时区".into()))?;
+    let weekday = chrono::DateTime::from_timestamp(anchor, 0)
+        .ok_or_else(|| DomainError::Validation("无效的计划日期".into()))?
+        .with_timezone(&zone)
+        .weekday();
+    let mut candidate = next_execution("daily", time, timezone, after, false)?;
+    for _ in 0..7 {
+        if chrono::DateTime::from_timestamp(candidate, 0)
+            .ok_or_else(|| DomainError::Validation("无效的计划日期".into()))?
+            .with_timezone(&zone)
+            .weekday()
+            == weekday
+        {
+            return Ok(candidate);
+        }
+        candidate = next_execution("daily", time, timezone, candidate, false)?;
+    }
+    Err(DomainError::Internal("无法计算周计划日期".into()))
+}
