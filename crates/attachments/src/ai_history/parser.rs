@@ -127,6 +127,13 @@ fn role(value: &str) -> Option<&'static str> {
     }
 }
 
+fn is_visible_message(message: &Value) -> bool {
+    // Missing metadata is valid in older exports; explicit internal channels or
+    // tool recipients must be excluded in both mapped and linearized messages.
+    !message["channel"].as_str().is_some_and(|c| c != "final")
+        && !message["recipient"].as_str().is_some_and(|r| r != "all")
+}
+
 fn parse_conversation(
     v: &Value,
     selected: &str,
@@ -293,9 +300,7 @@ fn parse_conversation(
                     continue;
                 };
                 // Internal/analysis messages and tool-directed turns are not user-visible replies.
-                if m["channel"].as_str().is_some_and(|c| c != "final")
-                    || m["recipient"].as_str().is_some_and(|r| r != "all")
-                {
+                if !is_visible_message(m) {
                     *skipped += 1;
                     continue;
                 }
@@ -325,6 +330,10 @@ fn parse_conversation(
                 *skipped += 1;
                 continue;
             };
+            if !is_visible_message(m) {
+                *skipped += 1;
+                continue;
+            }
             let content = visible_text(&m["content"], skipped);
             if !content.trim().is_empty() {
                 messages.push(Message {
@@ -505,3 +514,7 @@ pub fn parse(bytes: Vec<u8>, name: &str, selected: &str) -> Result<Archive, Erro
     }
     Ok(result)
 }
+
+#[cfg(test)]
+#[path = "parser_visibility_tests.rs"]
+mod visibility_tests;
