@@ -14,6 +14,7 @@ import {
   isSessionExpired,
   connectUrl,
   request,
+  remainingEdits,
   safePublicUrl,
   type Backups,
   type Config,
@@ -217,15 +218,35 @@ export function App() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [menu, setMenu] = useState(false);
+  const [compactNavigation, setCompactNavigation] = useState(() => typeof window !== "undefined" && window.matchMedia("(max-width: 700px)").matches);
+  const sidebar = useRef<HTMLElement>(null);
+  const menuButton = useRef<HTMLButtonElement>(null);
   const [resetUser, setResetUser] = useState<User | null>(null);
   const [passwordChange, setPasswordChange] = useState(false);
   const [createUser, setCreateUser] = useState(false);
   const [edits, setEdits] = useState<Record<string, Edit>>({});
+  const currentEdits = useRef(edits);
+  currentEdits.current = edits;
   const activeSession = useRef<Session | null>(session);
+  const sessionRefresh = useRef(0);
   activeSession.current = session;
 
-  const handleError = useCallback((err: unknown) => {
+  const synchronizeSession = useCallback(async (expected: Session) => {
+    const requestId = ++sessionRefresh.current;
+    const refreshed = await request<Session>("/session");
+    if (requestId !== sessionRefresh.current || !activeSession.current || activeSession.current.user.id !== expected.user.id) return null;
+    if (refreshed.user.id !== expected.user.id) {
+      throw new ApiError(401, "admin_identity_changed", "管理账号已变更，请重新登录。");
+    }
+    activeSession.current = refreshed;
+    setSession(refreshed);
+    return refreshed;
+  }, []);
+
+  const handleError = useCallback(function reportError(err: unknown) {
     if (isSessionExpired(err)) {
+      activeSession.current = null;
+      ++sessionRefresh.current;
       setSession(null);
       setConfig(null);
       setStatus(null);
@@ -241,28 +262,42 @@ export function App() {
       setMenu(false);
       setBoot("login");
       setError("登录已过期，请重新登录。");
-    } else
+    } else {
       setError(
         err instanceof ApiError
           ? err.message
           : "暂时无法连接服务器，请稍后重试。"
       );
-  }, []);
+      const expected = activeSession.current;
+      if (err instanceof ApiError && err.status === 403 && expected) {
+        // Refresh the token, but never replay an action that may have effects.
+        void synchronizeSession(expected).then(refreshed => {
+          if (refreshed && refreshed.csrf_token !== expected.csrf_token) {
+            setError("管理会话已同步，请重试刚才的操作。未自动重复提交。");
+          }
+        }).catch(recoveryError => {
+          if (isSessionExpired(recoveryError)) reportError(recoveryError);
+        });
+      }
+    }
+  }, [synchronizeSession]);
 
   const reload = useCallback(
     async (current: Session, offset = usersOffset.current) => {
+      const refreshed = await synchronizeSession(current);
+      if (!refreshed) return;
       const requestId = ++usersRequest.current;
       const result = await Promise.allSettled([
         request<Status>("/status"),
-        current.user.role === "owner"
+        refreshed.user.role === "owner"
           ? request<Config>("/config")
           : Promise.resolve(null),
         request<UserPage>(`/users?offset=${offset}&limit=100`),
-        current.user.role === "owner"
+        refreshed.user.role === "owner"
           ? request<Backups>("/backups")
           : Promise.resolve(null),
       ]);
-      if (activeSession.current?.csrf_token !== current.csrf_token) return;
+      if (activeSession.current?.csrf_token !== refreshed.csrf_token) return;
       const [s, c, u, b] = result;
       if (s.status === "fulfilled") setStatus(s.value);
       else handleError(s.reason);
@@ -283,7 +318,7 @@ export function App() {
           reason: "备份服务暂不可用，请检查服务器部署配置。",
         });
     },
-    [handleError]
+    [handleError, synchronizeSession]
   );
 
   const initialize = useCallback(async () => {
@@ -316,6 +351,55 @@ export function App() {
   useEffect(() => {
     void initialize();
   }, [initialize]);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 700px)");
+    const update = () => {
+      setCompactNavigation(media.matches);
+      if (!media.matches) setMenu(false);
+    };
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  useEffect(() => {
+    if (!compactNavigation || !menu) return;
+    const root = sidebar.current;
+    const focusable = () => Array.from(root?.querySelectorAll<HTMLElement>("a[href],button:not(:disabled),[tabindex='0']") ?? [])
+      .filter(item => item.getClientRects().length > 0);
+    (root?.querySelector<HTMLElement>("[aria-current='page']") ?? focusable()[0])?.focus();
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); setMenu(false); return; }
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      const first = items[0], last = items[items.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !root?.contains(document.activeElement))) {
+        event.preventDefault(); last?.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !root?.contains(document.activeElement))) {
+        event.preventDefault(); first?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", onKeyDown);
+      if (menuButton.current?.getClientRects().length) menuButton.current.focus();
+    };
+  }, [compactNavigation, menu]);
+  useEffect(() => {
+    const refresh = () => {
+      const expected = activeSession.current;
+      if (expected && !operationPending.current && document.visibilityState === "visible") {
+        void synchronizeSession(expected).catch(handleError);
+      }
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [handleError, synchronizeSession]);
   useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(""), 5500);
@@ -352,6 +436,7 @@ export function App() {
     }
   }
   function authenticated(current: Session) {
+    ++sessionRefresh.current;
     usersOffset.current = 0;
     activeSession.current = current;
     setSession(current);
@@ -360,14 +445,16 @@ export function App() {
     void reload(current);
   }
   async function mutate(path: string, body?: unknown, method = "POST") {
-    if (!session) throw new Error("No session");
-    return request(path, { method, body, csrf: session.csrf_token });
+    const current = activeSession.current;
+    if (!current) throw new Error("No session");
+    return request(path, { method, body, csrf: current.csrf_token });
   }
   async function saveConfiguration(checkOnly = false) {
     if (!session || !config) return;
     const issue = providerIssue(config.settings, edits);
     if (issue) { setError(issue); return; }
     const changes = configurationChanges(config.settings, edits);
+    const submittedEdits = edits;
     await operation(async () => {
       const result = await mutate(
         checkOnly ? "/config/check" : "/config",
@@ -397,9 +484,9 @@ export function App() {
           }未验证上游连接，未调用计费服务。`
         );
       } else {
-        setEdits({});
+        setEdits(current => remainingEdits(current, submittedEdits));
         await reload(session);
-        setNotice("配置已保存，新请求将使用最新配置。");
+        setNotice(Object.keys(currentEdits.current).length ? "本次配置已保存，之后的修改仍待保存。" : "配置已保存，新请求将使用最新配置。");
       }
     });
   }
@@ -416,13 +503,14 @@ export function App() {
         body: { expected_revision: config.revision, changes: configurationChanges(selected, selectedEdits) },
       });
     } catch (error) {
-      if (isSessionExpired(error)) handleError(error);
+      if (isSessionExpired(error) || error instanceof ApiError && error.status === 403) handleError(error);
       throw error;
     }
   }
   async function logout() {
     await operation(async () => {
       await mutate("/logout");
+      ++sessionRefresh.current;
       activeSession.current = null;
       setSession(null);
       setConfig(null);
@@ -492,7 +580,11 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <aside className={`sidebar ${menu ? "sidebar-open" : ""}`}>
+      <aside ref={sidebar} id="admin-navigation" className={`sidebar ${menu ? "sidebar-open" : ""}`}
+        inert={compactNavigation && !menu} aria-hidden={compactNavigation && !menu ? true : undefined}
+        role={compactNavigation && menu ? "dialog" : undefined} aria-modal={compactNavigation && menu ? true : undefined}
+        aria-label={compactNavigation && menu ? "管理导航" : undefined}>
+        <button className="icon-button mobile-drawer-close" aria-label="收起导航" onClick={() => setMenu(false)}><Icon name="close" /></button>
         <a className="brand" href="/admin/" aria-label="妥啦服务管理首页">
           <Orb small />
           <span>
@@ -547,6 +639,7 @@ export function App() {
           <button
             className="account"
             onClick={() => {
+              setMenu(false);
               setError("");
               setPasswordChange(true);
             }}
@@ -567,17 +660,21 @@ export function App() {
       {menu && (
         <button
           className="mobile-scrim"
+          tabIndex={-1}
           onClick={() => setMenu(false)}
           aria-label="关闭导航"
         />
       )}
-      <main className="main-area">
+      <main className="main-area" inert={compactNavigation && menu}>
         <header className="topbar">
           <div className="breadcrumb">
             <button
               className="icon-button mobile-menu"
+              ref={menuButton}
               onClick={() => setMenu(true)}
               aria-label="打开导航"
+              aria-expanded={menu}
+              aria-controls="admin-navigation"
             >
               <Icon name="menu" />
             </button>

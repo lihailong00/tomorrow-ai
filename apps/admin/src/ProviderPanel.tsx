@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { Icon } from "./icons";
 import { ApiError, type Edit, type Setting, type ProviderProbe } from "./api";
 import { credentialScopeChanged, currentService, endpoint, presets, selectionEdits, value, type Edits, type Service } from "./providers";
@@ -61,12 +61,28 @@ export function ProviderPanel({ service, settings, edits, onEdits, onTest }: {
       setCustomModel(false);
       setReplacing(false);
       setError("");
-    } catch (failure) { setError((failure as Error).message); }
+      return true;
+    } catch (failure) { setError((failure as Error).message); return false; }
   }
   const customMode = selected === "custom";
   const blocked = (field: string) => settings.find(item => item.key === field)?.locked ?? false;
   const inherited = selected === "inherit";
   const disabled = selected === "disabled";
+  const enabledChoices = [...choices.map(item => item.id),
+    ...((service === "vision" || service === "embedding") && state.canInherit ? ["inherit"] : []),
+    "custom", ...(service === "speech" ? ["disabled"] : [])];
+  const tabStop = enabledChoices.includes(selected) ? selected : enabledChoices[0];
+  function moveProvider(event: KeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const options = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]:not(:disabled)'));
+    const focused = (event.target as HTMLElement).closest<HTMLButtonElement>('[role="radio"]');
+    const index = focused ? options.indexOf(focused) : -1;
+    const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 :
+      (index + (event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1) + options.length) % options.length;
+    event.preventDefault();
+    const target = options[next];
+    if (target?.dataset.provider && choose(target.dataset.provider)) target.focus();
+  }
   return (
     <section className="card provider-panel" aria-label={titles[service]}>
       <div className="section-head">
@@ -74,9 +90,10 @@ export function ProviderPanel({ service, settings, edits, onEdits, onTest }: {
         <span className="settings-section-icon"><Icon name={service === "model" ? "spark" : service === "speech" ? "phone" : "link"} size={20} /></span>
       </div>
       <div className="provider-step-title"><span>1</span><strong>选择服务商</strong><small>使用对应平台的 API Key</small></div>
-      <div className="provider-cards" role="radiogroup" aria-label={titles[service] + "服务商"}>
+      <div className="provider-cards" role="radiogroup" aria-label={titles[service] + "服务商"} onKeyDown={moveProvider}>
         {choices.map(preset => (
           <button type="button" key={preset.id} role="radio" aria-label={preset.name} aria-checked={selected === preset.id}
+            data-provider={preset.id} tabIndex={tabStop === preset.id ? 0 : -1}
             className={"provider-choice " + (selected === preset.id ? "provider-selected" : "")}
             onClick={() => choose(preset.id)}>
             <span className="provider-mark" style={{ "--provider-color": preset.color } as CSSProperties}>{preset.mark}</span>
@@ -86,6 +103,7 @@ export function ProviderPanel({ service, settings, edits, onEdits, onTest }: {
         ))}
         {(service === "vision" || service === "embedding") && (
           <button type="button" role="radio" aria-label="沿用语音服务" aria-checked={inherited}
+            data-provider="inherit" tabIndex={tabStop === "inherit" ? 0 : -1}
             disabled={!state.canInherit}
             className={"provider-choice " + (inherited ? "provider-selected" : "")} onClick={() => choose("inherit")}>
             <span className="provider-mark provider-mark-neutral"><Icon name="link" size={18} /></span>
@@ -94,12 +112,14 @@ export function ProviderPanel({ service, settings, edits, onEdits, onTest }: {
           </button>
         )}
         <button type="button" role="radio" aria-label="自定义接入" aria-checked={customMode}
+          data-provider="custom" tabIndex={tabStop === "custom" ? 0 : -1}
           className={"provider-choice " + (customMode ? "provider-selected" : "")} onClick={() => choose("custom")}>
           <span className="provider-mark provider-mark-neutral">＋</span><span><strong>自定义接入</strong><small>兼容服务或本地模型</small></span>
           {customMode && <span className="provider-check">✓</span>}
         </button>
         {service === "speech" && (
           <button type="button" role="radio" aria-label="暂不启用" aria-checked={disabled}
+            data-provider="disabled" tabIndex={tabStop === "disabled" ? 0 : -1}
             className={"provider-choice " + (disabled ? "provider-selected" : "")} onClick={() => choose("disabled")}>
             <span className="provider-mark provider-mark-neutral">—</span><span><strong>暂不启用</strong><small>稍后再配置</small></span>
             {disabled && <span className="provider-check">✓</span>}

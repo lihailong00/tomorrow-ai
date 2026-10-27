@@ -333,6 +333,9 @@ strong {
 .sidebar > .brand {
   padding: 0 13px;
 }
+.mobile-drawer-close {
+  display: none;
+}
 .workspace {
   margin: 39px 0 29px;
   border: 1px solid #eaedf5;
@@ -1764,6 +1767,7 @@ tbody tr:last-child td {
 @media (max-width: 700px) {
   .sidebar {
     transform: translateX(-100%);
+    visibility: hidden;
     transition: transform 0.2s;
     width: 235px;
     z-index: 40;
@@ -1771,6 +1775,13 @@ tbody tr:last-child td {
   }
   .sidebar-open {
     transform: translateX(0);
+    visibility: visible;
+  }
+  .mobile-drawer-close {
+    display: inline-flex;
+    align-self: flex-end;
+    margin-top: -18px;
+    margin-bottom: 12px;
   }
   .mobile-scrim {
     position: fixed;

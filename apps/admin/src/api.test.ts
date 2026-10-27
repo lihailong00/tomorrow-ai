@@ -5,6 +5,7 @@ import {
   isSessionExpired,
   connectUrl,
   request,
+  remainingEdits,
   safePublicUrl,
   type Setting,
 } from "./api";
@@ -86,6 +87,22 @@ describe("API credential boundaries", () => {
 });
 
 describe("configuration secret edits", () => {
+  it("acknowledges only the submitted version of each edit and retains later drafts", () => {
+    const submitted = {
+      INSTANCE_NAME: { mode: "replace", value: "Saved A" },
+      MODEL_API_KEY: { mode: "replace", value: "saved-secret" },
+      ASR_API_KEY: { mode: "delete", value: "" },
+    } as const;
+    const current = { ...submitted,
+      INSTANCE_NAME: { mode: "replace", value: "Unsaved B" },
+      ASR_API_KEY: { mode: "replace", value: "new-secret" },
+      MODEL_NAME: { mode: "replace", value: "new-model" },
+    } as const;
+    expect(remainingEdits(current, submitted)).toEqual({
+      INSTANCE_NAME: current.INSTANCE_NAME, ASR_API_KEY: current.ASR_API_KEY, MODEL_NAME: current.MODEL_NAME,
+    });
+    expect(remainingEdits(submitted, submitted)).toEqual({});
+  });
   it("keeps configured secrets out of unchanged submissions", () => {
     expect(configurationChanges([key], {})).toEqual({});
     expect(

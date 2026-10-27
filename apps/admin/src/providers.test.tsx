@@ -146,4 +146,13 @@ describe("guided provider configuration", () => {
     const html = renderToStaticMarkup(<ProviderPanel service="vision" settings={settings} edits={{}} onEdits={() => {}} />);
     expect(html).toContain("使用此模型已配置的密钥");
   });
+  it("provides one tab stop per provider group, including an unavailable saved inheritance selection", () => {
+    for (const service of ["model", "speech", "vision", "embedding"] as const) {
+      const html = renderToStaticMarkup(<ProviderPanel service={service} settings={fixture()} edits={{}} onEdits={() => {}} />);
+      const radios = html.match(/<button[^>]+role="radio"[^>]*>/g) ?? [];
+      expect(radios.length).toBeGreaterThan(1);
+      expect(radios.filter(radio => radio.includes('tabindex="0"')).length).toBe(1);
+      expect(radios.filter(radio => radio.includes('disabled=""')).every(radio => radio.includes('tabindex="-1"'))).toBe(true);
+    }
+  });
 });

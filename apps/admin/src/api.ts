@@ -142,6 +142,12 @@ export async function request<T>(
 }
 
 export type Edit = { mode: "keep" | "replace" | "delete"; value: string };
+export function remainingEdits(current: Record<string, Edit>, submitted: Record<string, Edit>): Record<string, Edit> {
+  return Object.fromEntries(Object.entries(current).filter(([key, edit]) => {
+    const saved = submitted[key];
+    return !saved || edit.mode !== saved.mode || edit.value !== saved.value;
+  }));
+}
 export function configurationChanges(
   settings: Setting[],
   edits: Record<string, Edit>
