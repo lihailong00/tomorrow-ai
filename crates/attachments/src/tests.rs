@@ -109,6 +109,61 @@ async fn remove_fixture(state: AttachmentsState) {
 }
 
 #[tokio::test]
+async fn upload_archive_pages_every_file_filters_before_paging_and_isolates_owners() {
+    let (state, user, token, other) = fixture(DEFAULT_MAX_BYTES, None).await;
+    let mut expected = std::collections::HashSet::new();
+    for i in 0..205 {
+        let response = post_file(&state, &token, &format!("archive-{i}.txt"), "text/plain", b"fixture").await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        expected.insert(json_body(response).await["id"].as_str().unwrap().to_owned());
+    }
+    let audio = json_body(post_file(&state, &token, "voice.m4a", "audio/mp4", b"fixture").await).await;
+    let audio_id = audio["id"].as_str().unwrap().to_owned();
+    expected.insert(audio_id.clone());
+    sqlx::query("UPDATE uploads SET created_at='2026-01-01T00:00:00Z' WHERE user_id=$1")
+        .bind(&user).execute(&state.pool).await.unwrap();
+    sqlx::query("UPDATE uploads SET created_at='1970-01-01T00:00:00Z' WHERE id=$1")
+        .bind(&audio_id).execute(&state.pool).await.unwrap();
+    let secret = json_body(post_file(&state, &other, "other-owner.txt", "text/plain", b"private").await).await;
+
+    async fn get(state: &AttachmentsState, token: &str, path: &str) -> Response {
+        router(state.clone()).oneshot(Request::builder().uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty()).unwrap()).await.unwrap()
+    }
+    let first = json_body(get(&state, &token, "/v1/uploads").await).await;
+    assert_eq!(first["items"].as_array().unwrap().len(), 200);
+    assert_eq!(first["next_offset"], 200);
+    let mut seen = std::collections::HashSet::new();
+    let mut offset = 0;
+    loop {
+        let page = json_body(get(&state, &token, &format!("/v1/uploads?limit=37&offset={offset}")).await).await;
+        for item in page["items"].as_array().unwrap() {
+            assert!(seen.insert(item["id"].as_str().unwrap().to_owned()));
+        }
+        let Some(next) = page["next_offset"].as_i64() else { break };
+        offset = next;
+    }
+    assert_eq!(seen, expected);
+    assert!(!seen.contains(secret["id"].as_str().unwrap()));
+    let filtered = json_body(get(&state, &token, "/v1/uploads?kind=audio&limit=1").await).await;
+    assert_eq!(filtered["items"][0]["id"], audio_id);
+    assert_eq!(filtered["items"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["has_more"], false);
+    let last_files = json_body(get(&state, &token, "/v1/uploads?kind=file&limit=100&offset=200").await).await;
+    assert_eq!(last_files["items"].as_array().unwrap().len(), 5);
+    let other_page = json_body(get(&state, &other, "/v1/uploads").await).await;
+    assert_eq!(other_page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(other_page["items"][0]["id"], secret["id"]);
+    for query in ["limit=0", "limit=201", "offset=-1", "offset=1000001", "kind=unknown", "unrecognized=1"] {
+        assert_eq!(get(&state, &token, &format!("/v1/uploads?{query}")).await.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+    let id = last_files["items"][0]["id"].as_str().unwrap();
+    assert_eq!(get(&state, &token, &format!("/v1/uploads/{id}/download")).await.status(), StatusCode::OK);
+    remove_fixture(state).await;
+}
+
+#[tokio::test]
 async fn attachment_deletion_checks_owner_and_removes_bytes_and_context() {
     let (state, user_id, token, other_token) = fixture(DEFAULT_MAX_BYTES, None).await;
     let upload: Upload = serde_json::from_value(

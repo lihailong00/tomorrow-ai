@@ -26,7 +26,7 @@ pub(super) fn router() -> Router<AttachmentsState> {
 
 pub(crate) async fn initialize(pool: &AnyPool) -> Result<Runtime, AttachmentError> {
     for sql in [
-        "CREATE TABLE IF NOT EXISTS photo_cloud_consents(user_id TEXT NOT NULL,device_id TEXT NOT NULL,epoch BIGINT NOT NULL,PRIMARY KEY(user_id,device_id))",
+        "CREATE TABLE IF NOT EXISTS photo_cloud_consents(user_id TEXT NOT NULL,device_id TEXT NOT NULL,epoch BIGINT NOT NULL,provider_scope TEXT,invalidated BIGINT NOT NULL DEFAULT 0,PRIMARY KEY(user_id,device_id))",
         "CREATE TABLE IF NOT EXISTS photo_vision_guard(id BIGINT PRIMARY KEY,singleton BIGINT NOT NULL)",
         "INSERT INTO photo_vision_guard(id,singleton)VALUES(1,0)ON CONFLICT(id)DO NOTHING",
         "CREATE TABLE IF NOT EXISTS photo_vision_attempts(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,requested_at BIGINT NOT NULL,pixels BIGINT NOT NULL,bytes BIGINT NOT NULL,model TEXT NOT NULL)",
@@ -36,6 +36,14 @@ pub(crate) async fn initialize(pool: &AnyPool) -> Result<Runtime, AttachmentErro
         "CREATE TABLE IF NOT EXISTS photo_vision_task_state(user_id TEXT NOT NULL,device_id TEXT NOT NULL,asset_id TEXT NOT NULL,job_id TEXT NOT NULL,epoch BIGINT NOT NULL,revision TEXT NOT NULL,input_hash TEXT NOT NULL,model TEXT NOT NULL,status TEXT NOT NULL,requested_at BIGINT NOT NULL,PRIMARY KEY(user_id,device_id,asset_id))",
     ] {
         sqlx::query(sql).execute(pool).await?;
+    }
+    for (column, definition) in [("provider_scope", "TEXT"), ("invalidated", "BIGINT NOT NULL DEFAULT 0")] {
+        let check = format!("SELECT {column} FROM photo_cloud_consents LIMIT 0");
+        if sqlx::query(&check).fetch_optional(pool).await.is_err() {
+            if let Err(error) = sqlx::query(&format!("ALTER TABLE photo_cloud_consents ADD COLUMN {column} {definition}")).execute(pool).await {
+                sqlx::query(&check).fetch_optional(pool).await.map_err(|_|error)?;
+            }
+        }
     }
     let config = config_from(|n| std::env::var(n).ok())?;
 
@@ -121,22 +129,20 @@ pub(super) async fn lock_cloud_consent(
     user: &str,
     device: &str,
     epoch: i64,
+    scope: &str,
 ) -> Result<(), AttachmentError> {
     lock_consent(tx, user, device, epoch).await?;
     let accepted: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM photo_cloud_consents WHERE user_id=$1 AND device_id=$2 AND epoch=$3",
+        "SELECT count(*) FROM photo_cloud_consents WHERE user_id=$1 AND device_id=$2 AND epoch=$3 AND provider_scope=$4 AND invalidated=0",
     )
     .bind(user)
     .bind(device)
     .bind(epoch)
+    .bind(scope)
     .fetch_one(&mut **tx)
     .await?;
     if accepted != 1 {
-        return Err(AttachmentError::new(
-            StatusCode::CONFLICT,
-            "photo_cloud_consent_required",
-            "请在设置中重新确认云端图片分析授权",
-        ));
+        return Err(provider::changed());
     }
     Ok(())
 }
@@ -160,11 +166,6 @@ async fn analyze(
                 "请先开启相册索引",
             )
         })?;
-    {
-        let mut tx = state.pool.begin().await?;
-        lock_cloud_consent(&mut tx, &user, &device, epoch).await?;
-        tx.commit().await?;
-    }
     let config = state.photo_vision.config.as_ref().ok_or_else(|| {
         AttachmentError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -172,6 +173,12 @@ async fn analyze(
             "服务暂未配置云端图片分析",
         )
     })?;
+    let scope = provider::authorize(&state, &user, &device, epoch, config, true).await?;
+    {
+        let mut tx = state.pool.begin().await?;
+        lock_cloud_consent(&mut tx, &user, &device, epoch, &scope).await?;
+        tx.commit().await?;
+    }
     let permit = state
         .photo_vision
         .active
@@ -270,7 +277,7 @@ async fn analyze(
             .as_ref()
             .expect("reserved configured task");
         let result = async {
-            let results = perform(&state, config, &mime, image).await?;
+            let results = perform(&state, config, &user, &device, epoch, &mime, image).await?;
             persist_sync(
                 &state,
                 &user,
@@ -282,7 +289,7 @@ async fn analyze(
                     metadata: input.metadata,
                     results,
                 },
-                Some((&hash, &config.model, &job)),
+                Some((&hash, &config.identity("openai-vision-v1"), &job)),
             )
             .await
         }
@@ -316,18 +323,20 @@ async fn analysis_status(
         return Err(invalid());
     }
     let user = state.user(&headers).await?;
+    let config = state.photo_vision.config.as_ref().ok_or_else(provider::changed)?;
+    let scope = provider::authorize(&state, &user, &device, input.epoch, config, true).await?;
     let mut tx = state.pool.begin().await?;
-    lock_cloud_consent(&mut tx, &user, &device, input.epoch).await?;
+    lock_cloud_consent(&mut tx, &user, &device, input.epoch, &scope).await?;
     let model = state
         .photo_vision
         .config
         .as_ref()
-        .map(|c| c.model.as_str())
-        .unwrap_or("");
+        .map(|c| c.identity("openai-vision-v1"))
+        .unwrap_or_default();
     let complete: i64 = sqlx::query_scalar("SELECT count(*) FROM photo_vision_results v JOIN photo_index_assets a ON a.user_id=v.user_id AND a.device_id=v.device_id AND a.asset_id=v.asset_id AND a.revision=v.revision WHERE v.user_id=$1 AND v.device_id=$2 AND v.asset_id=$3 AND v.revision=$4 AND v.model=$5")
-        .bind(&user).bind(&device).bind(&asset).bind(&input.revision).bind(model).fetch_one(&mut *tx).await?;
+        .bind(&user).bind(&device).bind(&asset).bind(&input.revision).bind(&model).fetch_one(&mut *tx).await?;
     let task: Option<(String, i64)> = sqlx::query_as("SELECT s.status,CAST(s.requested_at AS BIGINT) FROM photo_vision_task_state s JOIN photo_vision_jobs j ON j.user_id=s.user_id AND j.device_id=s.device_id AND j.asset_id=s.asset_id AND j.job_id=s.job_id WHERE s.user_id=$1 AND s.device_id=$2 AND s.asset_id=$3 AND s.epoch=$4 AND s.revision=$5 AND s.model=$6")
-        .bind(&user).bind(&device).bind(&asset).bind(input.epoch).bind(&input.revision).bind(model).fetch_optional(&mut *tx).await?;
+        .bind(&user).bind(&device).bind(&asset).bind(input.epoch).bind(&input.revision).bind(&model).fetch_optional(&mut *tx).await?;
     let now = chrono::Utc::now().timestamp();
     let status = if let Some((status, at)) = &task {
         if status == "complete" && complete == 1 {
@@ -387,13 +396,15 @@ async fn reserve(
     pixels: i64,
     bytes: usize,
 ) -> Result<Reservation, AttachmentError> {
+    let scope = provider::authorize(state, user, device, epoch, config, true).await?;
+    let identity = config.identity("openai-vision-v1");
     let mut tx = state.pool.begin().await?;
     sqlx::query("UPDATE photo_vision_guard SET singleton=singleton WHERE id=1")
         .execute(&mut *tx)
         .await?;
-    lock_cloud_consent(&mut tx, user, device, epoch).await?;
+    lock_cloud_consent(&mut tx, user, device, epoch, &scope).await?;
     let cached:i64=sqlx::query_scalar("SELECT count(*) FROM photo_vision_results v JOIN photo_index_assets a ON a.user_id=v.user_id AND a.device_id=v.device_id AND a.asset_id=v.asset_id AND a.revision=v.revision WHERE v.user_id=$1 AND v.device_id=$2 AND v.asset_id=$3 AND v.input_hash=$4 AND v.model=$5 AND v.revision=$6")
-        .bind(user).bind(device).bind(asset).bind(hash).bind(&config.model).bind(revision).fetch_one(&mut *tx).await?;
+        .bind(user).bind(device).bind(asset).bind(hash).bind(&identity).bind(revision).fetch_one(&mut *tx).await?;
     if cached == 1 {
         tx.commit().await?;
         return Ok(Reservation::Cached);
@@ -404,7 +415,7 @@ async fn reserve(
     if let Some(at) = pending {
         if at > now - 150 {
             let same:i64=sqlx::query_scalar("SELECT count(*) FROM photo_vision_task_state WHERE user_id=$1 AND device_id=$2 AND asset_id=$3 AND epoch=$4 AND input_hash=$5 AND revision=$6 AND model=$7 AND status='processing'")
-                .bind(user).bind(device).bind(asset).bind(epoch).bind(hash).bind(revision).bind(&config.model).fetch_one(&mut *tx).await?;
+                .bind(user).bind(device).bind(asset).bind(epoch).bind(hash).bind(revision).bind(&identity).fetch_one(&mut *tx).await?;
             if same == 1 {
                 tx.commit().await?;
                 return Ok(Reservation::Pending);
@@ -445,7 +456,7 @@ async fn reserve(
     sqlx::query("INSERT INTO photo_vision_jobs(user_id,device_id,asset_id,requested_at,job_id)VALUES($1,$2,$3,$4,$5)ON CONFLICT(user_id,device_id,asset_id)DO UPDATE SET requested_at=$4,job_id=$5")
         .bind(user).bind(device).bind(asset).bind(now).bind(&job).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO photo_vision_task_state(user_id,device_id,asset_id,job_id,epoch,revision,input_hash,model,status,requested_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8,'processing',$9)ON CONFLICT(user_id,device_id,asset_id)DO UPDATE SET job_id=$4,epoch=$5,revision=$6,input_hash=$7,model=$8,status='processing',requested_at=$9")
-        .bind(user).bind(device).bind(asset).bind(&job).bind(epoch).bind(revision).bind(hash).bind(&config.model).bind(now).execute(&mut *tx).await?;
+        .bind(user).bind(device).bind(asset).bind(&job).bind(epoch).bind(revision).bind(hash).bind(&identity).bind(now).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Reservation::New(job))
 }
@@ -467,6 +478,9 @@ struct Analysis {
 async fn perform(
     state: &AttachmentsState,
     config: &semantic::Config,
+    user: &str,
+    device: &str,
+    epoch: i64,
     mime: &str,
     image: Vec<u8>,
 ) -> Result<Vec<Derived>, AttachmentError> {
@@ -479,6 +493,9 @@ async fn perform(
     ]}]});
     let mut attempt = 0;
     let mut response = loop {
+        // Detached work rechecks live destinations and device authorization
+        // immediately before each possible outbound request, including retries.
+        provider::authorize(state, user, device, epoch, config, true).await?;
         match state
             .photo_vision
             .client

@@ -68,6 +68,7 @@ pub struct AttachmentsState {
     client: reqwest::Client,
     photo_index: Arc<photo_index::Runtime>,
     photo_vision: Arc<photo_index::vision::Runtime>,
+    photo_configuration: Option<Arc<dyn Fn() -> futures_util::future::BoxFuture<'static, Option<(i64, std::collections::HashMap<String, String>)>> + Send + Sync>>,
     #[cfg(feature = "s3")]
     s3: Option<s3::S3Storage>,
 }
@@ -258,6 +259,7 @@ impl AttachmentsState {
             pool,
             photo_index,
             photo_vision,
+            photo_configuration: None,
             config: Arc::new(StorageConfig {
                 root,
                 max_bytes,
@@ -284,6 +286,17 @@ impl AttachmentsState {
         vision.client = photo_index::vision::client_for(&vision.config)?;
         next.photo_vision = Arc::new(vision);
         Ok(next)
+    }
+
+    /// Resolve current photo destinations again at external request boundaries.
+    /// The loader captures only the settings store, never this application state.
+    pub fn with_photo_configuration<F, Fut>(mut self, load: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Option<(i64, std::collections::HashMap<String, String>)>> + Send + 'static,
+    {
+        self.photo_configuration = Some(Arc::new(move || Box::pin(load())));
+        self
     }
 
     pub fn asr_configured(&self) -> bool {

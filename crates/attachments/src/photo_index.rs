@@ -3,6 +3,7 @@ use super::*;
 use axum::extract::Query;
 use serde_json::json;
 mod facts;
+mod provider;
 pub(super) mod semantic;
 pub(super) mod vision;
 pub(super) use semantic::Runtime;
@@ -108,6 +109,8 @@ struct Consent {
     enabled: bool,
     #[serde(default)]
     cloud_processing: bool,
+    #[serde(default)]
+    consent_scope: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -180,15 +183,9 @@ async fn status_for(
     user: &str,
     device: &str,
 ) -> Result<Json<serde_json::Value>, AttachmentError> {
-    let row=sqlx::query("SELECT CAST(enabled AS BIGINT) AS enabled,CAST(epoch AS BIGINT) AS epoch FROM photo_index_devices WHERE user_id=$1 AND device_id=$2")
-        .bind(user).bind(device).fetch_optional(&state.pool).await?;
-    let (enabled, epoch) = match row {
-        Some(r) => (
-            r.try_get::<i64, _>("enabled")? == 1,
-            r.try_get::<i64, _>("epoch")?,
-        ),
-        None => (false, 0),
-    };
+    let consent = provider::refresh(state, user, device).await?;
+    let enabled = consent.enabled;
+    let epoch = consent.epoch;
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM photo_index_assets WHERE user_id=$1 AND device_id=$2",
     )
@@ -198,24 +195,9 @@ async fn status_for(
     .await?;
     let facts_ready:i64=sqlx::query_scalar("SELECT count(*) FROM photo_index_facts f JOIN photo_index_assets a ON a.user_id=f.user_id AND a.device_id=f.device_id AND a.asset_id=f.asset_id AND a.revision=f.revision WHERE f.user_id=$1 AND f.device_id=$2 AND f.processor=$3")
         .bind(user).bind(device).bind(facts::PROCESSOR).fetch_one(&state.pool).await?;
-    let model = state
-        .photo_index
-        .config
-        .as_ref()
-        .map(|c| c.model.as_str())
-        .unwrap_or("");
-    let semantic_ready:i64=sqlx::query_scalar("SELECT count(*) FROM photo_index_vectors v JOIN photo_index_assets a ON a.user_id=v.user_id AND a.device_id=v.device_id AND a.asset_id=v.asset_id AND a.revision=v.revision WHERE v.user_id=$1 AND v.device_id=$2 AND v.model=$3")
-        .bind(user).bind(device).bind(model).fetch_one(&state.pool).await?;
-    let cloud: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM photo_cloud_consents WHERE user_id=$1 AND device_id=$2 AND epoch=$3",
-    )
-    .bind(user)
-    .bind(device)
-    .bind(epoch)
-    .fetch_one(&state.pool)
-    .await?;
+    let semantic_ready = semantic::ready_count(state, user, device, consent.configuration.embedding.as_ref()).await?;
     Ok(Json(
-        json!({"enabled":enabled,"epoch":epoch,"cloud_processing":enabled&&cloud==1,"vision_configured":state.photo_vision.config.is_some(),"indexed":count,"facts_ready":facts_ready,"semantic_ready":semantic_ready,"semantic_configured":state.photo_index.config.is_some()}),
+        json!({"enabled":enabled,"epoch":epoch,"cloud_processing":consent.allowed,"consent_required":consent.required,"configuration_paused":consent.required,"consent_reason":consent.reason,"consent_scope":consent.configuration.scope,"configuration_revision":consent.configuration.revision,"processing_destinations":consent.configuration.disclosure(),"vision_configured":consent.configuration.image.is_some(),"indexed":count,"facts_ready":facts_ready,"semantic_ready":semantic_ready,"semantic_configured":consent.configuration.embedding.is_some(),"semantic_allowed":consent.allowed&&consent.configuration.embedding.is_some()}),
     ))
 }
 
@@ -227,6 +209,10 @@ async fn consent(
 ) -> Result<Json<serde_json::Value>, AttachmentError> {
     uuid(&device)?;
     let user = state.user(&headers).await?;
+    let configuration = provider::current(&state).await?;
+    if input.enabled && input.cloud_processing && input.consent_scope.as_deref() != Some(configuration.scope.as_str()) {
+        return Err(provider::changed());
+    }
     let mut tx = state.pool.begin().await?;
     sqlx::query("INSERT INTO photo_index_devices(user_id,device_id)VALUES($1,$2)ON CONFLICT(user_id,device_id)DO NOTHING").bind(&user).bind(&device).execute(&mut *tx).await?;
     sqlx::query(
@@ -250,17 +236,24 @@ async fn consent(
         .execute(&mut *tx)
         .await?;
     if input.enabled && input.cloud_processing {
-        sqlx::query("INSERT INTO photo_cloud_consents(user_id,device_id,epoch)VALUES($1,$2,$3)")
+        sqlx::query("INSERT INTO photo_cloud_consents(user_id,device_id,epoch,provider_scope,invalidated)VALUES($1,$2,$3,$4,0)")
             .bind(&user)
             .bind(&device)
             .bind(epoch)
+            .bind(&configuration.scope)
             .execute(&mut *tx)
             .await?;
     }
+    for table in ["photo_embedding_jobs", "photo_vision_jobs"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE user_id=$1 AND device_id=$2"))
+            .bind(&user).bind(&device).execute(&mut *tx).await?;
+    }
+    sqlx::query("UPDATE photo_vision_task_state SET status='failed' WHERE user_id=$1 AND device_id=$2 AND status='processing'")
+        .bind(&user).bind(&device).execute(&mut *tx).await?;
     tx.commit().await?;
     // Return this mutation's epoch, not a later concurrent setting change.
     Ok(Json(
-        json!({"enabled":input.enabled,"epoch":epoch,"cloud_processing":input.enabled&&input.cloud_processing}),
+        json!({"enabled":input.enabled,"epoch":epoch,"cloud_processing":input.enabled&&input.cloud_processing,"consent_scope":configuration.scope}),
     ))
 }
 
@@ -337,11 +330,18 @@ async fn persist_sync(
     vision_hash: Option<(&str, &str, &str)>,
 ) -> Result<Json<serde_json::Value>, AttachmentError> {
     validate_sync(&input)?;
+    let cloud_scope = if vision_hash.is_some() {
+        let config = state.photo_vision.config.as_ref().ok_or_else(provider::changed)?;
+        Some(provider::authorize(state, user, device, input.epoch, config, true).await?)
+    } else {
+        provider::refresh(state, user, device).await?;
+        None
+    };
     let metadata = serde_json::to_string(&input.metadata).map_err(|_| invalid())?;
     let mut tx = state.pool.begin().await?;
     lock_consent(&mut tx, &user, &device, input.epoch).await?;
-    if vision_hash.is_some() {
-        vision::lock_cloud_consent(&mut tx, user, device, input.epoch).await?;
+    if let Some(scope) = cloud_scope.as_deref() {
+        vision::lock_cloud_consent(&mut tx, user, device, input.epoch, scope).await?;
     }
     if let Some((_, _, job)) = vision_hash {
         let live:i64=sqlx::query_scalar("SELECT count(*) FROM photo_vision_jobs WHERE user_id=$1 AND device_id=$2 AND asset_id=$3 AND job_id=$4")
@@ -506,9 +506,11 @@ async fn list(
         for (n, id) in literal.iter().enumerate() {
             ranked.insert(id.clone(), 1.0 / (60.0 + n as f64));
         }
-        let ready:i64=sqlx::query_scalar("SELECT count(*) FROM photo_index_vectors WHERE user_id=$1 AND device_id=$2 AND model=$3")
-            .bind(&user).bind(&device).bind(state.photo_index.config.as_ref().map(|c|c.model.as_str()).unwrap_or("")).fetch_one(&state.pool).await?;
-        if let Some(epoch) = current_epoch(&state, &user, &device).await? {
+        let consent = provider::refresh(&state, &user, &device).await?;
+        let ready = semantic::ready_count(&state, &user, &device, state.photo_index.config.as_ref()).await?;
+        if !consent.allowed {
+            fallback = Some(if consent.required {"云端处理目标已变化，请重新确认授权；已使用文字匹配"} else {"云端处理已关闭，已使用文字匹配"});
+        } else if let Some(epoch) = current_epoch(&state, &user, &device).await? {
             if ready > 0 {
                 match semantic::search(&state, &user, &device, epoch, &q).await {
                     Ok(Some(matches)) => {

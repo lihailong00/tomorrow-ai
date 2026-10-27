@@ -66,7 +66,13 @@ impl Fixture {
         .await;
         result["epoch"].as_i64().unwrap()
     }
-    async fn sync(&self, asset: &str, text: &str, epoch: i64) -> Response {
+    pub(super) async fn enable_cloud(&self) -> i64 {
+        let status = body(self.call("GET", &self.base(), json!(null)).await).await;
+        let response = self.call("PUT", &self.base(), json!({"enabled":true,"cloud_processing":true,"consent_scope":status["consent_scope"]})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        body(response).await["epoch"].as_i64().unwrap()
+    }
+    pub(super) async fn sync(&self, asset: &str, text: &str, epoch: i64) -> Response {
         self.call("PUT",&format!("{}/assets/{asset}",self.base()),json!({"epoch":epoch,"revision":"v1","metadata":{"taken_at":null,"modified_at":1,"width":100,"height":100,"size":1000,"mime_type":"image/jpeg"},"results":[{"kind":"ocr","processor":"local-test-v1","content":text}]})).await
     }
     fn configure(&mut self, endpoint: String) {
@@ -99,7 +105,7 @@ impl Fixture {
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }
-async fn call(
+pub(super) async fn call(
     state: &AttachmentsState,
     token: &str,
     method: &str,
@@ -130,6 +136,7 @@ async fn count(state: &AttachmentsState, table: &str) -> i64 {
     assert!(
         [
             "photo_index_vectors",
+            "photo_index_vector_spaces",
             "photo_index_facts",
             "photo_embedding_queries",
             "photo_embedding_attempts"
@@ -306,7 +313,7 @@ async fn semantic_search_checks(database: &str, require_vector: bool) {
         StatusCode::CONFLICT
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    let epoch = f.enable().await;
+    let epoch = f.enable_cloud().await;
     assert_eq!(
         f.sync(&f.asset, "2026年10月28日 航班：MU5810\n目的地：昆明", epoch)
             .await
@@ -365,7 +372,7 @@ async fn semantic_search_checks(database: &str, require_vector: bool) {
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     f.call("DELETE", &f.base(), json!(null)).await;
     for table in [
-        "photo_index_vectors",
+        "photo_index_vector_spaces",
         "photo_index_facts",
         "photo_embedding_queries",
     ] {
@@ -411,7 +418,7 @@ async fn clearing_while_embedding_is_in_flight_cannot_resurrect_derived_data() {
     });
     let mut f = Fixture::new().await;
     f.configure(format!("http://{address}/embeddings"));
-    let epoch = f.enable().await;
+    let epoch = f.enable_cloud().await;
     f.sync(&f.asset, "目的地：昆明", epoch).await;
     let state = f.state.clone();
     let token = f.token.clone();
@@ -427,7 +434,7 @@ async fn clearing_while_embedding_is_in_flight_cannot_resurrect_derived_data() {
     );
     release.notify_one();
     assert_eq!(pending.await.unwrap().status(), StatusCode::CONFLICT);
-    assert_eq!(count(&f.state, "photo_index_vectors").await, 0);
+    assert_eq!(count(&f.state, "photo_index_vector_spaces").await, 0);
     assert_eq!(count(&f.state, "photo_index_facts").await, 0);
     server.abort();
     f.cleanup().await;
@@ -457,7 +464,7 @@ async fn embedding_failures_keep_quota_and_provider_errors_never_leak() {
     });
     let mut f = Fixture::new().await;
     f.configure(format!("http://{address}/embeddings"));
-    let epoch = f.enable().await;
+    let epoch = f.enable_cloud().await;
     f.sync(&f.asset, "地点：昆明", epoch).await;
     let response = f
         .call("POST", &format!("{}/prepare", f.base()), json!(null))
@@ -477,7 +484,7 @@ async fn embedding_failures_keep_quota_and_provider_errors_never_leak() {
     assert_eq!(retry["deferred"], true);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(count(&f.state, "photo_embedding_attempts").await, 1);
-    assert_eq!(count(&f.state, "photo_index_vectors").await, 0);
+    assert_eq!(count(&f.state, "photo_index_vector_spaces").await, 0);
     server.abort();
     f.cleanup().await;
 }
@@ -486,7 +493,7 @@ async fn embedding_failures_keep_quota_and_provider_errors_never_leak() {
 async fn daily_admission_limit_survives_cache_deletion() {
     let mut f = Fixture::new().await;
     f.configure("http://127.0.0.1:1/embeddings".into());
-    let epoch = f.enable().await;
+    let epoch = f.enable_cloud().await;
     f.sync(&f.asset, "地点：昆明", epoch).await;
     for _ in 0..100 {
         sqlx::query(
@@ -574,7 +581,7 @@ async fn malformed_or_zero_embeddings_are_never_persisted() {
         });
         let mut f = Fixture::new().await;
         f.configure(format!("http://{address}/embeddings"));
-        let epoch = f.enable().await;
+        let epoch = f.enable_cloud().await;
         f.sync(&f.asset, "地点：昆明", epoch).await;
         assert_eq!(
             f.call("POST", &format!("{}/prepare", f.base()), json!(null))
@@ -582,7 +589,7 @@ async fn malformed_or_zero_embeddings_are_never_persisted() {
                 .status(),
             StatusCode::BAD_GATEWAY
         );
-        assert_eq!(count(&f.state, "photo_index_vectors").await, 0);
+        assert_eq!(count(&f.state, "photo_index_vector_spaces").await, 0);
         server.abort();
         f.cleanup().await;
     }

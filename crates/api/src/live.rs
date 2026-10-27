@@ -24,10 +24,17 @@ struct Live {
 }
 
 pub fn router(
-    baseline: AppState,
+    mut baseline: AppState,
     settings: ConfigStore,
     administration: admin::AdminState,
 ) -> Router {
+    if let Some(attachments) = baseline.attachments.take() {
+        let photo_settings = settings.clone();
+        baseline.attachments = Some(attachments.with_photo_configuration(move || {
+            let store = photo_settings.clone();
+            async move { store.effective_snapshot().await.ok() }
+        }));
+    }
     let state = Live {
         baseline,
         settings,

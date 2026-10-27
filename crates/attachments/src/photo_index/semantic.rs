@@ -13,6 +13,25 @@ pub(crate) struct Config {
     pub model: String,
     pub dimension: usize,
 }
+impl Config {
+    /// Private hash material; paths can contain credentials and are never public.
+    pub(super) fn destination(&self) -> String {
+        reqwest::Url::parse(&self.endpoint).map(|url| url.to_string())
+            .unwrap_or_else(|_| self.endpoint.clone())
+    }
+    pub(super) fn public_destination(&self) -> Option<String> {
+        let url = reqwest::Url::parse(&self.endpoint).ok()?;
+        if !["http", "https"].contains(&url.scheme()) || url.host_str().is_none() { return None; }
+        Some(url.origin().ascii_serialization())
+    }
+    pub(super) fn identity(&self, protocol: &str) -> String {
+        // Credentials may select a tenant/deployment behind the same endpoint.
+        // Rotate conservatively into a new vector space; never persist the key.
+        let bytes = serde_json::to_vec(&(protocol, self.destination(), &self.model,
+            self.dimension, hash(self.key.as_bytes()))).expect("provider identity serializes");
+        format!("photo-space-v1:{}", hash(&bytes))
+    }
+}
 #[derive(Clone)]
 pub(crate) struct Runtime {
     pub config: Option<Config>,
@@ -164,6 +183,8 @@ pub(super) async fn initialize(pool: &AnyPool) -> Result<Runtime, AttachmentErro
     for sql in [
         "CREATE TABLE IF NOT EXISTS photo_index_facts(user_id TEXT NOT NULL,device_id TEXT NOT NULL,asset_id TEXT NOT NULL,revision TEXT NOT NULL,source_hash TEXT NOT NULL,processor TEXT NOT NULL,facts TEXT NOT NULL,PRIMARY KEY(user_id,device_id,asset_id))",
         "CREATE TABLE IF NOT EXISTS photo_index_vectors(user_id TEXT NOT NULL,device_id TEXT NOT NULL,asset_id TEXT NOT NULL,revision TEXT NOT NULL,input_hash TEXT NOT NULL,model TEXT NOT NULL,dimension BIGINT NOT NULL,vector_data TEXT NOT NULL,PRIMARY KEY(user_id,device_id,asset_id))",
+        "CREATE TABLE IF NOT EXISTS photo_index_vector_spaces(user_id TEXT NOT NULL,device_id TEXT NOT NULL,asset_id TEXT NOT NULL,provider_id TEXT NOT NULL,revision TEXT NOT NULL,input_hash TEXT NOT NULL,model TEXT NOT NULL,dimension BIGINT NOT NULL,vector_data TEXT NOT NULL,PRIMARY KEY(user_id,device_id,asset_id,provider_id),FOREIGN KEY(user_id)REFERENCES users(id)ON DELETE CASCADE,FOREIGN KEY(user_id,device_id,asset_id)REFERENCES photo_index_assets(user_id,device_id,asset_id)ON DELETE CASCADE)",
+        "CREATE INDEX IF NOT EXISTS photo_index_vector_spaces_scope ON photo_index_vector_spaces(user_id,device_id,provider_id,dimension)",
         "CREATE TABLE IF NOT EXISTS photo_embedding_guard(id BIGINT PRIMARY KEY,singleton BIGINT NOT NULL)",
         "INSERT INTO photo_embedding_guard(id,singleton)VALUES(1,0)ON CONFLICT(id)DO NOTHING",
         "CREATE TABLE IF NOT EXISTS photo_embedding_attempts(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,requested_at BIGINT NOT NULL,units BIGINT NOT NULL)",
@@ -187,6 +208,8 @@ pub(super) async fn initialize(pool: &AnyPool) -> Result<Runtime, AttachmentErro
             )
             .execute(pool)
             .await?;
+            sqlx::query("ALTER TABLE photo_index_vector_spaces ADD COLUMN IF NOT EXISTS embedding vector")
+                .execute(pool).await?;
             true
         } else {
             false
@@ -253,6 +276,8 @@ pub(super) async fn write_facts(
     sqlx::query("INSERT INTO photo_index_facts(user_id,device_id,asset_id,revision,source_hash,processor,facts)VALUES($1,$2,$3,$4,$5,$6,$7)ON CONFLICT(user_id,device_id,asset_id)DO UPDATE SET revision=$4,source_hash=$5,processor=$6,facts=$7")
         .bind(user).bind(device).bind(asset).bind(revision).bind(&fingerprint).bind(facts::PROCESSOR).bind(facts).execute(&mut **tx).await?;
     sqlx::query("DELETE FROM photo_index_vectors WHERE user_id=$1 AND device_id=$2 AND asset_id=$3 AND (revision<>$4 OR input_hash<>$5)")
+        .bind(user).bind(device).bind(asset).bind(revision).bind(&fingerprint).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM photo_index_vector_spaces WHERE user_id=$1 AND device_id=$2 AND asset_id=$3 AND (revision<>$4 OR input_hash<>$5)")
         .bind(user).bind(device).bind(asset).bind(revision).bind(fingerprint).execute(&mut **tx).await?;
     Ok(())
 }
@@ -265,12 +290,14 @@ async fn reserve(
     epoch: i64,
     job: &str,
     units: i64,
+    config: &Config,
 ) -> Result<bool, AttachmentError> {
+    let scope = provider::authorize(state, user, device, epoch, config, false).await?;
     // Keep a small reserve for interactive searches after indexing reaches its cap.
     let query_job = job.starts_with("query:");
     let now = chrono::Utc::now().timestamp();
     let mut tx = state.pool.begin().await?;
-    lock_consent(&mut tx, user, device, epoch).await?;
+    vision::lock_cloud_consent(&mut tx, user, device, epoch, &scope).await?;
     if sqlx::query("UPDATE photo_embedding_guard SET singleton=singleton WHERE id=1")
         .execute(&mut *tx)
         .await?
@@ -387,17 +414,19 @@ pub(super) async fn prepare(
     device: &str,
     epoch: i64,
 ) -> Result<serde_json::Value, AttachmentError> {
-    let config = state.photo_index.config.as_ref();
-    let model = config.map(|c| c.model.as_str()).unwrap_or("");
+    let consent = provider::refresh(state, user, device).await?;
+    if consent.epoch != epoch || consent.required { return Err(provider::changed()); }
+    let config = state.photo_index.config.as_ref().filter(|_|consent.allowed);
+    let model = config.map(|c| c.identity("openai-embeddings-v1")).unwrap_or_default();
     let dimension = config.map(|c| c.dimension as i64).unwrap_or(0);
-    let candidate:Option<String>=sqlx::query_scalar("SELECT a.asset_id FROM photo_index_assets a WHERE a.user_id=$1 AND a.device_id=$2 AND (NOT EXISTS(SELECT 1 FROM photo_index_facts f WHERE f.user_id=a.user_id AND f.device_id=a.device_id AND f.asset_id=a.asset_id AND f.revision=a.revision AND f.processor=$3) OR ($4<>'' AND NOT EXISTS(SELECT 1 FROM photo_index_vectors v WHERE v.user_id=a.user_id AND v.device_id=a.device_id AND v.asset_id=a.asset_id AND v.revision=a.revision AND v.model=$4 AND v.dimension=$5))) ORDER BY a.updated_at,a.asset_id LIMIT 1")
-        .bind(user).bind(device).bind(facts::PROCESSOR).bind(model).bind(dimension).fetch_optional(&state.pool).await?;
+    let candidate:Option<String>=sqlx::query_scalar("SELECT a.asset_id FROM photo_index_assets a WHERE a.user_id=$1 AND a.device_id=$2 AND (NOT EXISTS(SELECT 1 FROM photo_index_facts f WHERE f.user_id=a.user_id AND f.device_id=a.device_id AND f.asset_id=a.asset_id AND f.revision=a.revision AND f.processor=$3) OR ($4<>'' AND NOT EXISTS(SELECT 1 FROM photo_index_vector_spaces v WHERE v.user_id=a.user_id AND v.device_id=a.device_id AND v.asset_id=a.asset_id AND v.revision=a.revision AND v.provider_id=$4 AND v.dimension=$5))) ORDER BY a.updated_at,a.asset_id LIMIT 1")
+        .bind(user).bind(device).bind(facts::PROCESSOR).bind(&model).bind(dimension).fetch_optional(&state.pool).await?;
     let Some(asset) = candidate else {
-        return Ok(json!({"processed":false,"more":false,"semantic_configured":config.is_some()}));
+        return Ok(json!({"processed":false,"more":false,"semantic_configured":state.photo_index.config.is_some(),"semantic_allowed":consent.allowed}));
     };
     ensure_facts(state, user, device, &asset, epoch).await?;
     let Some(config) = config else {
-        return Ok(json!({"processed":true,"more":true,"semantic_configured":false}));
+        return Ok(json!({"processed":true,"more":true,"semantic_configured":state.photo_index.config.is_some(),"semantic_allowed":false}));
     };
     let Ok(_permit) = state.photo_index.active.try_acquire() else {
         return Ok(json!({"processed":false,"more":true,"deferred":true}));
@@ -415,22 +444,24 @@ pub(super) async fn prepare(
     while text.len() > 6000 {
         text.pop();
     }
-    let job = format!("{asset}:{fingerprint}:{}", config.model);
-    if !reserve(state, user, device, epoch, &job, text.len() as i64 + 128).await? {
+    let job = format!("{asset}:{fingerprint}:{model}");
+    if !reserve(state, user, device, epoch, &job, text.len() as i64 + 128, config).await? {
         return Ok(json!({"processed":false,"more":true,"deferred":true}));
     }
+    provider::authorize(state, user, device, epoch, config, false).await?;
     let vector = embed(state, config, &text).await?;
     let encoded = serde_json::to_string(&vector).map_err(|_| unavailable())?;
+    let scope = provider::authorize(state, user, device, epoch, config, false).await?;
     let mut tx = state.pool.begin().await?;
-    lock_consent(&mut tx, user, device, epoch).await?;
+    vision::lock_cloud_consent(&mut tx, user, device, epoch, &scope).await?;
     let current:Option<String>=sqlx::query_scalar("SELECT source_hash FROM photo_index_facts WHERE user_id=$1 AND device_id=$2 AND asset_id=$3 AND revision=$4").bind(user).bind(device).bind(&asset).bind(&revision).fetch_optional(&mut *tx).await?;
     if current.as_deref() != Some(&fingerprint) {
         return Ok(json!({"processed":false,"more":true,"stale":true}));
     }
-    sqlx::query("INSERT INTO photo_index_vectors(user_id,device_id,asset_id,revision,input_hash,model,dimension,vector_data)VALUES($1,$2,$3,$4,$5,$6,$7,$8)ON CONFLICT(user_id,device_id,asset_id)DO UPDATE SET revision=$4,input_hash=$5,model=$6,dimension=$7,vector_data=$8")
-        .bind(user).bind(device).bind(&asset).bind(revision).bind(fingerprint).bind(&config.model).bind(config.dimension as i64).bind(&encoded).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO photo_index_vector_spaces(user_id,device_id,asset_id,revision,input_hash,model,dimension,vector_data,provider_id)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)ON CONFLICT(user_id,device_id,asset_id,provider_id)DO UPDATE SET revision=$4,input_hash=$5,model=$6,dimension=$7,vector_data=$8")
+        .bind(user).bind(device).bind(&asset).bind(revision).bind(fingerprint).bind(&config.model).bind(config.dimension as i64).bind(&encoded).bind(&model).execute(&mut *tx).await?;
     if state.photo_index.postgres_vector {
-        sqlx::query("UPDATE photo_index_vectors SET embedding=CAST($1 AS vector) WHERE user_id=$2 AND device_id=$3 AND asset_id=$4").bind(encoded).bind(user).bind(device).bind(asset).execute(&mut *tx).await?;
+        sqlx::query("UPDATE photo_index_vector_spaces SET embedding=CAST($1 AS vector) WHERE user_id=$2 AND device_id=$3 AND asset_id=$4 AND provider_id=$5").bind(encoded).bind(user).bind(device).bind(asset).bind(&model).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     Ok(json!({"processed":true,"more":true,"semantic_configured":true}))
@@ -446,10 +477,14 @@ pub(super) async fn search(
     let Some(config) = state.photo_index.config.as_ref() else {
         return Ok(None);
     };
+    let consent = provider::refresh(state,user,device).await?;
+    if !consent.allowed { return Ok(None); }
+    provider::authorize(state,user,device,epoch,config,false).await?;
+    let identity = config.identity("openai-embeddings-v1");
     let now = chrono::Utc::now().timestamp();
     let key = hash(query.as_bytes());
     let cached:Option<String>=sqlx::query_scalar("SELECT vector_data FROM photo_embedding_queries WHERE user_id=$1 AND device_id=$2 AND query_hash=$3 AND model=$4 AND created_at>$5")
-        .bind(user).bind(device).bind(&key).bind(&config.model).bind(now-WINDOW).fetch_optional(&state.pool).await?;
+        .bind(user).bind(device).bind(&key).bind(&identity).bind(now-WINDOW).fetch_optional(&state.pool).await?;
     let vector = if let Some(cache) = cached {
         valid_vector(
             serde_json::from_str(&cache).map_err(|_| unavailable())?,
@@ -464,24 +499,28 @@ pub(super) async fn search(
             user,
             device,
             epoch,
-            &format!("query:{key}:{}", config.model),
+            &format!("query:{key}:{identity}"),
             query.len() as i64 + 128,
+            config,
         )
         .await?
         {
             return Ok(None);
         }
+        provider::authorize(state,user,device,epoch,config,false).await?;
         let vector = embed(state, config, query).await?;
+        let scope = provider::authorize(state,user,device,epoch,config,false).await?;
         let mut tx = state.pool.begin().await?;
-        lock_consent(&mut tx, user, device, epoch).await?;
+        vision::lock_cloud_consent(&mut tx, user, device, epoch, &scope).await?;
         sqlx::query("INSERT INTO photo_embedding_queries(user_id,device_id,query_hash,model,vector_data,created_at)VALUES($1,$2,$3,$4,$5,$6)ON CONFLICT(user_id,device_id,query_hash,model)DO UPDATE SET vector_data=$5,created_at=$6")
-            .bind(user).bind(device).bind(&key).bind(&config.model).bind(serde_json::to_string(&vector).map_err(|_|unavailable())?).bind(now).execute(&mut *tx).await?;
+            .bind(user).bind(device).bind(&key).bind(&identity).bind(serde_json::to_string(&vector).map_err(|_|unavailable())?).bind(now).execute(&mut *tx).await?;
         tx.commit().await?;
         vector
     };
     if state.photo_index.postgres_vector {
-        let rows=sqlx::query("SELECT v.asset_id,CAST(1-(v.embedding <=> CAST($1 AS vector)) AS DOUBLE PRECISION) AS score FROM photo_index_vectors v JOIN photo_index_assets a ON a.user_id=v.user_id AND a.device_id=v.device_id AND a.asset_id=v.asset_id AND a.revision=v.revision WHERE v.user_id=$2 AND v.device_id=$3 AND v.model=$4 AND v.dimension=$5 AND v.embedding IS NOT NULL ORDER BY v.embedding <=> CAST($1 AS vector),v.asset_id LIMIT 100")
-            .bind(serde_json::to_string(&vector).map_err(|_|unavailable())?).bind(user).bind(device).bind(&config.model).bind(config.dimension as i64).fetch_all(&state.pool).await?;
+        let rows=sqlx::query("SELECT v.asset_id,CAST(1-(v.embedding <=> CAST($1 AS vector)) AS DOUBLE PRECISION) AS score FROM photo_index_vector_spaces v JOIN photo_index_assets a ON a.user_id=v.user_id AND a.device_id=v.device_id AND a.asset_id=v.asset_id AND a.revision=v.revision WHERE v.user_id=$2 AND v.device_id=$3 AND v.provider_id=$4 AND v.dimension=$5 AND v.embedding IS NOT NULL ORDER BY v.embedding <=> CAST($1 AS vector),v.asset_id LIMIT 100")
+            .bind(serde_json::to_string(&vector).map_err(|_|unavailable())?).bind(user).bind(device).bind(&identity).bind(config.dimension as i64).fetch_all(&state.pool).await?;
+        provider::authorize(state,user,device,epoch,config,false).await?;
         return Ok(Some(
             rows.into_iter()
                 .map(|r| Ok((r.try_get("asset_id")?, r.try_get("score")?)))
@@ -489,8 +528,8 @@ pub(super) async fn search(
         ));
     }
     // Portable exact search for local SQLite and PostgreSQL without the extension.
-    let mut stream=sqlx::query("SELECT v.asset_id,v.vector_data FROM photo_index_vectors v JOIN photo_index_assets a ON a.user_id=v.user_id AND a.device_id=v.device_id AND a.asset_id=v.asset_id AND a.revision=v.revision WHERE v.user_id=$1 AND v.device_id=$2 AND v.model=$3 AND v.dimension=$4")
-        .bind(user).bind(device).bind(&config.model).bind(config.dimension as i64).fetch(&state.pool);
+    let mut stream=sqlx::query("SELECT v.asset_id,v.vector_data FROM photo_index_vector_spaces v JOIN photo_index_assets a ON a.user_id=v.user_id AND a.device_id=v.device_id AND a.asset_id=v.asset_id AND a.revision=v.revision WHERE v.user_id=$1 AND v.device_id=$2 AND v.provider_id=$3 AND v.dimension=$4")
+        .bind(user).bind(device).bind(&identity).bind(config.dimension as i64).fetch(&state.pool);
     let mut ranked = Vec::new();
     while let Some(row) = stream.try_next().await? {
         let stored: Vec<f64> = serde_json::from_str(&row.try_get::<String, _>("vector_data")?)
@@ -507,5 +546,13 @@ pub(super) async fn search(
     }
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     ranked.truncate(100);
+    drop(stream);
+    provider::authorize(state,user,device,epoch,config,false).await?;
     Ok(Some(ranked))
+}
+
+pub(super) async fn ready_count(state:&AttachmentsState,user:&str,device:&str,config:Option<&Config>) -> Result<i64,AttachmentError> {
+    let Some(config)=config else{return Ok(0)};
+    Ok(sqlx::query_scalar("SELECT count(*) FROM photo_index_vector_spaces v JOIN photo_index_assets a ON a.user_id=v.user_id AND a.device_id=v.device_id AND a.asset_id=v.asset_id AND a.revision=v.revision JOIN photo_index_facts f ON f.user_id=v.user_id AND f.device_id=v.device_id AND f.asset_id=v.asset_id AND f.source_hash=v.input_hash WHERE v.user_id=$1 AND v.device_id=$2 AND v.provider_id=$3 AND v.dimension=$4")
+        .bind(user).bind(device).bind(config.identity("openai-embeddings-v1")).bind(config.dimension as i64).fetch_one(&state.pool).await?)
 }

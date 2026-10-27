@@ -4,6 +4,60 @@ use axum::http::Request;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 use tower::ServiceExt;
+
+#[tokio::test]
+async fn changed_image_destination_pauses_old_grant_and_discards_inflight_image_result() {
+    use std::{collections::HashMap, sync::RwLock};
+    let mut f=Fixture::new().await;
+    let entered=Arc::new(Notify::new());let release=Arc::new(Notify::new());
+    let (a_calls,a)=mock(&mut f,Some((entered.clone(),release.clone())),true).await;
+    let a_endpoint=f.state.photo_vision.config.as_ref().unwrap().endpoint.clone();
+    let (b_calls,b)=mock(&mut f,None,true).await;
+    let b_endpoint=f.state.photo_vision.config.as_ref().unwrap().endpoint.clone();
+    let values=|endpoint:&str|HashMap::<String,String>::from([
+        ("PHOTO_VISION_ENABLED".into(),"true".into()),
+        ("PHOTO_VISION_BASE_URL".into(),endpoint.strip_suffix("/chat/completions").unwrap().into()),
+        ("PHOTO_VISION_API_KEY".into(),"mock-key".into()),
+        ("PHOTO_VISION_MODEL".into(),"test-vision".into()),
+        ("PHOTO_EMBEDDING_ENABLED".into(),"false".into()),
+    ]);
+    let shared=Arc::new(RwLock::new(values(&a_endpoint)));let loader=shared.clone();
+    f.state=f.state.clone().with_photo_configuration(move||{
+        let values=loader.read().unwrap().clone();async move{Some((1,values))}
+    }).reconfigured(&shared.read().unwrap()).unwrap();
+    let a_status=body(f.call("GET",&f.base(),json!(null)).await).await;
+    let epoch=cloud_enable(&f).await;
+    let path=format!("{}/assets/{}/analyze",f.base(),f.asset);
+    assert_eq!(upload(&f.state,&f.token,&path,input(epoch),&png()).await.status(),StatusCode::ACCEPTED);
+    tokio::time::timeout(Duration::from_secs(5),entered.notified()).await.unwrap();
+    // No new HTTP request is needed for the old task to observe changed settings.
+    *shared.write().unwrap()=values(&b_endpoint);
+    release.notify_one();wait_idle(&f).await;
+    assert_eq!(count(&f,"photo_index_assets").await,0);
+    assert_eq!(a_calls.load(Ordering::SeqCst),1);assert_eq!(b_calls.load(Ordering::SeqCst),0);
+    f.state=f.state.reconfigured(&shared.read().unwrap()).unwrap();
+    let paused=body(f.call("GET",&f.base(),json!(null)).await).await;
+    assert_eq!(paused["cloud_processing"],false);assert_eq!(paused["consent_required"],true);
+    assert_eq!(paused["epoch"],epoch+1);
+    assert_eq!(paused["processing_destinations"]["images"]["destination"],reqwest::Url::parse(&b_endpoint).unwrap().origin().ascii_serialization());
+    assert_eq!(f.call("PUT",&f.base(),json!({"enabled":true,"cloud_processing":true,"consent_scope":a_status["consent_scope"]})).await.status(),StatusCode::CONFLICT);
+    assert_eq!(upload(&f.state,&f.token,&path,input(epoch+1),&png()).await.status(),StatusCode::CONFLICT);
+    assert_eq!(b_calls.load(Ordering::SeqCst),0);
+    // Returning to A never silently restores an invalidated old grant.
+    *shared.write().unwrap()=values(&a_endpoint);f.state=f.state.reconfigured(&shared.read().unwrap()).unwrap();
+    let paused_again=body(f.call("GET",&f.base(),json!(null)).await).await;
+    assert_eq!(paused_again["cloud_processing"],false);assert_eq!(paused_again["epoch"],epoch+1);
+    *shared.write().unwrap()=values(&b_endpoint);f.state=f.state.reconfigured(&shared.read().unwrap()).unwrap();
+    let renewed=cloud_enable(&f).await;
+    assert_eq!(upload(&f.state,&f.token,&path,input(renewed),&png()).await.status(),StatusCode::ACCEPTED);
+    wait_status(&f,renewed,"complete").await;
+    assert_eq!(b_calls.load(Ordering::SeqCst),1);
+    f.call("PUT",&f.base(),json!({"enabled":true,"cloud_processing":false})).await;
+    let local=body(f.call("GET",&f.base(),json!(null)).await).await;
+    assert_eq!(f.sync(&f.asset,"local OCR survives revocation",local["epoch"].as_i64().unwrap()).await.status(),StatusCode::OK);
+    assert_eq!(body(f.call("GET",&format!("{}/assets?mode=keyword",f.base()),json!(null)).await).await["items"].as_array().unwrap().len(),1);
+    a.abort();b.abort();f.cleanup().await;
+}
 const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAfElEQVR4nNXOQREAIADDsFL/nocIHlyjIGcbZRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncf4OvLpyqgN9ZSiDcwAAAABJRU5ErkJggg==";
 async fn mock(
     f: &mut Fixture,
@@ -73,11 +127,12 @@ fn png() -> Vec<u8> {
     STANDARD.decode(PNG).unwrap()
 }
 async fn cloud_enable(f: &Fixture) -> i64 {
+    let metadata = body(f.call("GET", &f.base(), json!(null)).await).await;
     body(
         f.call(
             "PUT",
             &f.base(),
-            json!({"enabled":true,"cloud_processing":true}),
+            json!({"enabled":true,"cloud_processing":true,"consent_scope":metadata["consent_scope"]}),
         )
         .await,
     )
@@ -165,10 +220,13 @@ async fn cloud_round_trip(database: &str) {
     assert_eq!(denied.status(), StatusCode::CONFLICT);
     assert_eq!(
         body(denied).await["error"]["code"],
-        "photo_cloud_consent_required"
+        "photo_cloud_consent_changed"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let epoch = cloud_enable(&f).await;
+    let granted = body(f.call("GET", &f.base(), json!(null)).await).await;
+    assert_eq!(granted["epoch"], epoch, "{granted}");
+    assert_eq!(granted["cloud_processing"], true, "{granted}");
     assert_eq!(
         upload(&f.state, &f.other, &path, input(epoch), &png())
             .await
@@ -176,8 +234,10 @@ async fn cloud_round_trip(database: &str) {
         StatusCode::CONFLICT
     );
     let response = upload(&f.state, &f.token, &path, input(epoch), &png()).await;
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert_eq!(body(response).await["cached"], false);
+    let response_status = response.status();
+    let response_body = body(response).await;
+    assert_eq!(response_status, StatusCode::ACCEPTED, "{response_body}");
+    assert_eq!(response_body["cached"], false);
     wait_status(&f, epoch, "complete").await;
     let response = upload(&f.state, &f.token, &path, input(epoch), &png()).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -359,7 +419,7 @@ async fn abandoned_processing_record_expires_without_storing_or_reusing_an_image
     let job = uuid::Uuid::new_v4().to_string();
     // Represents a process restart: durable metadata exists, image RAM is gone.
     sqlx::query("INSERT INTO photo_vision_jobs(user_id,device_id,asset_id,requested_at,job_id)VALUES($1,$2,$3,$4,$5)").bind(&f.user).bind(&f.device).bind(&f.asset).bind(now-151).bind(&job).execute(&f.state.pool).await.unwrap();
-    sqlx::query("INSERT INTO photo_vision_task_state(user_id,device_id,asset_id,job_id,epoch,revision,input_hash,model,status,requested_at)VALUES($1,$2,$3,$4,$5,'source-v1','lost','test-vision','processing',$6)").bind(&f.user).bind(&f.device).bind(&f.asset).bind(&job).bind(epoch).bind(now-151).execute(&f.state.pool).await.unwrap();
+    sqlx::query("INSERT INTO photo_vision_task_state(user_id,device_id,asset_id,job_id,epoch,revision,input_hash,model,status,requested_at)VALUES($1,$2,$3,$4,$5,'source-v1','lost',$7,'processing',$6)").bind(&f.user).bind(&f.device).bind(&f.asset).bind(&job).bind(epoch).bind(now-151).bind(f.state.photo_vision.config.as_ref().unwrap().identity("openai-vision-v1")).execute(&f.state.pool).await.unwrap();
     assert_eq!(status(&f, epoch).await["status"], "failed");
     assert_eq!(count(&f, "photo_index_assets").await, 0);
     let path = format!("{}/assets/{}/analyze", f.base(), f.asset);
