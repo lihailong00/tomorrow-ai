@@ -32,6 +32,8 @@ struct Inner {
     crypto: Option<Crypto>,
     requests: Arc<Semaphore>,
     runtime_values: Option<std::collections::HashMap<String, String>>,
+    #[cfg(test)]
+    oauth_test_providers: std::collections::HashMap<String, oauth::OAuthProvider>,
 }
 
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
@@ -93,6 +95,8 @@ impl IntegrationState {
             crypto,
             requests: Arc::new(Semaphore::new(8)),
             runtime_values: None,
+            #[cfg(test)]
+            oauth_test_providers: std::collections::HashMap::new(),
         })))
     }
     pub fn reconfigured(&self, values: &std::collections::HashMap<String, String>) -> Self {
@@ -105,6 +109,10 @@ impl IntegrationState {
         match &self.0.runtime_values { Some(values) => values.get(key).cloned(), None => std::env::var(key).ok() }
     }
     fn oauth_provider(&self, id: &str) -> Option<oauth::OAuthProvider> {
+        #[cfg(test)]
+        if let Some(provider) = self.0.oauth_test_providers.get(id) {
+            return Some(provider.clone());
+        }
         oauth::OAuthProvider::from_lookup(id, |key| self.value(key))
     }
     fn crypto(&self) -> Result<&Crypto> {
@@ -196,14 +204,24 @@ impl IntegrationState {
     }
     async fn reserve(&self, user: &str, provider: &str) -> Result<i64> {
         let mut tx = self.0.pool.begin().await?;
-        let row = sqlx::query("INSERT INTO integration_accounts(user_id,provider,generation,encrypted_credentials,updated_at) VALUES($1,$2,1,'',$3) ON CONFLICT(user_id,provider) DO UPDATE SET generation=integration_accounts.generation+1,encrypted_credentials='',updated_at=excluded.updated_at RETURNING generation")
-            .bind(user).bind(provider).bind(now()).fetch_one(&mut *tx).await?;
+        let generation = Self::reserve_in_transaction(&mut tx, user, provider).await?;
+        tx.commit().await?;
+        Ok(generation)
+    }
+    async fn reserve_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+        user: &str,
+        provider: &str,
+    ) -> Result<i64> {
+        // Fence older attempts and reads, but keep the working connection until
+        // this attempt has verified replacement credentials.
+        let row = sqlx::query("INSERT INTO integration_accounts(user_id,provider,generation,encrypted_credentials,updated_at) VALUES($1,$2,1,'',$3) ON CONFLICT(user_id,provider) DO UPDATE SET generation=integration_accounts.generation+1 RETURNING generation")
+            .bind(user).bind(provider).bind(now()).fetch_one(&mut **tx).await?;
         sqlx::query("DELETE FROM integration_account_read_leases WHERE user_id=$1 AND provider=$2")
             .bind(user)
             .bind(provider)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        tx.commit().await?;
         Ok(row.try_get("generation")?)
     }
     fn decode(&self, user: &str, id: &str, encrypted: &str) -> Result<Value> {
@@ -219,11 +237,18 @@ impl IntegrationState {
             return Err(ConnectorError::invalid());
         }
         let encrypted = self.crypto()?.encrypt(user, id, "credentials", &bytes)?;
-        let changed = sqlx::query("UPDATE integration_accounts SET encrypted_credentials=$1,updated_at=$2 WHERE user_id=$3 AND provider=$4 AND generation=$5")
-            .bind(encrypted).bind(now()).bind(user).bind(id).bind(generation).execute(&self.0.pool).await?.rows_affected();
+        let mut tx = self.0.pool.begin().await?;
+        // Reads may use the retained credentials while reconnect is pending.
+        // Committing the replacement must fence those reads and their refreshes,
+        // as well as preventing this attempt from being committed twice.
+        let changed = sqlx::query("UPDATE integration_accounts SET encrypted_credentials=$1,generation=generation+1,updated_at=$2 WHERE user_id=$3 AND provider=$4 AND generation=$5")
+            .bind(encrypted).bind(now()).bind(user).bind(id).bind(generation).execute(&mut *tx).await?.rows_affected();
         if changed == 0 {
             return Err(connection_required());
         }
+        sqlx::query("DELETE FROM integration_account_read_leases WHERE user_id=$1 AND provider=$2")
+            .bind(user).bind(id).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
     async fn save_under_read_lease(
@@ -356,14 +381,15 @@ impl IntegrationState {
         let provider = self.oauth_provider(id).ok_or_else(not_configured)?;
         self.admit(user).await?;
         let secret = random_secret();
-        let generation = self.reserve(user, id).await?;
+        let authorization_url = provider.authorize_url(&secret)?;
         let mut tx = self.0.pool.begin().await?;
+        let generation = Self::reserve_in_transaction(&mut tx, user, id).await?;
         sqlx::query("DELETE FROM integration_oauth_states WHERE expires_at<=$1 OR (user_id=$2 AND provider=$3)")
             .bind(now()).bind(user).bind(id).execute(&mut *tx).await?;
         sqlx::query("INSERT INTO integration_oauth_states(state_hash,user_id,provider,generation,expires_at) VALUES($1,$2,$3,$4,$5)")
             .bind(digest(&secret)).bind(user).bind(id).bind(generation).bind(now()+600).execute(&mut *tx).await?;
         tx.commit().await?;
-        provider.authorize_url(&secret)
+        Ok(authorization_url)
     }
     async fn finish_authorize(&self, id: &str, query: CallbackQuery) -> Result<bool> {
         let state = query
@@ -766,3 +792,6 @@ async fn callback(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod reconnect_tests;

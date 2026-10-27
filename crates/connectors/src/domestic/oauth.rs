@@ -139,6 +139,17 @@ pub(super) fn required_configuration(id: &str) -> Vec<&'static str> {
 }
 
 impl OAuthProvider {
+    #[cfg(test)]
+    pub(super) fn with_test_origin(mut self, origin: String) -> Self {
+        self.origin = origin;
+        self.client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .redirect(Policy::none())
+            .no_proxy()
+            .build()
+            .unwrap();
+        self
+    }
     pub(super) fn from_env(id: &str) -> Option<Self> {
         Self::from_lookup(id, |key| env::var(key).ok())
     }

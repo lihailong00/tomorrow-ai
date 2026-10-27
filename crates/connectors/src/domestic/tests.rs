@@ -5,7 +5,7 @@ use axum::{
 };
 use tower::ServiceExt;
 
-async fn fixture() -> (IntegrationState, String, String, String, String) {
+pub(super) async fn fixture() -> (IntegrationState, String, String, String, String) {
     let repo = Repository::connect("sqlite::memory:").await.unwrap();
     let a = repo
         .create_user(
@@ -33,7 +33,7 @@ async fn fixture() -> (IntegrationState, String, String, String, String) {
             .unwrap();
     (state, a.id, b.id, ta, tb)
 }
-async fn request(
+pub(super) async fn request(
     state: &IntegrationState,
     method: &str,
     path: &str,
@@ -288,7 +288,7 @@ async fn saved_token(state: &IntegrationState, user: &str) -> i64 {
         )
         .await
         .unwrap();
-    generation
+    state.account(user, "yuque").await.unwrap().unwrap().0
 }
 
 #[tokio::test]
@@ -406,7 +406,7 @@ async fn disconnect_and_reconnect_suppress_in_flight_sensitive_results() {
         if reconnect {
             let generation = state.reserve(&a, "yuque").await.unwrap();
             let (_, encrypted) = state.account(&a, "yuque").await.unwrap().unwrap();
-            assert!(encrypted.is_empty());
+            assert!(!encrypted.is_empty());
             state
                 .save(
                     &a,

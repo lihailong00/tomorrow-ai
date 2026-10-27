@@ -482,40 +482,49 @@ impl Repository {
         id: &str,
         input: UpdateSchedule,
     ) -> Result<Schedule, DomainError> {
-        let old = self.schedule(user_id, id).await?;
-        let title = validate_text(
-            input.title.as_deref().unwrap_or(&old.title),
-            "计划名称",
-            120,
-        )?;
-        let instruction = validate_text(
-            input.instruction.as_deref().unwrap_or(&old.instruction),
-            "计划内容",
-            20000,
-        )?;
-        let previous_frequency = old.frequency.clone();
-        let frequency = input.frequency.unwrap_or(old.frequency);
-        let time = input.time.unwrap_or(old.time);
-        let timezone = input.timezone.unwrap_or_else(|| old.timezone.clone());
-        let next = if frequency == "weekly" && previous_frequency == "weekly" {
-            let anchor = chrono::DateTime::parse_from_rfc3339(&old.next_run_at)
-                .map_err(|_| DomainError::Internal("计划时间无效".into()))?
-                .timestamp();
-            // The stored occurrence anchors a weekday in its original timezone.
-            // Reinterpreting its instant in the new timezone can shift that weekday.
-            let old_zone: chrono_tz::Tz = old.timezone.parse()
-                .map_err(|_| DomainError::Validation("无效的 IANA 时区".into()))?;
-            use chrono::Datelike;
-            let weekday = chrono::DateTime::from_timestamp(anchor, 0)
-                .ok_or_else(|| DomainError::Validation("无效的计划日期".into()))?
-                .with_timezone(&old_zone).weekday();
-            next_weekday_execution(&time, &timezone, weekday, now())?
-        } else {
-            next_execution(&frequency, &time, &timezone, now(), false)?
-        };
-        sqlx::query("UPDATE schedules SET title=$1,prompt=$2,frequency=$3,time_of_day=$4,timezone=$5,enabled=$6,next_run_at=$7,updated_at=$8 WHERE user_id=$9 AND id=$10")
-            .bind(title).bind(instruction).bind(frequency).bind(time).bind(timezone).bind(if input.enabled.unwrap_or(old.enabled){1_i64}else{0}).bind(next).bind(now()).bind(user_id).bind(id).execute(&self.pool).await?;
-        self.schedule(user_id, id).await
+        let title = input.title.as_deref()
+            .map(|value| validate_text(value, "计划名称", 120)).transpose()?;
+        let instruction = input.instruction.as_deref()
+            .map(|value| validate_text(value, "计划内容", 20000)).transpose()?;
+        loop {
+            let row = sqlx::query("SELECT * FROM schedules WHERE user_id=$1 AND id=$2")
+                .bind(user_id).bind(id).fetch_optional(&self.pool).await?
+                .ok_or(DomainError::NotFound)?;
+            let old = schedule_from(&row)?;
+            let enabled: i64 = row.get("enabled");
+            let due: i64 = row.get("next_run_at");
+            let frequency = input.frequency.as_deref().unwrap_or(&old.frequency);
+            let time = input.time.as_deref().unwrap_or(&old.time);
+            let timezone = input.timezone.as_deref().unwrap_or(&old.timezone);
+            let timing_changed = frequency != old.frequency || time != old.time || timezone != old.timezone;
+            // Metadata edits and repeated enable requests must retain an already-due
+            // occurrence. Only a new timing specification or a resume reschedules it.
+            let next = if !timing_changed && !(input.enabled == Some(true) && !old.enabled) {
+                due
+            } else if frequency == "weekly" && old.frequency == "weekly" {
+                // Keep the weekday in the original timezone when changing zones.
+                use chrono::Datelike;
+                let old_zone: chrono_tz::Tz = old.timezone.parse()
+                    .map_err(|_| DomainError::Validation("无效的 IANA 时区".into()))?;
+                let weekday = chrono::DateTime::from_timestamp(due, 0)
+                    .ok_or_else(|| DomainError::Validation("无效的计划日期".into()))?
+                    .with_timezone(&old_zone).weekday();
+                next_weekday_execution(time, timezone, weekday, now())?
+            } else {
+                next_execution(frequency, time, timezone, now(), false)?
+            };
+            // Write only supplied fields. Retry if another editor or the scheduler
+            // changed the timing state used above; never restore a stale pause or run.
+            let updated = sqlx::query("UPDATE schedules SET title=COALESCE($1,title),prompt=COALESCE($2,prompt),frequency=COALESCE($3,frequency),time_of_day=COALESCE($4,time_of_day),timezone=COALESCE($5,timezone),enabled=COALESCE($6,enabled),next_run_at=$7,updated_at=$8 WHERE user_id=$9 AND id=$10 AND frequency=$11 AND time_of_day=$12 AND timezone=$13 AND enabled=$14 AND next_run_at=$15 RETURNING *")
+                .bind(title.as_deref()).bind(instruction.as_deref())
+                .bind(input.frequency.as_deref()).bind(input.time.as_deref()).bind(input.timezone.as_deref())
+                .bind(input.enabled.map(i64::from)).bind(next).bind(now()).bind(user_id).bind(id)
+                .bind(&old.frequency).bind(&old.time).bind(&old.timezone).bind(enabled).bind(due)
+                .fetch_optional(&self.pool).await?;
+            if let Some(row) = updated {
+                return schedule_from(&row);
+            }
+        }
     }
     pub async fn delete_schedule(&self, user_id: &str, id: &str) -> Result<(), DomainError> {
         let rows = sqlx::query("DELETE FROM schedules WHERE user_id=$1 AND id=$2")
@@ -550,12 +559,15 @@ impl Repository {
                 )?
             };
             let mut transaction = self.pool.begin().await?;
-            let changed=sqlx::query("UPDATE schedules SET next_run_at=$1,last_run_at=$2,enabled=$3,updated_at=$2 WHERE id=$4 AND user_id=$5 AND enabled=1 AND next_run_at=$6 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=schedules.user_id AND c.disabled<>0)")
-                .bind(next).bind(time).bind(if schedule.frequency=="once"{0_i64}else{1}).bind(&schedule.id).bind(&user_id).bind(due).execute(&mut *transaction).await?.rows_affected();
-            if changed == 0 {
+            let claimed=sqlx::query("UPDATE schedules SET next_run_at=$1,last_run_at=$2,enabled=$3,updated_at=$2 WHERE id=$4 AND user_id=$5 AND enabled=1 AND next_run_at=$6 AND frequency=$7 AND time_of_day=$8 AND timezone=$9 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=schedules.user_id AND c.disabled<>0) RETURNING *")
+                .bind(next).bind(time).bind(if schedule.frequency=="once"{0_i64}else{1}).bind(&schedule.id).bind(&user_id).bind(due)
+                .bind(&schedule.frequency).bind(&schedule.time).bind(&schedule.timezone)
+                .fetch_optional(&mut *transaction).await?;
+            let Some(row) = claimed else {
                 transaction.rollback().await?;
                 continue;
-            }
+            };
+            let schedule = schedule_from(&row)?;
             let key = format!("schedule:{}:{due}", schedule.id);
             sqlx::query("INSERT INTO tasks(id,user_id,title,prompt,kind,status,created_at,updated_at,schedule_id,idempotency_key)VALUES($1,$2,$3,$4,'briefing','queued',$5,$5,$6,$7)ON CONFLICT(idempotency_key)DO NOTHING")
                 .bind(new_id()).bind(user_id).bind(schedule.title).bind(schedule.instruction).bind(time).bind(schedule.id).bind(key).execute(&mut *transaction).await?;
