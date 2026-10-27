@@ -340,7 +340,7 @@ export function ChatScreen({
             <ErrorNotice message={fileAction.error} />
             {attachment && !attachment.upload && (
               <Text style={[s.small, { fontSize: 10, marginBottom: 6 }]}>
-                附件最多 20 MB。录音会自动转成文字。
+                附件最多 25 MB。录音会自动转成文字。
               </Text>
             )}
             {recording && (

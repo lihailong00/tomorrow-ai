@@ -749,6 +749,14 @@ export function CapabilitiesScreen() {
       contentContainerStyle={v.pageContent}
     >
       <PageHeader title="能力" subtitle="连接你的工具，让帮助更具体。" />
+      <Pressable accessibilityRole="button" accessibilityLabel="导入 AI 对话"
+        onPress={() => navigate({ name: 'aiHistory' })} style={v.assistantCard}>
+        <View style={v.flex}>
+          <Text style={v.assistantTitle}>带上过去的 AI 对话</Text>
+          <Text style={v.assistantDescription}>ChatGPT、Claude、DeepSeek · 导入、搜索与整理记忆候选</Text>
+          <View style={v.assistantLink}><Text style={v.primaryText}>导入 AI 对话</Text><Icon name="arrowRight" size={15} color={accent} /></View>
+        </View>
+      </Pressable>
       <Pressable accessibilityRole="button" accessibilityLabel="连接手机应用"
         onPress={() => navigate({ name: 'integrations' })} style={v.assistantCard}>
         <View style={v.flex}>

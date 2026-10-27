@@ -59,7 +59,7 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
                 if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) size = cursor.getLong(sizeIndex)
               }
             }
-            require(size <= MAX_FILE_BYTES) { "首版附件最大 20 MB" }
+            require(size <= MAX_FILE_BYTES) { "所选文件最大 25 MB" }
             val file = File(attachmentDir, UUID.randomUUID().toString())
             try {
               context.contentResolver.openInputStream(uri)?.use { input ->
@@ -70,7 +70,7 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
                     val count = input.read(buffer)
                     if (count < 0) break
                     total += count
-                    require(total <= MAX_FILE_BYTES) { "首版附件最大 20 MB" }
+                    require(total <= MAX_FILE_BYTES) { "所选文件最大 25 MB" }
                     output.write(buffer, 0, count)
                   }
                 }
@@ -236,6 +236,6 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
     private const val PICK_DOCUMENT = 1401
     private const val PERMISSION_REQUEST = 1402
     private const val CHANNEL_ID = "tomorrow_tasks"
-    private const val MAX_FILE_BYTES = 20L * 1024L * 1024L
+    private const val MAX_FILE_BYTES = 25L * 1024L * 1024L
   }
 }

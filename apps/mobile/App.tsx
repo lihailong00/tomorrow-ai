@@ -33,6 +33,7 @@ import {
 import { ChatScreen, ConversationsScreen } from './src/screens/Chat';
 import { UploadsScreen } from './src/screens/Uploads';
 import { IntegrationsScreen } from './src/features/integrations/IntegrationsScreen';
+import { AiHistoryScreen } from './src/features/ai-history/AiHistoryScreen';
 import { appInputs } from './src/platform/appInputs';
 import { photoIndex } from './src/platform/photoIndex';
 import {
@@ -337,6 +338,9 @@ function Application() {
         break;
       case 'integrations':
         page = <IntegrationsScreen />;
+        break;
+      case 'aiHistory':
+        page = <AiHistoryScreen key={session.user.id + preferences.serverUrl} />;
         break;
       case 'conversations':
         page = <ConversationsScreen />;

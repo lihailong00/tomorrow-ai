@@ -23,6 +23,7 @@ export type Route =
   | { name: 'artifacts' }
   | { name: 'uploads' }
   | { name: 'integrations' }
+  | { name: 'aiHistory' }
   | { name: 'conversations' };
 export interface AppContextValue {
   api: ApiClient;

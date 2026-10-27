@@ -29,6 +29,8 @@ import kotlin.math.max
 class PhotoIndexModule(private val context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
   private var requesting = false
   override fun getName() = "TomorrowPhotoIndex"
+  // UiThreadUtil returns Boolean; async React methods must expose JVM void.
+  private fun onUi(action: () -> Unit) { UiThreadUtil.runOnUiThread { action() } }
 
   @ReactMethod fun status(server: String, user: String, promise: Promise) = inBackground(promise) {
     val store = PhotoIndexStore(context)
@@ -48,11 +50,11 @@ class PhotoIndexModule(private val context: ReactApplicationContext) : ReactCont
   }
 
   // Called only by the explicit settings action; status/boot never requests permissions.
-  @ReactMethod fun requestAccess(promise: Promise) = UiThreadUtil.runOnUiThread {
-    if (PhotoIndexStore.hasAccess(context)) { promise.resolve(true); return@runOnUiThread }
+  @ReactMethod fun requestAccess(promise: Promise) = onUi {
+    if (PhotoIndexStore.hasAccess(context)) { promise.resolve(true); return@onUi }
     val activity = context.currentActivity as? PermissionAwareActivity
-    if (activity == null) { promise.reject("E_ACTIVITY", "请在应用前台开启相册索引"); return@runOnUiThread }
-    if (requesting) { promise.reject("E_BUSY", "请先完成相册权限选择"); return@runOnUiThread }
+    if (activity == null) { promise.reject("E_ACTIVITY", "请在应用前台开启相册索引"); return@onUi }
+    if (requesting) { promise.reject("E_BUSY", "请先完成相册权限选择"); return@onUi }
     requesting = true
     val permissions = when {
       Build.VERSION.SDK_INT >= 34 -> arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
@@ -67,7 +69,7 @@ class PhotoIndexModule(private val context: ReactApplicationContext) : ReactCont
     })
   }
 
-  @ReactMethod fun manageAccess(promise: Promise) = UiThreadUtil.runOnUiThread {
+  @ReactMethod fun manageAccess(promise: Promise) = onUi {
     try {
       context.startActivity(android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
         android.net.Uri.parse("package:"+context.packageName)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
