@@ -446,11 +446,32 @@ async fn discard(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, Error> {
     let user = state.user(&headers).await?;
+    let mut tx = state.pool.begin().await?;
+    // Use the same owner lock as commit so a cancel cannot erase a receipt
+    // written by another device between reading and deleting the preview.
+    sqlx::query("UPDATE ai_history_owners SET generation=generation+1 WHERE user_id=$1")
+        .bind(&user)
+        .execute(&mut *tx)
+        .await?;
+    let result: Option<String> = sqlx::query_scalar(
+        "SELECT result FROM ai_history_previews WHERE id=$1 AND user_id=$2 AND expires_at>$3",
+    )
+    .bind(&id)
+    .bind(&user)
+    .bind(now())
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(result) = result.filter(|result| !result.is_empty()) {
+        let result = serde_json::from_str::<Value>(&result).map_err(|_| Error::internal())?;
+        tx.commit().await?;
+        return Ok(Json(json!({"ok":true,"completed":true,"result":result})));
+    }
     sqlx::query("DELETE FROM ai_history_previews WHERE id=$1 AND user_id=$2")
         .bind(id)
         .bind(user)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(Json(json!({"ok":true})))
 }
 

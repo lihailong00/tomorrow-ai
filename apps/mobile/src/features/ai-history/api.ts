@@ -75,6 +75,17 @@ export type CommitResult = {
   skipped: number;
   provider: Provider;
 };
+export type CompletedPreview = { completed: true; result: CommitResult };
+export type PreviewResponse = Preview | CompletedPreview;
+export type PreviewDetailResponse = HistoryDetail | CompletedPreview;
+export function isCompletedPreview(value: unknown): value is CompletedPreview {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'completed' in value &&
+    value.completed === true
+  );
+}
 
 export function aiHistoryApi(api: ApiClient, signal?: AbortSignal) {
   const request = <T>(path: string, method = 'GET', body?: unknown) =>
@@ -97,11 +108,11 @@ export function aiHistoryApi(api: ApiClient, signal?: AbortSignal) {
     },
     previews: () => request<{ items: Preview[] }>('/previews'),
     preview: (id: string, offset = 0) =>
-      request<Preview>(
+      request<PreviewResponse>(
         '/previews/' + encodeURIComponent(id) + '?offset=' + offset,
       ),
     previewDetail: (id: string, key: string, offset = 0) =>
-      request<HistoryDetail>(
+      request<PreviewDetailResponse>(
         '/previews/' +
           encodeURIComponent(id) +
           '?conversation_key=' +
@@ -110,7 +121,10 @@ export function aiHistoryApi(api: ApiClient, signal?: AbortSignal) {
           offset,
       ),
     discard: (id: string) =>
-      request('/previews/' + encodeURIComponent(id), 'DELETE'),
+      request<{ ok: true } | CompletedPreview>(
+        '/previews/' + encodeURIComponent(id),
+        'DELETE',
+      ),
     commit: (
       id: string,
       selection: { all: true; exclude_keys: string[] } | { keys: string[] },

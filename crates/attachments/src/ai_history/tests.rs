@@ -444,6 +444,178 @@ async fn excluding_every_conversation_rejects_without_consuming_the_preview() {
 }
 
 #[tokio::test]
+async fn completed_preview_reads_and_cancel_preserve_the_original_receipt() {
+    let (state, user, owner, other) = fixture().await;
+    let preview = upload(&state, &owner, "chatgpt", gpt()).await;
+    let path = format!(
+        "/v1/ai-history/previews/{}",
+        preview["id"].as_str().unwrap()
+    );
+    let commit_path = format!("{path}/commit");
+    let (status, receipt) = request(
+        &state,
+        &owner,
+        "POST",
+        &commit_path,
+        Some(json!({"all":true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(receipt["imported"], 1);
+    for query in [
+        String::new(),
+        "?offset=50".into(),
+        format!(
+            "?conversation_key={}&offset=20",
+            preview["items"][0]["key"].as_str().unwrap()
+        ),
+    ] {
+        let (status, response) =
+            request(&state, &owner, "GET", &(path.clone() + &query), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response, json!({"completed":true,"result":receipt}));
+    }
+    assert_eq!(
+        request(&state, &other, "DELETE", &path, None).await.1,
+        json!({"ok":true})
+    );
+    let (status, canceled) = request(&state, &owner, "DELETE", &path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        canceled,
+        json!({"ok":true,"completed":true,"result":receipt})
+    );
+    assert_eq!(
+        request(&state, &owner, "GET", &path, None).await.1,
+        json!({"completed":true,"result":receipt})
+    );
+    assert_eq!(
+        request(
+            &state,
+            &owner,
+            "POST",
+            &commit_path,
+            Some(json!({"keys":["different-selection"]}))
+        )
+        .await
+        .1,
+        receipt
+    );
+    assert_eq!(
+        state
+            .search_ai_history(&user, "", None, 0, 20)
+            .await
+            .unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(state.repo.memories(&user).await.unwrap().is_empty());
+    sqlx::query("UPDATE ai_history_previews SET expires_at=$1 WHERE id=$2")
+        .bind(now() - 1)
+        .bind(preview["id"].as_str().unwrap())
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&state, &owner, "DELETE", &path, None).await.1,
+        json!({"ok":true})
+    );
+    assert_eq!(
+        request(&state, &owner, "GET", &path, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    cleanup(state).await;
+}
+
+#[tokio::test]
+async fn cancel_before_commit_remains_idempotent_and_never_imports() {
+    let (state, user, owner, _) = fixture().await;
+    let preview = upload(&state, &owner, "chatgpt", gpt()).await;
+    let path = format!(
+        "/v1/ai-history/previews/{}",
+        preview["id"].as_str().unwrap()
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            request(&state, &owner, "DELETE", &path, None).await.1,
+            json!({"ok":true})
+        );
+    }
+    assert_eq!(
+        request(
+            &state,
+            &owner,
+            "POST",
+            &(path + "/commit"),
+            Some(json!({"all":true}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert!(
+        state
+            .search_ai_history(&user, "", None, 0, 20)
+            .await
+            .unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    cleanup(state).await;
+}
+
+#[tokio::test]
+async fn concurrent_commit_and_cancel_leave_either_a_receipt_or_an_empty_import() {
+    let (state, user, owner, _) = fixture().await;
+    for _ in 0..4 {
+        let preview = upload(&state, &owner, "chatgpt", gpt()).await;
+        let path = format!(
+            "/v1/ai-history/previews/{}",
+            preview["id"].as_str().unwrap()
+        );
+        let commit_path = format!("{path}/commit");
+        let ((commit_status, receipt), (cancel_status, canceled)) = tokio::join!(
+            request(
+                &state,
+                &owner,
+                "POST",
+                &commit_path,
+                Some(json!({"all":true}))
+            ),
+            request(&state, &owner, "DELETE", &path, None),
+        );
+        assert_eq!(cancel_status, StatusCode::OK, "{canceled}");
+        if commit_status == StatusCode::OK {
+            assert_eq!(
+                canceled,
+                json!({"ok":true,"completed":true,"result":receipt})
+            );
+            assert_eq!(
+                request(&state, &owner, "GET", &path, None).await.1,
+                json!({"completed":true,"result":receipt})
+            );
+        } else {
+            assert_eq!(commit_status, StatusCode::NOT_FOUND, "{receipt}");
+            assert_eq!(canceled, json!({"ok":true}));
+        }
+    }
+    assert!(
+        state
+            .search_ai_history(&user, "", None, 0, 20)
+            .await
+            .unwrap()["items"]
+            .as_array()
+            .unwrap()
+            .len()
+            <= 1
+    );
+    cleanup(state).await;
+}
+
+#[tokio::test]
 #[ignore = "requires the isolated local tada_qa_e05 PostgreSQL database"]
 async fn postgres_empty_selection_preserves_the_preview() {
     let database = std::env::var("E05_ATTACHMENTS_TEST_DATABASE_URL")

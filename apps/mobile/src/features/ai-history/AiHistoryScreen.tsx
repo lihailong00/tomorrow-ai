@@ -14,7 +14,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { errorMessage } from '../../api/client';
+import { ApiError, errorMessage } from '../../api/client';
 import { useAction, useApp } from '../../app/context';
 import { LocalFile, platform } from '../../platform/ports';
 import {
@@ -28,8 +28,11 @@ import {
 import { colors, styles as s } from '../../ui/theme';
 import {
   aiHistoryApi,
+  CommitResult,
+  CompletedPreview,
   HistoryDetail,
   HistoryItem,
+  isCompletedPreview,
   Preview,
   PreviewItem,
   Provider,
@@ -37,26 +40,52 @@ import {
 } from './api';
 
 export function AiHistoryScreen() {
-  const { api, user, navigate, invalidate } = useApp();
+  const { api, user, preferences, navigate, invalidate } = useApp();
+  const invalidateRef = useRef(invalidate);
+  invalidateRef.current = invalidate;
   const scope = useMemo(
     () => ({
       active: true,
       controller: new AbortController(),
-      owner: api.baseUrl + ':' + user?.id,
+      owner:
+        api.baseUrl +
+        ':' +
+        user?.id +
+        ':' +
+        preferences?.serverUrl +
+        ':' +
+        preferences?.instance?.id,
     }),
-    [api, user?.id],
+    [api, user?.id, preferences?.serverUrl, preferences?.instance?.id],
+  );
+  const currentScope = useRef(scope);
+  currentScope.current = scope;
+  const isCurrent = useCallback(
+    () => scope.active && currentScope.current === scope,
+    [scope],
   );
   const client = useMemo(
     () => aiHistoryApi(api, scope.controller.signal),
     [api, scope],
   );
   const action = useAction();
+  const setActionError = action.setError;
   const [provider, setProvider] = useState<Provider>('chatgpt');
   const [file, setFile] = useState<LocalFile | null>(null);
   const [consent, setConsent] = useState(false);
-  const [preview, setPreview] = useState<Preview | null>(null);
+  const [preview, updatePreview] = useState<Preview | null>(null);
+  const previewRef = useRef<Preview | null>(null);
+  const setPreview = useCallback((value: Preview | null) => {
+    previewRef.current = value;
+    updatePreview(value);
+  }, []);
   const [all, setAll] = useState(true);
   const [chosen, setChosen] = useState<Set<string>>(new Set());
+  const commitIntent = useRef<{
+    id: string;
+    selection: { all: true; exclude_keys: string[] } | { keys: string[] };
+  } | null>(null);
+  const [commitUncertain, setCommitUncertain] = useState(false);
   const [detail, setDetail] = useState<HistoryDetail | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [previewKey, setPreviewKey] = useState<string | null>(null);
@@ -66,54 +95,154 @@ export function AiHistoryScreen() {
   const [more, setMore] = useState(false);
   const [notice, setNotice] = useState('');
   const [loadError, setLoadError] = useState('');
+  const listVersion = useRef(0);
 
   const refresh = useCallback(async () => {
+    const version = ++listVersion.current;
     try {
       const result = await client.list(submittedQuery.current);
-      if (!scope.active) {
+      if (!isCurrent() || listVersion.current !== version) {
         return;
       }
       setItems(result.items);
       setMore(result.has_more);
       setLoadError('');
     } catch (error) {
-      if (scope.active) {
+      if (isCurrent() && listVersion.current === version) {
         setLoadError(errorMessage(error));
       }
     }
-  }, [client, scope]);
+  }, [client, isCurrent]);
+  const clearPreview = useCallback(() => {
+    setPreview(null);
+    setDetail(null);
+    setDetailId(null);
+    setPreviewKey(null);
+    setFile(null);
+    setConsent(false);
+    setAll(true);
+    setChosen(new Set());
+    commitIntent.current = null;
+    setCommitUncertain(false);
+  }, [setPreview]);
+  const completed = useCallback(
+    async (id: string, result: CommitResult) => {
+      if (!isCurrent() || previewRef.current?.id !== id) {
+        return;
+      }
+      clearPreview();
+      setActionError(null);
+      setQuery('');
+      submittedQuery.current = '';
+      setNotice(
+        `导入完成：新增 ${result.imported} 段，更新 ${result.updated} 段，跳过 ${result.skipped} 段相同记录。尚未写入长期记忆。`,
+      );
+      invalidateRef.current();
+      await refresh();
+    },
+    [setActionError, clearPreview, isCurrent, refresh],
+  );
+  const recoverExpired = useCallback(
+    async (error: unknown, id: string) => {
+      if (!isCurrent() || previewRef.current?.id !== id) {
+        return true;
+      }
+      if (
+        error instanceof ApiError &&
+        (error.status === 404 ||
+          (error.status === 400 && /过期|找不到/.test(error.message)))
+      ) {
+        clearPreview();
+        setNotice(
+          '这份预览已过期或已被处理。请查看已导入的对话；如需继续导入，请重新选择文件。',
+        );
+        await refresh();
+        return true;
+      }
+      return false;
+    },
+    [clearPreview, isCurrent, refresh],
+  );
+  const readPreview = useCallback(
+    async <T extends Preview | HistoryDetail>(
+      id: string,
+      read: () => Promise<T | CompletedPreview>,
+    ): Promise<T | null> => {
+      try {
+        const result = await read();
+        if (!isCurrent() || previewRef.current?.id !== id) {
+          return null;
+        }
+        if (isCompletedPreview(result)) {
+          await completed(id, result.result);
+          return null;
+        }
+        return result;
+      } catch (error) {
+        if (await recoverExpired(error, id)) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    [completed, isCurrent, recoverExpired],
+  );
   useEffect(() => {
     scope.active = true;
-    setPreview(null);
-    setFile(null);
-    setDetail(null);
+    clearPreview();
     setItems([]);
-    setConsent(false);
+    setMore(false);
     setNotice('');
+    setLoadError('');
     submittedQuery.current = '';
     setQuery('');
     refresh();
     client
       .previews()
       .then(result => {
-        if (scope.active && result.items[0]) {
+        if (isCurrent() && result.items[0] && !previewRef.current) {
           setPreview(result.items[0]);
           setAll(true);
           setChosen(new Set());
         }
       })
       .catch(() => {});
-    const off = platform.onForeground(() => {
-      refresh();
+    const off = platform.onForeground(async () => {
+      const current = previewRef.current;
+      if (current) {
+        try {
+          if (
+            !(await readPreview(current.id, () => client.preview(current.id)))
+          ) {
+            return;
+          }
+        } catch (error) {
+          if (isCurrent()) {
+            setLoadError(errorMessage(error));
+          }
+        }
+      }
+      await refresh();
     });
     return () => {
       scope.active = false;
       scope.controller.abort();
       off();
     };
-  }, [client, refresh, scope]);
+  }, [
+    clearPreview,
+    client,
+    isCurrent,
+    readPreview,
+    refresh,
+    scope,
+    setPreview,
+  ]);
 
-  const select = (key: string) =>
+  const select = (key: string) => {
+    if (commitIntent.current) {
+      return;
+    }
     setChosen(old => {
       const next = new Set(old);
       if (next.has(key)) {
@@ -123,6 +252,7 @@ export function AiHistoryScreen() {
       }
       return next;
     });
+  };
   const selectedCount = preview
     ? all
       ? preview.conversation_count - chosen.size
@@ -131,7 +261,7 @@ export function AiHistoryScreen() {
   const viewSaved = (item: HistoryItem) =>
     action.run(async () => {
       const result = await client.detail(item.id);
-      if (scope.active) {
+      if (isCurrent()) {
         setDetail(result);
         setDetailId(item.id);
         setPreviewKey(null);
@@ -142,8 +272,10 @@ export function AiHistoryScreen() {
       if (!preview) {
         return;
       }
-      const result = await client.previewDetail(preview.id, item.key);
-      if (scope.active) {
+      const result = await readPreview(preview.id, () =>
+        client.previewDetail(preview.id, item.key),
+      );
+      if (isCurrent() && result && previewRef.current?.id === preview.id) {
         setDetail(result);
         setPreviewKey(item.key);
         setDetailId(null);
@@ -154,23 +286,55 @@ export function AiHistoryScreen() {
       if (!preview || selectedCount < 1) {
         return;
       }
-      const result = await client.commit(
-        preview.id,
-        all ? { all: true, exclude_keys: [...chosen] } : { keys: [...chosen] },
-      );
-      if (!scope.active) {
-        return;
+      const previous = commitIntent.current;
+      if (previous?.id === preview.id) {
+        // A disconnected request may still be running. Retry only its original
+        // selection after checking whether its receipt is already available.
+        if (
+          !(await readPreview(preview.id, () => client.preview(preview.id)))
+        ) {
+          return;
+        }
       }
-      setPreview(null);
-      setFile(null);
-      setConsent(false);
-      setQuery('');
-      submittedQuery.current = '';
-      setNotice(
-        `导入完成：新增 ${result.imported} 段，更新 ${result.updated} 段，跳过 ${result.skipped} 段相同记录。尚未写入长期记忆。`,
-      );
-      invalidate();
-      await refresh();
+      const intent =
+        previous?.id === preview.id
+          ? previous
+          : {
+              id: preview.id,
+              selection: all
+                ? { all: true as const, exclude_keys: [...chosen] }
+                : { keys: [...chosen] },
+            };
+      commitIntent.current = intent;
+      try {
+        const result = await client.commit(preview.id, intent.selection);
+        await completed(preview.id, result);
+      } catch (error) {
+        if (await recoverExpired(error, preview.id)) {
+          return;
+        }
+        if (
+          error instanceof ApiError &&
+          error.status >= 400 &&
+          error.status < 500 &&
+          !previous
+        ) {
+          commitIntent.current = null;
+          setCommitUncertain(false);
+        } else {
+          setCommitUncertain(true);
+        }
+        // A response can be lost after the server commits. Read its receipt once;
+        // never repeat the import automatically.
+        try {
+          if (
+            !(await readPreview(preview.id, () => client.preview(preview.id)))
+          ) {
+            return;
+          }
+        } catch {}
+        throw error;
+      }
     });
 
   if (detail) {
@@ -247,13 +411,15 @@ export function AiHistoryScreen() {
                     const result = detailId
                       ? await client.detail(detailId, offset)
                       : preview && previewKey
-                      ? await client.previewDetail(
-                          preview.id,
-                          previewKey,
-                          offset,
+                      ? await readPreview(preview.id, () =>
+                          client.previewDetail(preview.id, previewKey, offset),
                         )
                       : null;
-                    if (scope.active && result) {
+                    if (
+                      isCurrent() &&
+                      result &&
+                      (detailId || previewRef.current?.id === preview?.id)
+                    ) {
                       setDetail({
                         ...result,
                         messages: [...detail.messages, ...result.messages],
@@ -318,7 +484,7 @@ export function AiHistoryScreen() {
                   onPress={() =>
                     action.run(async () => {
                       const result = await platform.pickDocument();
-                      if (scope.active && result) {
+                      if (isCurrent() && result) {
                         setFile(result);
                       }
                     })
@@ -347,7 +513,7 @@ export function AiHistoryScreen() {
                         return;
                       }
                       const result = await client.upload(provider, file);
-                      if (scope.active) {
+                      if (isCurrent()) {
                         setPreview(result);
                         setAll(true);
                         setChosen(new Set());
@@ -397,8 +563,9 @@ export function AiHistoryScreen() {
                 onPress={() =>
                   action.run(async () => {
                     submittedQuery.current = query;
+                    const version = ++listVersion.current;
                     const result = await client.list(query);
-                    if (scope.active) {
+                    if (isCurrent() && listVersion.current === version) {
                       setItems(result.items);
                       setMore(result.has_more);
                       setLoadError('');
@@ -430,7 +597,9 @@ export function AiHistoryScreen() {
                 <View style={v.providers}>
                   <Button
                     variant="secondary"
+                    disabled={action.busy || commitUncertain}
                     onPress={() => {
+                      if (commitIntent.current) return;
                       setAll(true);
                       setChosen(new Set());
                     }}
@@ -439,7 +608,9 @@ export function AiHistoryScreen() {
                   </Button>
                   <Button
                     variant="ghost"
+                    disabled={action.busy || commitUncertain}
                     onPress={() => {
+                      if (commitIntent.current) return;
                       setAll(false);
                       setChosen(new Set());
                     }}
@@ -447,6 +618,11 @@ export function AiHistoryScreen() {
                     取消全选
                   </Button>
                 </View>
+                {commitUncertain && (
+                  <Notice>
+                    上次确认的导入结果尚未核实，导入范围已保留。重试会核对结果或提交同一范围；如需更改，请先取消这份预览。
+                  </Notice>
+                )}
                 <Button
                   disabled={selectedCount < 1}
                   loading={action.busy}
@@ -459,10 +635,30 @@ export function AiHistoryScreen() {
                   disabled={action.busy}
                   onPress={() =>
                     action.run(async () => {
-                      await client.discard(preview.id);
-                      if (scope.active) {
-                        setPreview(null);
-                        setNotice('已取消并删除预览。');
+                      try {
+                        // Older servers also expose completion through GET.
+                        if (
+                          !(await readPreview(preview.id, () =>
+                            client.preview(preview.id),
+                          ))
+                        ) {
+                          return;
+                        }
+                        const result = await client.discard(preview.id);
+                        if (isCompletedPreview(result)) {
+                          await completed(preview.id, result.result);
+                        } else if (
+                          isCurrent() &&
+                          previewRef.current?.id === preview.id
+                        ) {
+                          clearPreview();
+                          setNotice('已取消并删除预览。');
+                          await refresh();
+                        }
+                      } catch (error) {
+                        if (!(await recoverExpired(error, preview.id))) {
+                          throw error;
+                        }
                       }
                     })
                   }
@@ -480,6 +676,7 @@ export function AiHistoryScreen() {
             <Pressable
               accessibilityRole="checkbox"
               accessibilityLabel={'导入 ' + item.title}
+              disabled={action.busy || commitUncertain}
               accessibilityState={{
                 checked: all ? !chosen.has(item.key) : chosen.has(item.key),
               }}
@@ -537,7 +734,7 @@ export function AiHistoryScreen() {
                       onPress: () =>
                         action.run(async () => {
                           await client.remove(item.id);
-                          if (scope.active) {
+                          if (isCurrent()) {
                             setItems(old => old.filter(c => c.id !== item.id));
                             invalidate();
                           }
@@ -569,23 +766,27 @@ export function AiHistoryScreen() {
               onPress={() =>
                 action.run(async () => {
                   if (preview) {
-                    const result = await client.preview(
-                      preview.id,
-                      preview.items.length,
+                    const result = await readPreview(preview.id, () =>
+                      client.preview(preview.id, preview.items.length),
                     );
-                    if (scope.active) {
+                    if (
+                      isCurrent() &&
+                      result &&
+                      previewRef.current?.id === preview.id
+                    ) {
                       setPreview({
                         ...result,
                         items: [...preview.items, ...result.items],
                       });
                     }
                   } else {
+                    const version = ++listVersion.current;
                     const result = await client.list(
                       submittedQuery.current,
                       '',
                       items.length,
                     );
-                    if (scope.active) {
+                    if (isCurrent() && listVersion.current === version) {
                       setItems([...items, ...result.items]);
                       setMore(result.has_more);
                     }

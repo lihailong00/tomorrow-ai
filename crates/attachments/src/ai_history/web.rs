@@ -29,6 +29,9 @@ function controls(){
  $('upload').disabled=working||!pendingReady||Boolean(batch)||pending.length>=2;
 }
 function clearPreview(){batch=null;offset=0;$('preview').hidden=true;$('items').replaceChildren();$('summary').textContent='';$('warnings').textContent=''}
+function completionMessage(result){return `导入完成：新增 ${result.imported} 段，更新 ${result.updated} 段，跳过 ${result.skipped} 段相同记录。可在手机查看。`}
+function showCompleted(id,result){if(batch===id)clearPreview();$('file').value='';notice(completionMessage(result))}
+function expired(error){return error.status===404||(error.status===400&&/过期|找不到/.test(error.message))}
 function resetAuth(){
  token='';pending=[];pendingReady=false;clearPreview();
  $('login').hidden=false;$('import').hidden=true;$('pending').hidden=true;
@@ -77,27 +80,44 @@ async function loadPending(autoResume=false){
   const data=await request('/ai-history/previews');
   if(!Array.isArray(data.items))throw Error('服务未返回有效的待确认列表，请重试');
   pending=data.items;pendingReady=true;
-  if(batch&&!pending.some(item=>item.id===batch))clearPreview();
+  let reconciled=false;
+  if(batch&&!pending.some(item=>item.id===batch)){
+   const id=batch;
+   try{
+    const current=await request('/ai-history/previews/'+encodeURIComponent(id));
+    if(current.completed){showCompleted(id,current.result);reconciled=true}
+   }catch(e){if(!expired(e))throw e;clearPreview();notice('这份预览已过期或已被处理。请到手机查看已导入对话；如需继续，请重新选择文件。');reconciled=true}
+  }
   renderPending();
   if(autoResume&&pending.length)await resume(pending[0].id);
+  return reconciled;
  }catch(e){if(e.status!==401)$('pendingStatus').textContent='暂时无法读取待确认导入，请点击刷新重试。';throw e}
  finally{controls()}
 }
 async function resume(id){
+ const data=await readPreview(id);
+ if(!data)return;
+ batch=data.id;$('provider').value=data.provider;guide();render(data);renderPending();notice('已恢复待确认导入，请检查后确认。');
+}
+async function readPreview(id,pageOffset=0){
  try{
-  const data=await request('/ai-history/previews/'+encodeURIComponent(id));
-  if(data.completed){clearPreview();await loadPending();notice('这份导入已完成，列表已更新。');return}
-  batch=data.id;$('provider').value=data.provider;guide();render(data);renderPending();notice('已恢复待确认导入，请检查后确认。');
+  const data=await request('/ai-history/previews/'+encodeURIComponent(id)+'?offset='+pageOffset);
+  if(data.completed){showCompleted(id,data.result);await refreshAfterAction(completionMessage(data.result));return null}
+  return data;
  }catch(e){
-  if(e.status!==404)throw e;
-  if(batch===id)clearPreview();await loadPending();notice('这份预览已过期或已被处理，列表已更新。');
+  if(!expired(e))throw e;
+  if(batch===id)clearPreview();await refreshAfterAction('这份预览已过期或已被处理。请到手机查看已导入对话；如需继续，请重新选择文件。');return null;
  }
 }
 async function refreshAfterAction(message){
- try{await loadPending();notice(message)}catch(e){if(e.status===401)throw e;notice(message+' 待确认列表暂时无法更新，请点击刷新重试。')}
+ try{if(!await loadPending())notice(message)}catch(e){if(e.status===401)throw e;notice(message+' 待确认列表暂时无法更新，请点击刷新重试。')}
 }
 async function discard(id){
- await request('/ai-history/previews/'+encodeURIComponent(id),'DELETE');
+ if(!await readPreview(id))return;
+ let data;
+ try{data=await request('/ai-history/previews/'+encodeURIComponent(id),'DELETE')}
+ catch(e){if(!expired(e))throw e;if(batch===id)clearPreview();await refreshAfterAction('这份预览已过期或已被处理，列表已更新。');return}
+ if(data.completed){showCompleted(id,data.result);await refreshAfterAction(completionMessage(data.result));return}
  if(batch===id)clearPreview();
  await refreshAfterAction('已取消并删除预览。');
 }
@@ -150,11 +170,18 @@ $('upload').onclick=()=>run(async()=>{
  }
  batch=data.id;render(data);await refreshAfterAction('已解析，请检查预览后确认。');
 });
-$('more').onclick=()=>run(async()=>render(await request('/ai-history/previews/'+encodeURIComponent(batch)+'?offset='+offset),true));
+$('more').onclick=()=>run(async()=>{const data=await readPreview(batch,offset);if(data)render(data,true)});
 $('cancel').onclick=()=>run(()=>discard(batch));
 $('commit').onclick=()=>run(async()=>{
- notice('正在导入…');const data=await request('/ai-history/previews/'+encodeURIComponent(batch)+'/commit','POST',{all:true});
- clearPreview();$('file').value='';await refreshAfterAction(`导入完成：新增 ${data.imported} 段，更新 ${data.updated} 段，跳过 ${data.skipped} 段相同记录。可在手机查看。`);
+ const id=batch;notice('正在导入…');let data;
+ try{data=await request('/ai-history/previews/'+encodeURIComponent(id)+'/commit','POST',{all:true})}
+ catch(e){
+  if(e.status===401)throw e;
+  // Recover a receipt once if the response was lost; never repeat the POST.
+  try{if(!await readPreview(id))return}catch(recovery){if(recovery.status===401)throw recovery}
+  throw e;
+ }
+ showCompleted(id,data);await refreshAfterAction(completionMessage(data));
 });
 })();
 </script></html>"##;
