@@ -20,16 +20,27 @@ def initialize(data, secret_dir):
         raise SystemExit("数据目录不能是符号链接")
     os.chmod(secret_dir, 0o755)
     password_file = secret_dir / "postgres-password"
-    if not password_file.exists():
-        if (data / "runtime.env").exists():
-            raise SystemExit("数据库密钥卷缺失，请恢复原有私有卷")
-        private_write(password_file, secrets.token_hex(32) + "\n", 0o444)
+    runtime = data / "runtime.env"
     if password_file.is_symlink():
         raise SystemExit("数据库密钥文件无效")
+    if runtime.is_symlink():
+        raise SystemExit("实例配置文件无效")
+    # A retained password or any instance data means this is recovery, not a
+    # first install. Replacing runtime.env would silently strand ciphertext
+    # encrypted with the original CONNECTOR_ENCRYPTION_KEY.
+    if not runtime.exists() and (password_file.exists() or any(data.iterdir())):
+        raise SystemExit(
+            "实例运行配置 /data/runtime.env 缺失，但检测到已有实例数据或数据库密钥。"
+            "请保持服务停止，并从原私有卷或加密备份的 recovery/*.env 恢复原始 runtime.env；"
+            "不能为已有数据生成替代密钥。"
+        )
+    if not password_file.exists():
+        if runtime.exists():
+            raise SystemExit("数据库密钥卷缺失，请恢复原有私有卷")
+        private_write(password_file, secrets.token_hex(32) + "\n", 0o444)
     password = password_file.read_text().strip()
     if len(password) != 64 or any(c not in "0123456789abcdef" for c in password):
         raise SystemExit("数据库密钥文件无效")
-    runtime = data / "runtime.env"
     if not runtime.exists():
         private_write(runtime, "\n".join([
             f"DATABASE_URL=postgresql://tomorrow:{password}@postgres:5432/tomorrow",
@@ -37,8 +48,6 @@ def initialize(data, secret_dir):
             f"CONNECTOR_ENCRYPTION_KEY={secrets.token_hex(32)}",
             "",
         ]))
-    if runtime.is_symlink():
-        raise SystemExit("实例配置文件无效")
     values = {}
     for line in runtime.read_text().splitlines():
         name, separator, value = line.partition("=")

@@ -31,6 +31,9 @@ use tokio_util::io::ReaderStream;
 
 const MAX_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_FILES: usize = 20_000;
+// Successful archives are retained until explicitly deleted by the owner.
+// Failed attempts have no downloadable data and keep only a small history.
+const MAX_FAILED_JOBS: usize = 20;
 const CHUNK: usize = 1024 * 1024;
 const KDF_ROUNDS: u32 = 600_000;
 const MAGIC: &[u8; 8] = b"TADABAK2";
@@ -143,7 +146,7 @@ fn archive_path(dir: &FsPath, id: &str) -> PathBuf {
     dir.join(format!("{id}.tadabak"))
 }
 fn clean_interrupted(dir: &FsPath) -> std::io::Result<()> {
-    for entry in fs::read_dir(dir)?.take(100) {
+    for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
         if let Some(id) = name
@@ -198,7 +201,74 @@ fn read_job(dir: &FsPath, id: &str) -> Result<BackupJob, Failure> {
     if file.metadata().map_err(|_| internal())?.len() > 4096 {
         return Err(internal());
     }
-    serde_json::from_reader(file).map_err(|_| internal())
+    let job: BackupJob = serde_json::from_reader(file).map_err(|_| internal())?;
+    if job.id != id {
+        return Err(internal());
+    }
+    Ok(job)
+}
+fn newest_first(a: &BackupJob, b: &BackupJob) -> std::cmp::Ordering {
+    b.created_at
+        .cmp(&a.created_at)
+        .then_with(|| b.id.cmp(&a.id))
+}
+fn mark_interrupted(job: &mut BackupJob, active: bool) {
+    if matches!(job.status.as_str(), "queued" | "running") && !active {
+        job.status = "failed".into();
+        job.error = Some("备份被服务重启中断，请重新创建".into());
+    }
+}
+struct JobListing {
+    items: Vec<BackupJob>,
+    pruned_failed_jobs: usize,
+}
+fn list_jobs(dir: &FsPath, active: bool) -> std::io::Result<JobListing> {
+    let mut items = Vec::new();
+    let mut failed = Vec::with_capacity(MAX_FAILED_JOBS + 1);
+    let mut pruned_failed_jobs = 0;
+    // Inspect the whole directory: read_dir order is unspecified, and archive,
+    // temporary, or failed-job files must never hide retained successful jobs.
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let Ok(mut job) = read_job(dir, id) else {
+            continue;
+        };
+        mark_interrupted(&mut job, active);
+        let archive_absent = match fs::symlink_metadata(archive_path(dir, id)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error),
+            Ok(_) => false,
+        };
+        if job.status == "failed" && archive_absent {
+            failed.push(job);
+            failed.sort_by(newest_first);
+            if failed.len() > MAX_FAILED_JOBS {
+                let expired = failed.pop().expect("failed history exceeds limit");
+                // Only validated terminal metadata without an archive is removed.
+                // Ready/active jobs, archives, unknown files and symlinks survive.
+                match fs::remove_file(job_path(dir, &expired.id)) {
+                    Ok(()) => pruned_failed_jobs += 1,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        } else {
+            items.push(job);
+        }
+    }
+    items.extend(failed);
+    items.sort_by(newest_first);
+    Ok(JobListing {
+        items,
+        pruned_failed_jobs,
+    })
 }
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -213,25 +283,9 @@ async fn list(
     owner(&_session)?;
     let dir = directory(&state);
     private_dir(&dir).map_err(|_| internal())?;
-    let mut items = Vec::new();
-    for entry in fs::read_dir(&dir).map_err(|_| internal())?.take(100) {
-        let entry = entry.map_err(|_| internal())?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if let Some(id) = name.strip_suffix(".json") {
-            if let Ok(mut job) = read_job(&dir, id) {
-                if matches!(job.status.as_str(), "queued" | "running")
-                    && !ACTIVE.load(Ordering::Acquire)
-                {
-                    job.status = "failed".into();
-                    job.error = Some("备份被服务重启中断，请重新创建".into());
-                }
-                items.push(job);
-            }
-        }
-    }
-    items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let listing = list_jobs(&dir, ACTIVE.load(Ordering::Acquire)).map_err(|_| internal())?;
     Ok(Json(
-        json!({"items":items,"supported":support().is_ok(),"reason":support().err(),"max_bytes":MAX_BYTES}),
+        json!({"items":listing.items,"supported":support().is_ok(),"reason":support().err(),"max_bytes":MAX_BYTES,"retention":{"failed_history_limit":MAX_FAILED_JOBS,"pruned_failed_jobs":listing.pruned_failed_jobs}}),
     ))
 }
 async fn status(
@@ -240,7 +294,9 @@ async fn status(
     Path(id): Path<String>,
 ) -> Result<Json<BackupJob>, Failure> {
     owner(&_session)?;
-    Ok(Json(read_job(&directory(&state), &id)?))
+    let mut job = read_job(&directory(&state), &id)?;
+    mark_interrupted(&mut job, ACTIVE.load(Ordering::Acquire));
+    Ok(Json(job))
 }
 async fn create(
     State(state): State<AdminState>,
@@ -308,6 +364,10 @@ async fn create(
             }
         }
         let _ = save_job(&dir, &job);
+        // Bound failure history even when the owner does not reopen the list.
+        // Keep the active guard until retention completes so queued/running
+        // metadata is never mistaken for an interrupted attempt here.
+        let _ = list_jobs(&dir, true);
     });
     Ok((StatusCode::ACCEPTED, Json(job)))
 }
@@ -739,6 +799,147 @@ fn encrypt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn example_job(index: u128, status: &str) -> BackupJob {
+        BackupJob {
+            id: uuid::Uuid::from_u128(index + 1).to_string(),
+            status: status.into(),
+            created_at: chrono::DateTime::from_timestamp(1_793_059_200 + index as i64, 0)
+                .unwrap()
+                .to_rfc3339(),
+            bytes: 0,
+            error: None,
+        }
+    }
+    #[test]
+    fn failed_history_cannot_hide_ready_backups_and_is_bounded_deterministically() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dir = temporary.path();
+        let ready: Vec<_> = (0..5).map(|index| example_job(index, "ready")).collect();
+        for job in &ready {
+            save_job(dir, job).unwrap();
+            fs::write(archive_path(dir, &job.id), b"encrypted backup").unwrap();
+        }
+        // Unrelated directory entries also used to consume the 100-entry limit.
+        for index in 0..110 {
+            fs::write(
+                dir.join(format!("unrelated-{index}.tmp")),
+                b"leave untouched",
+            )
+            .unwrap();
+        }
+        for index in (100..205).rev() {
+            save_job(dir, &example_job(index, "failed")).unwrap();
+        }
+        let listing = list_jobs(dir, false).unwrap();
+        assert_eq!(listing.items.len(), 5 + MAX_FAILED_JOBS);
+        assert_eq!(listing.pruned_failed_jobs, 105 - MAX_FAILED_JOBS);
+        for job in &ready {
+            assert!(listing.items.iter().any(|item| item.id == job.id));
+            assert_eq!(
+                fs::read(archive_path(dir, &job.id)).unwrap(),
+                b"encrypted backup"
+            );
+        }
+        let failed_ids: Vec<_> = listing
+            .items
+            .iter()
+            .filter(|job| job.status == "failed")
+            .map(|job| job.id.clone())
+            .collect();
+        let expected: Vec<_> = (185..205)
+            .rev()
+            .map(|index| example_job(index, "failed").id)
+            .collect();
+        assert_eq!(failed_ids, expected);
+        assert!(dir.join("unrelated-109.tmp").exists());
+        let again = list_jobs(dir, false).unwrap();
+        assert_eq!(again.pruned_failed_jobs, 0);
+        assert_eq!(
+            again.items.iter().map(|job| &job.id).collect::<Vec<_>>(),
+            listing.items.iter().map(|job| &job.id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fs::read_dir(dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+                .count(),
+            25
+        );
+    }
+    #[test]
+    fn retention_preserves_archives_active_jobs_and_unknown_files() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dir = temporary.path();
+        for index in 100..130 {
+            save_job(dir, &example_job(index, "failed")).unwrap();
+        }
+        let protected = [
+            example_job(0, "failed"),
+            example_job(1, "queued"),
+            example_job(2, "running"),
+            example_job(3, "ready"),
+        ];
+        for job in &protected {
+            save_job(dir, job).unwrap();
+        }
+        fs::write(archive_path(dir, &protected[0].id), b"retained archive").unwrap();
+        let malformed = job_path(dir, &example_job(4, "failed").id);
+        fs::write(&malformed, b"not a backup job").unwrap();
+        let mismatched = job_path(dir, &example_job(5, "failed").id);
+        fs::write(
+            &mismatched,
+            serde_json::to_vec(&example_job(6, "failed")).unwrap(),
+        )
+        .unwrap();
+        fs::write(dir.join("unknown.json"), b"{}").unwrap();
+        let listing = list_jobs(dir, true).unwrap();
+        assert_eq!(listing.pruned_failed_jobs, 10);
+        for job in protected {
+            let kept = listing.items.iter().find(|item| item.id == job.id).unwrap();
+            assert_eq!(kept.status, job.status);
+            assert!(job_path(dir, &job.id).exists());
+        }
+        assert!(malformed.exists());
+        assert!(mismatched.exists());
+        assert!(dir.join("unknown.json").exists());
+    }
+    #[test]
+    fn interrupted_jobs_report_failure_and_ties_have_a_stable_order() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dir = temporary.path();
+        let mut running = example_job(10, "running");
+        let mut queued = example_job(20, "queued");
+        queued.created_at = running.created_at.clone();
+        save_job(dir, &queued).unwrap();
+        save_job(dir, &running).unwrap();
+        let listing = list_jobs(dir, false).unwrap();
+        assert_eq!(
+            listing.items.iter().map(|job| &job.id).collect::<Vec<_>>(),
+            vec![&queued.id, &running.id]
+        );
+        assert!(listing.items.iter().all(|job| job.status == "failed"
+            && job.error.as_deref() == Some("备份被服务重启中断，请重新创建")));
+        mark_interrupted(&mut running, false);
+        assert_eq!(running.status, "failed");
+    }
+    #[test]
+    fn cleanup_reaches_interrupted_work_after_many_unrelated_entries() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dir = temporary.path();
+        for index in 0..110 {
+            fs::write(dir.join(format!("unrelated-{index}.tmp")), b"keep").unwrap();
+        }
+        let work = dir.join(format!(".{}.work", example_job(1, "running").id));
+        fs::create_dir(&work).unwrap();
+        fs::write(work.join("partial.dump"), b"partial").unwrap();
+        let unknown = dir.join(".unknown.work");
+        fs::create_dir(&unknown).unwrap();
+        clean_interrupted(dir).unwrap();
+        assert!(!work.exists());
+        assert!(unknown.exists());
+        assert!(dir.join("unrelated-109.tmp").exists());
+    }
     #[test]
     fn pbkdf2_matches_standard_vector() {
         assert_eq!(
