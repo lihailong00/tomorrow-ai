@@ -6,6 +6,11 @@ use axum::{
 use std::io::Write;
 use tower::ServiceExt;
 
+// Each fixture owns its database, but the production parser admission limit is
+// process-wide. Keep unrelated tests from consuming each other's two permits;
+// requests deliberately raced inside an individual test remain concurrent.
+static IMPORT_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn gpt() -> Value {
     json!([{"id":"gpt-1","title":"出行计划","create_time":1760000000,"current_node":"answer-new","mapping":{
         "root":{"parent":null,"message":null},
@@ -194,6 +199,7 @@ async fn fixture_at(database: &str) -> (AttachmentsState, String, String, String
 #[tokio::test]
 #[ignore = "requires an isolated local tada_ai_history_test PostgreSQL database"]
 async fn postgres_bulk_import_dedup_and_concurrent_confirmation() {
+    let _serial = IMPORT_TESTS.lock().await;
     let database =
         std::env::var("TADA_AI_IMPORT_TEST_DATABASE_URL").expect("explicit test database required");
     assert!(
@@ -314,6 +320,7 @@ async fn cleanup(state: AttachmentsState) {
 
 #[tokio::test]
 async fn preview_requires_confirmation_is_owner_scoped_and_commit_is_idempotent() {
+    let _serial = IMPORT_TESTS.lock().await;
     let (state, user, a, b) = fixture().await;
     let p = upload(&state, &a, "chatgpt", gpt()).await;
     let id = p["id"].as_str().unwrap();
@@ -440,11 +447,13 @@ async fn preview_requires_confirmation_is_owner_scoped_and_commit_is_idempotent(
 
 #[tokio::test]
 async fn excluding_every_conversation_rejects_without_consuming_the_preview() {
+    let _serial = IMPORT_TESTS.lock().await;
     empty_selection_checks("sqlite::memory:").await;
 }
 
 #[tokio::test]
 async fn completed_preview_reads_and_cancel_preserve_the_original_receipt() {
+    let _serial = IMPORT_TESTS.lock().await;
     let (state, user, owner, other) = fixture().await;
     let preview = upload(&state, &owner, "chatgpt", gpt()).await;
     let path = format!(
@@ -531,6 +540,7 @@ async fn completed_preview_reads_and_cancel_preserve_the_original_receipt() {
 
 #[tokio::test]
 async fn cancel_before_commit_remains_idempotent_and_never_imports() {
+    let _serial = IMPORT_TESTS.lock().await;
     let (state, user, owner, _) = fixture().await;
     let preview = upload(&state, &owner, "chatgpt", gpt()).await;
     let path = format!(
@@ -569,6 +579,7 @@ async fn cancel_before_commit_remains_idempotent_and_never_imports() {
 
 #[tokio::test]
 async fn concurrent_commit_and_cancel_leave_either_a_receipt_or_an_empty_import() {
+    let _serial = IMPORT_TESTS.lock().await;
     let (state, user, owner, _) = fixture().await;
     for _ in 0..4 {
         let preview = upload(&state, &owner, "chatgpt", gpt()).await;
@@ -618,6 +629,7 @@ async fn concurrent_commit_and_cancel_leave_either_a_receipt_or_an_empty_import(
 #[tokio::test]
 #[ignore = "requires the isolated local tada_qa_e05 PostgreSQL database"]
 async fn postgres_empty_selection_preserves_the_preview() {
+    let _serial = IMPORT_TESTS.lock().await;
     let database = std::env::var("E05_ATTACHMENTS_TEST_DATABASE_URL")
         .expect("explicit isolated test database required");
     let url = reqwest::Url::parse(&database).unwrap();
@@ -651,6 +663,7 @@ async fn empty_selection_checks(database: &str) {
 
 #[tokio::test]
 async fn selected_conversations_and_updates_preserve_stable_ids_and_preview_cleanup() {
+    let _serial = IMPORT_TESTS.lock().await;
     let (state, user, a, _) = fixture().await;
     let mut data = claude();
     let mut second = data[0].clone();
