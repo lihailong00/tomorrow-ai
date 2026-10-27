@@ -30,6 +30,8 @@ import {
 } from './src/screens/Main';
 import { ChatScreen, ConversationsScreen } from './src/screens/Chat';
 import { UploadsScreen } from './src/screens/Uploads';
+import { IntegrationsScreen } from './src/features/integrations/IntegrationsScreen';
+import { appInputs } from './src/platform/appInputs';
 import {
   ArtifactsScreen,
   MemoryEditor,
@@ -55,7 +57,27 @@ function Application() {
   const [tab, setTab] = useState<MainTab>('today');
   const [routes, setRoutes] = useState<Route[]>([{ name: 'main' }]);
   const [revision, setRevision] = useState(0);
+  const [pendingInputs, setPendingInputs] = useState(0);
+  const inputCleanup = useRef<Promise<void>>(Promise.resolve());
   const route = routes[routes.length - 1];
+  const clearInputs = useCallback(() => {
+    const next = inputCleanup.current.catch(() => {}).then(() => appInputs.clear());
+    inputCleanup.current = next;
+    void next.catch(() => {});
+    return next;
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const update = () => {
+      if (!session) { setPendingInputs(0); return; }
+      void appInputs.getStatus().then(status => {
+        if (active) { setPendingInputs(status.pending_count); }
+      }).catch(() => {});
+    };
+    update();
+    const unsubscribe = platform.onForeground(update);
+    return () => { active = false; unsubscribe(); };
+  }, [session?.user.id, route.name, revision]);
 
   useEffect(() => {
     let alive = true;
@@ -77,6 +99,7 @@ function Application() {
       if (!alive) {
         return;
       }
+      let restored = false;
       if (stored) {
         try {
           const saved = JSON.parse(stored) as AuthSession & {
@@ -90,11 +113,15 @@ function Application() {
             // Restore locally first: an offline phone must still reach connection settings.
             activeToken.current = saved.token;
             setSession({ token: saved.token, user: saved.user });
+            restored = true;
           }
         } catch {
           await platform.removeSession();
         }
       }
+      // With no authenticated owner, an old native inbox must not be inherited
+      // by the next account after a failed cleanup or a process restart.
+      if (!restored) { await clearInputs(); }
     })()
       .catch(() => {})
       .finally(() => {
@@ -105,15 +132,16 @@ function Application() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [clearInputs]);
 
   const unauthorized = useCallback(() => {
+    void clearInputs();
     activeToken.current = undefined;
     setSession(null);
     setExpired(true);
     setRoutes([{ name: 'main' }]);
     platform.removeSession().catch(() => {});
-  }, []);
+  }, [clearInputs]);
   const api = useMemo(() => {
     const token = session?.token;
     return new ApiClient(preferences.serverUrl, token, () => {
@@ -149,6 +177,7 @@ function Application() {
   const savePreferences = async (next: Preferences) => {
     await platform.savePreferences(next);
     if (next.serverUrl !== preferences.serverUrl) {
+      await clearInputs();
       activeToken.current = undefined;
       await platform.removeSession();
       setSession(null);
@@ -157,6 +186,9 @@ function Application() {
     setPreferences(next);
   };
   const signIn = async (next: AuthSession) => {
+    // An expired account's local notification queue must be cleared before the
+    // next account can use a new session, including a previously failed cleanup.
+    await inputCleanup.current.catch(() => clearInputs());
     activeToken.current = next.token;
     try {
       await platform.writeSession(
@@ -173,6 +205,7 @@ function Application() {
     setRoutes([{ name: 'main' }]);
   };
   const signOut = async () => {
+    await clearInputs();
     try {
       await api.logout();
       setAuthNotice('已退出当前账号。');
@@ -238,6 +271,9 @@ function Application() {
         break;
       case 'uploads':
         page = <UploadsScreen />;
+        break;
+      case 'integrations':
+        page = <IntegrationsScreen />;
         break;
       case 'conversations':
         page = <ConversationsScreen />;
@@ -340,6 +376,13 @@ function Application() {
               />
             )}
           </View>
+          {session && pendingInputs > 0 && route.name !== 'integrations' && (
+            <Pressable accessibilityRole="button" accessibilityLabel="查看待接收的手机资料"
+              onPress={() => navigate({ name: 'integrations' })}
+              style={{ marginHorizontal: 20, marginBottom: 8, paddingHorizontal: 16, paddingVertical: 11, borderRadius: 18, backgroundColor: '#EAF1FF' }}>
+              <Text style={{ color: colors.accent }}>有 {pendingInputs} 条手机资料待接收 · 查看并确认</Text>
+            </Pressable>
+          )}
           <KeyboardAvoidingView
             style={s.fill}
             behavior={platform.keyboardBehavior}

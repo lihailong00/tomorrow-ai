@@ -27,7 +27,10 @@ axum.workspace = true
 base64 = "0.22"
 chrono.workspace = true
 futures-util.workspace = true
+quick-xml = "0.42"
 reqwest.workspace = true
+regex = "1"
+sha2 = "0.10"
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
@@ -35,6 +38,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+zip = { version = "9.1", default-features = false, features = ["deflate"] }
 tomorrow-domain = { path = "../domain" }
 
 [dev-dependencies]

@@ -19,6 +19,9 @@ function fileDescription(item: Upload) {
   if (item.mime_type.startsWith('audio/')) {
     return '音频资料 · 需成功转写后才能用于对话';
   }
+  if (/\.(docx|xlsx)$/i.test(item.name)) {
+    return '文档资料 · 可读取 DOCX 正文/表格或 XLSX 单元格文字；不执行公式';
+  }
   return '已保存原始文件 · 首版暂不解析此格式';
 }
 

@@ -2,6 +2,7 @@
 mod config;
 mod crypto;
 mod reads;
+pub mod domestic;
 
 use std::sync::Arc;
 
@@ -32,6 +33,14 @@ pub struct ConnectorError {
 }
 
 impl ConnectorError {
+    pub fn into_domain(self) -> tomorrow_domain::DomainError {
+        match self.status {
+            StatusCode::UNAUTHORIZED => tomorrow_domain::DomainError::Unauthorized,
+            StatusCode::NOT_FOUND => tomorrow_domain::DomainError::NotFound,
+            StatusCode::BAD_REQUEST | StatusCode::CONFLICT => tomorrow_domain::DomainError::Validation(self.message.into()),
+            _ => tomorrow_domain::DomainError::External(self.message.into()),
+        }
+    }
     fn new(status: StatusCode, code: &'static str, message: &'static str) -> Self {
         Self {
             status,

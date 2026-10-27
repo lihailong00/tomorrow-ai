@@ -116,6 +116,27 @@ async fn tool(
 ) -> Result<Json<Value>> {
     let token = credentials(&state, &headers)?;
     let (user_id, _scope) = state.repository.agent_authority(&id, &token).await?;
+    if matches!(input.name.as_str(), "list_integrations" | "search_imports" | "read_integration") {
+        let integrations = state.integrations.as_ref()
+            .ok_or_else(|| DomainError::Validation("手机资料接入服务尚未配置".into()))?;
+        let result = match input.name.as_str() {
+            "list_integrations" => json!({"items":integrations.statuses(&user_id).await.map_err(tomorrow_connectors::ConnectorError::into_domain)?}),
+            "search_imports" => integrations.imports(&user_id,tomorrow_connectors::domestic::ImportQuery {
+                q:input.arguments.get("query").and_then(Value::as_str).map(str::to_owned),
+                source_app:input.arguments.get("source_app").and_then(Value::as_str).map(str::to_owned),
+            }).await.map_err(tomorrow_connectors::ConnectorError::into_domain)?,
+            _ => {
+                let provider = input.arguments.get("provider").and_then(Value::as_str)
+                    .ok_or_else(|| DomainError::Validation("缺少应用编号".into()))?;
+                let query = input.arguments.get("query").filter(|value|value.is_object()).cloned()
+                    .ok_or_else(|| DomainError::Validation("缺少读取参数".into()))?;
+                integrations.read(&user_id,provider,query).await.map_err(tomorrow_connectors::ConnectorError::into_domain)?
+            }
+        };
+        // Cancellation/expiry while a provider request ran must suppress the response.
+        state.repository.agent_authority(&id,&token).await?;
+        return Ok(Json(result));
+    }
     if tomorrow_domain::agent::is_mutating_tool(&input.name) && input.operation_index.is_none() {
         return Err(DomainError::Validation("写入工具必须提供本次执行的操作编号".into()).into());
     }

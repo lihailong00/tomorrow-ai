@@ -749,6 +749,14 @@ export function CapabilitiesScreen() {
       contentContainerStyle={v.pageContent}
     >
       <PageHeader title="能力" subtitle="连接你的工具，让帮助更具体。" />
+      <Pressable accessibilityRole="button" accessibilityLabel="连接手机应用"
+        onPress={() => navigate({ name: 'integrations' })} style={v.assistantCard}>
+        <View style={v.flex}>
+          <Text style={v.assistantTitle}>连接手机应用</Text>
+          <Text style={v.assistantDescription}>微信、QQ、办公与生活应用 · 选择通知或分享资料给妥啦</Text>
+          <View style={v.assistantLink}><Text style={v.primaryText}>管理手机资料</Text><Icon name="arrowRight" size={15} color={accent} /></View>
+        </View>
+      </Pressable>
       <ErrorNotice message={data.error} retry={data.refresh} />
       {data.loading && !data.value && <Loading />}
       {data.value && (

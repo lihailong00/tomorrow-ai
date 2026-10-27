@@ -3,6 +3,30 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+
+    <!-- Fixed integration targets only; no broad installed-app visibility. -->
+    <queries>
+      <package android:name="com.tencent.mm" />
+      <package android:name="com.tencent.mobileqq" />
+      <package android:name="com.xingin.xhs" />
+      <package android:name="tv.danmaku.bili" />
+      <package android:name="com.ss.android.ugc.aweme" />
+      <package android:name="com.zhihu.android" />
+      <package android:name="com.taobao.taobao" />
+      <package android:name="com.jingdong.app.mall" />
+      <package android:name="com.sankuai.meituan" />
+      <package android:name="com.eg.android.AlipayGphone" />
+      <package android:name="com.sdu.didi.psnger" />
+      <package android:name="com.ss.android.lark" />
+      <package android:name="com.alibaba.android.rimet" />
+      <package android:name="com.tencent.wework" />
+      <package android:name="cn.wps.moffice_eng" />
+      <package android:name="com.tencent.docs" />
+      <package android:name="com.autonavi.minimap" />
+    </queries>
 
     <application
       android:name=".MainApplication"
@@ -13,6 +37,29 @@
       android:theme="@style/AppTheme"
       android:usesCleartextTraffic="${usesCleartextTraffic}"
       android:supportsRtl="true">
+      <service
+        android:name=".AppNotificationListener"
+        android:label="妥啦 · 已选择应用的通知"
+        android:exported="true"
+        android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+        <intent-filter>
+          <action android:name="android.service.notification.NotificationListenerService" />
+        </intent-filter>
+      </service>
+      <activity
+        android:name=".AppShareActivity"
+        android:label="交给妥啦"
+        android:exported="true"
+        android:excludeFromRecents="true"
+        android:configChanges="orientation|screenSize|keyboardHidden"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <intent-filter>
+          <action android:name="android.intent.action.SEND" />
+          <action android:name="android.intent.action.SEND_MULTIPLE" />
+          <category android:name="android.intent.category.DEFAULT" />
+          <data android:mimeType="*/*" />
+        </intent-filter>
+      </activity>
       <activity
         android:name=".MainActivity"
         android:label="@string/app_name"

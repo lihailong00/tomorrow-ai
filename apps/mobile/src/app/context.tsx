@@ -22,6 +22,7 @@ export type Route =
   | { name: 'notifications' }
   | { name: 'artifacts' }
   | { name: 'uploads' }
+  | { name: 'integrations' }
   | { name: 'conversations' };
 export interface AppContextValue {
   api: ApiClient;

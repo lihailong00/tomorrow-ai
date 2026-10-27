@@ -6,6 +6,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY migrations ./migrations
 ARG BUILD_API_ONLY=0
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \

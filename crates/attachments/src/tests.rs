@@ -821,3 +821,186 @@ async fn asr_admission_rejects_duplicate_running_jobs_and_retains_failed_attempt
     );
     remove_fixture(state).await;
 }
+
+#[tokio::test]
+async fn photo_index_is_opt_in_scoped_idempotent_and_revocable() {
+    let (state, _, token, other) = fixture(DEFAULT_MAX_BYTES, None).await;
+    let device = uuid::Uuid::new_v4().to_string();
+    let asset = uuid::Uuid::new_v4().to_string();
+    let path = format!("/v1/photo-index/devices/{device}");
+    let asset_path = format!("{path}/assets/{asset}");
+    let call = |method: &str, url: &str, bearer: &str, body: serde_json::Value| {
+        Request::builder()
+            .method(method)
+            .uri(url)
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let body = serde_json::json!({"epoch":1,"revision":"v1","metadata":{"taken_at":null,"modified_at":100,"width":800,"height":600,"size":10000,"mime_type":"image/jpeg"},"results":[{"kind":"ocr","processor":"local-test-v1","content":"云南旅行攻略 100%"},{"kind":"description","processor":"local-summary-v1","content":"一张旅行攻略截图"}]});
+    let response = router(state.clone())
+        .oneshot(call("GET", &path, &token, serde_json::Value::Null))
+        .await
+        .unwrap();
+    let status = json_body(response).await;
+    assert_eq!(status["enabled"], false);
+    assert_eq!(status["indexed"], 0);
+    let denied = router(state.clone())
+        .oneshot(call("PUT", &asset_path, &token, body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::CONFLICT);
+    let enabled = json_body(
+        router(state.clone())
+            .oneshot(call(
+                "PUT",
+                &path,
+                &token,
+                serde_json::json!({"enabled":true}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(enabled["epoch"], 1);
+    for _ in 0..2 {
+        assert_eq!(
+            router(state.clone())
+                .oneshot(call("PUT", &asset_path, &token, body.clone()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    let result = json_body(
+        router(state.clone())
+            .oneshot(call(
+                "GET",
+                &format!("{path}/assets?q=%25"),
+                &token,
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(result["items"].as_array().unwrap().len(), 1);
+    assert_eq!(result["items"][0]["results"].as_array().unwrap().len(), 2);
+    let isolated = json_body(
+        router(state.clone())
+            .oneshot(call(
+                "GET",
+                &format!("{path}/assets"),
+                &other,
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(isolated["items"].as_array().unwrap().is_empty());
+    assert_eq!(
+        router(state.clone())
+            .oneshot(call("PUT", &asset_path, &other, body.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    // A client cannot smuggle image bytes, file paths or arbitrary metadata into this API.
+    let mut bytes = body.clone();
+    bytes["image_base64"] = serde_json::json!("data:image/jpeg;base64,secret");
+    assert_eq!(
+        router(state.clone())
+            .oneshot(call("PUT", &asset_path, &token, bytes))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let mut metadata = body.clone();
+    metadata["metadata"]["local_uri"] = serde_json::json!("content://private");
+    assert_eq!(
+        router(state.clone())
+            .oneshot(call("PUT", &asset_path, &token, metadata))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let off = json_body(
+        router(state.clone())
+            .oneshot(call(
+                "PUT",
+                &path,
+                &token,
+                serde_json::json!({"enabled":false}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(off["epoch"], 2);
+    assert_eq!(
+        router(state.clone())
+            .oneshot(call("PUT", &asset_path, &token, body.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    // Re-enabling never restores an old in-flight writer's authority.
+    let on = json_body(
+        router(state.clone())
+            .oneshot(call(
+                "PUT",
+                &path,
+                &token,
+                serde_json::json!({"enabled":true}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(on["epoch"], 3);
+    assert_eq!(
+        router(state.clone())
+            .oneshot(call("PUT", &asset_path, &token, body.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        router(state.clone())
+            .oneshot(call("DELETE", &path, &token, serde_json::Value::Null))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let cleared = json_body(
+        router(state.clone())
+            .oneshot(call("GET", &path, &token, serde_json::Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(cleared["enabled"], false);
+    assert_eq!(cleared["indexed"], 0);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM photo_index_results")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(
+        std::fs::read_dir(&state.config.root)
+            .unwrap()
+            .next()
+            .is_none(),
+        "index API must not store files"
+    );
+    remove_fixture(state).await;
+}

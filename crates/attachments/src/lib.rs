@@ -7,6 +7,8 @@ use std::{
     time::Duration,
 };
 mod asr;
+mod office;
+mod photo_index;
 
 use axum::{
     Json, Router,
@@ -60,6 +62,7 @@ pub struct AttachmentsState {
     pool: AnyPool,
     config: Arc<StorageConfig>,
     client: reqwest::Client,
+    photo_index: Arc<photo_index::Runtime>,
     #[cfg(feature = "s3")]
     s3: Option<s3::S3Storage>,
 }
@@ -226,12 +229,15 @@ impl AttachmentsState {
         // Separate locations preserve old local uploads when S3 is enabled later.
         sqlx::query("CREATE TABLE IF NOT EXISTS upload_objects (upload_id TEXT PRIMARY KEY, bucket TEXT NOT NULL, object_key TEXT NOT NULL)")
             .execute(&pool).await?;
+        sqlx::query("CREATE TABLE IF NOT EXISTS upload_text_cache (upload_id TEXT PRIMARY KEY, text TEXT NOT NULL, engine TEXT NOT NULL)")
+            .execute(&pool).await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS uploads_user_created ON uploads(user_id,created_at)",
         )
         .execute(&pool)
         .await?;
         asr::initialize(&pool).await?;
+        let photo_index = Arc::new(photo_index::initialize(&pool).await?);
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(120))
@@ -241,6 +247,7 @@ impl AttachmentsState {
         Ok(Self {
             repo,
             pool,
+            photo_index,
             config: Arc::new(StorageConfig {
                 root,
                 max_bytes,
@@ -399,7 +406,7 @@ impl AttachmentsState {
         upload_from_row(&row)
     }
 
-    /// Return only genuine UTF-8 text or a previously successful transcription.
+    /// Read genuine UTF-8, bounded DOCX/XLSX body text, or successful ASR text.
     pub async fn read_text(
         &self,
         user_id: &str,
@@ -421,12 +428,47 @@ impl AttachmentsState {
                 ));
             }
             text
+        } else if office::supported(&upload.name) {
+            let cached: Option<String> = sqlx::query_scalar("SELECT c.text FROM upload_text_cache c JOIN uploads u ON u.id=c.upload_id WHERE u.user_id=$1 AND u.id=$2 AND c.engine='ooxml_v1'")
+                .bind(user_id).bind(upload_id).fetch_optional(&self.pool).await?;
+            if let Some(text) = cached {
+                text
+            } else {
+                if upload.size < 0 || upload.size as u64 > office::MAX_INPUT_BYTES {
+                    return Err(AttachmentError::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "office_file_limit",
+                        "办公文档读取上限为 20 MiB，请拆分后上传",
+                    ));
+                }
+                let permit = office::PARSERS.try_acquire().map_err(|_| {
+                    AttachmentError::new(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "office_parser_busy",
+                        "文档读取繁忙，请稍后再试",
+                    )
+                })?;
+                let bytes = self
+                    .read_bytes(user_id, &upload.id, office::MAX_INPUT_BYTES)
+                    .await?;
+                let document = upload.clone();
+                let text = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    office::extract(&document, &bytes)
+                })
+                .await
+                .map_err(|_| AttachmentError::internal())??;
+                // The ownership predicate also avoids caching a document deleted during parsing.
+                sqlx::query("INSERT INTO upload_text_cache(upload_id,text,engine) SELECT $1,$2,'ooxml_v1' WHERE EXISTS(SELECT 1 FROM uploads WHERE id=$1 AND user_id=$3) ON CONFLICT(upload_id) DO NOTHING")
+                    .bind(upload_id).bind(&text).bind(user_id).execute(&self.pool).await?;
+                text
+            }
         } else {
             if !is_text_name(&upload.name) {
                 return Err(AttachmentError::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "unsupported_file_type",
-                    "此文件已保存，但当前仅能读取 TXT、Markdown、CSV、TSV、JSON、LOG 文本或成功转写的音频",
+                    "此文件已保存；当前可读取 TXT、Markdown、CSV、TSV、JSON、LOG、DOCX、XLSX 或已转写音频。PDF、扫描件及旧版 Office 文件请先转成文字或 DOCX/XLSX",
                 ));
             }
             if upload.size > MAX_TEXT_BYTES as i64 {
@@ -513,9 +555,11 @@ pub fn router(state: AttachmentsState) -> Router {
         .route("/v1/uploads", get(list).post(upload))
         .route("/v1/uploads/{id}", axum::routing::delete(delete_upload))
         .route("/v1/uploads/{id}/download", get(download))
+        .route("/v1/uploads/{id}/text", get(read_upload_text))
         .route("/v1/uploads/{id}/transcribe", post(transcribe))
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state.clone())
+        .merge(photo_index::router(state))
 }
 
 async fn list(
@@ -647,6 +691,8 @@ async fn delete_upload(
         }
     }
     let mut transaction = state.pool.begin().await?;
+    sqlx::query("DELETE FROM upload_text_cache WHERE upload_id=$1 AND EXISTS(SELECT 1 FROM uploads WHERE id=$1 AND user_id=$2)")
+        .bind(&id).bind(&user_id).execute(&mut *transaction).await?;
     sqlx::query("DELETE FROM upload_objects WHERE upload_id=$1 AND EXISTS(SELECT 1 FROM uploads WHERE id=$1 AND user_id=$2)")
         .bind(&id).bind(&user_id).execute(&mut *transaction).await?;
     sqlx::query("DELETE FROM uploads WHERE id=$1 AND user_id=$2")
@@ -664,6 +710,15 @@ fn s3_not_configured() -> AttachmentError {
         "storage_not_configured",
         "这个附件保存在 S3，请使用已配置 S3 的服务访问",
     )
+}
+
+async fn read_upload_text(
+    State(state): State<AttachmentsState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<AttachmentText>, AttachmentError> {
+    let user_id = state.user(&headers).await?;
+    Ok(Json(state.read_text(&user_id, &id).await?))
 }
 
 async fn download(

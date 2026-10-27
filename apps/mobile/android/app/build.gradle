@@ -95,8 +95,8 @@ android {
         applicationId "com.tomorrowai"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 4
-        versionName "0.1.3"
+        versionCode 6
+        versionName "0.1.5"
         buildConfigField "boolean", "OFFLINE_BUNDLE", offlineBundle.toString()
     }
     signingConfigs {
@@ -122,8 +122,13 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+    implementation("androidx.work:work-runtime:2.10.5")
+    // Bundled models: photo pixels remain on-device, including without Play services.
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    implementation("com.google.mlkit:image-labeling:17.0.9")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

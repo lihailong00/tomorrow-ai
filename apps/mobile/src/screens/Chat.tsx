@@ -30,7 +30,7 @@ import { ModeNotice } from './Main';
 type Attachment = { file: LocalFile; upload?: Upload; transcript?: string };
 type VoiceInput = { file: LocalFile; upload?: Upload; text?: string };
 const isTextFile = (file: LocalFile) =>
-  /\.(txt|md|csv|tsv|json|log)$/i.test(file.name);
+  /\.(txt|md|csv|tsv|json|log|docx|xlsx)$/i.test(file.name);
 const isAudioFile = (file: LocalFile) => file.mime_type.startsWith('audio/');
 
 export function ChatScreen({
@@ -490,7 +490,7 @@ export function ChatScreen({
                     <Text
                       style={[s.small, { color: colors.amber, marginTop: 6 }]}
                     >
-                      已真实保存。首版暂不能解析 PDF、Office
+                      已真实保存。暂不能解析 PDF、PPT
                       或图片，不会将其作为已读资料。
                     </Text>
                   )}

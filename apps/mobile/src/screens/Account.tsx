@@ -15,6 +15,7 @@ import { colors, styles as s } from '../ui/theme';
 import { AssistantOrb, Icon } from '../ui/visuals';
 import { normalizePhoneNumber } from '../domain/phone';
 import { validatePassword } from '../domain/password';
+import { PhotoIndexSettings } from '../features/photo-index/PhotoIndexSettings';
 
 export function IntroScreen({
   onContinue,
@@ -611,6 +612,7 @@ export function SettingsScreen() {
               </Button>
             </View>
           </Card>
+          <PhotoIndexSettings key={api.baseUrl + user.id} />
           <Section title="我的资料" />
           <Card>
             <Text style={s.cardTitle}>已上传的文件与录音</Text>
@@ -707,7 +709,7 @@ export function SettingsScreen() {
       <ErrorNotice message={action.error} />
       {notice ? <Notice>{notice}</Notice> : null}
       <Text style={[s.small, { textAlign: 'center', marginTop: 24 }]}>
-        妥啦 · 0.1.3
+        妥啦 · 0.1.5
       </Text>
     </ScrollView>
   );

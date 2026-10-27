@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tomorrow_attachments::AttachmentsState;
 use tomorrow_connectors::ConnectorState;
+use tomorrow_connectors::domestic::IntegrationState;
 use tomorrow_domain::*;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use utoipa::{OpenApi, ToSchema};
@@ -25,6 +26,7 @@ pub struct AppState {
     pub scheduler_mode: String,
     pub attachments: Option<AttachmentsState>,
     pub connectors: Option<ConnectorState>,
+    pub integrations: Option<IntegrationState>,
     pub agent: Option<AgentClient>,
     pub phone_auth: phone::PhoneAuth,
 }
@@ -42,6 +44,7 @@ impl AppState {
             scheduler_mode: std::env::var("SCHEDULER_MODE").unwrap_or_else(|_| "local".into()),
             attachments: None,
             connectors: None,
+            integrations: None,
             agent: None,
             phone_auth: phone::PhoneAuth::disabled(),
         }
@@ -74,7 +77,10 @@ pub async fn serve() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "tomorrow_api=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "tomorrow_api=info,tower_http=info".into())
+                // IMAP protocol tracing includes LOGIN credentials and mail bodies.
+                .add_directive("async_imap=off".parse().expect("static log directive"))
+                .add_directive("imap_proto=off".parse().expect("static log directive")),
         )
         .init();
     let database =
@@ -82,9 +88,11 @@ pub async fn serve() -> anyhow::Result<()> {
     let repository = Repository::connect(&database).await?;
     let attachments = AttachmentsState::new(repository.clone()).await?;
     let connectors = ConnectorState::new(repository.clone()).await?;
+    let integrations = IntegrationState::new(repository.clone()).await?;
     let mut state = AppState::new(repository, ModelProvider::from_env(), &database);
     state.attachments = Some(attachments);
     state.connectors = Some(connectors);
+    state.integrations = Some(integrations);
     state.agent = AgentClient::from_env()?;
     state.phone_auth = phone::PhoneAuth::from_env().unwrap_or_else(|error| {
         tracing::warn!(error=%error,"SMS authentication disabled because configuration is unavailable");
@@ -101,6 +109,8 @@ pub async fn serve() -> anyhow::Result<()> {
     Ok(())
 }
 pub fn app(state: AppState) -> Router {
+    let integration_router = state.integrations.clone()
+        .map(tomorrow_connectors::domestic::router).unwrap_or_else(Router::new);
     let connector_router = state
         .connectors
         .clone()
@@ -161,7 +171,7 @@ pub fn app(state: AppState) -> Router {
         .route("/artifacts/{id}/download", get(download_artifact))
         .merge(agent_api::public_router());
     Router::new().nest("/v1",api).merge(agent_api::internal_router()).fallback(||async{(StatusCode::NOT_FOUND,Json(json!({"error":{"code":"not_found","message":"接口不存在"}})))})
-        .with_state(Arc::new(state)).layer(axum::extract::DefaultBodyLimit::max(1024*1024)).merge(attachment_router).merge(connector_router).layer(CorsLayer::permissive()).layer(TraceLayer::new_for_http().make_span_with(|request:&axum::http::Request<axum::body::Body>|tracing::info_span!("http_request",method=%request.method(),path=%request.uri().path()))).layer(axum::middleware::map_response(normalize_error))
+        .with_state(Arc::new(state)).layer(axum::extract::DefaultBodyLimit::max(1024*1024)).merge(attachment_router).merge(connector_router).merge(integration_router).layer(CorsLayer::permissive()).layer(TraceLayer::new_for_http().make_span_with(|request:&axum::http::Request<axum::body::Body>|tracing::info_span!("http_request",method=%request.method(),path=%request.uri().path()))).layer(axum::middleware::map_response(normalize_error))
 }
 async fn normalize_error(response: Response) -> Response {
     if response.status().is_client_error()
@@ -797,6 +807,10 @@ async fn capabilities(State(state): State<Arc<AppState>>, auth: Auth) -> Result<
             detail: "首版尚未接入，不会读取或执行外部操作".into(),
         });
     }
+    if let Some(integrations) = &state.integrations {
+        items.extend(integrations.capabilities(&auth.user_id).await
+            .map_err(tomorrow_connectors::ConnectorError::into_domain)?);
+    }
     if let Some(connectors) = &state.connectors {
         items.extend(
             connectors
@@ -809,11 +823,11 @@ async fn capabilities(State(state): State<Arc<AppState>>, auth: Auth) -> Result<
         items.push(Capability {
             id: "attachments".into(),
             name: "文件与录音附件".into(),
-            description: "私有存储，支持文本内容与转写后音频作为对话资料".into(),
+            description: "私有存储，支持文本、DOCX、XLSX 与转写后的音频作为对话资料".into(),
             category: "core".into(),
             status: "available".into(),
             detail: format!(
-                "当前存储：{}；PDF 和图片仅存储，尚未解析",
+                "当前存储：{}；支持文本、DOCX 与 XLSX；PDF、PPT 和图片仅存储，尚未解析",
                 attachments.storage_mode()
             ),
         });
