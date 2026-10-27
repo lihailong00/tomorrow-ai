@@ -1,3 +1,50 @@
+.provider-panel { padding: 25px; }
+.provider-panel .section-head { margin-bottom: 25px; padding: 0; }
+.provider-step-title { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; color: #46516d; }
+.provider-step-title > span, .provider-field-step { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 8px; background: #eff2fc; color: #6a7ec5; font-size: 11px; font-weight: 600; }
+.provider-step-title strong { font-size: 13px; font-weight: 550; }
+.provider-step-title small { font-size: 11px; color: #9099ad; margin-left: auto; }
+.provider-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 27px; }
+.provider-choice { display: flex; align-items: center; position: relative; gap: 12px; text-align: left; border: 1px solid #e9edf5; background: #fbfcfe; border-radius: 13px; padding: 16px; color: #404d68; min-height: 78px; transition: border-color .15s, background .15s; }
+.provider-choice:hover { border-color: #becbf0; background: #f7f9ff; }
+.provider-choice.provider-selected { background: #f2f5ff; border-color: #8299e8; box-shadow: 0 0 0 1px #8299e817; }
+.provider-mark { flex: 0 0 35px; width: 35px; height: 35px; display: flex; align-items: center; justify-content: center; color: var(--provider-color); background: white; border: 1px solid #eaf0f7; border-radius: 11px; font-size: 20px; font-weight: 650; }
+.provider-mark-neutral { color: #929db3; font-size: 24px; font-weight: 350; }
+.provider-choice > span:nth-child(2) { min-width: 0; }
+.provider-choice strong { display: block; font-size: 13px; font-weight: 550; line-height: 1.5; }
+.provider-choice small { display: block; color: #929cb1; font-size: 10px; line-height: 1.5; margin-top: 3px; }
+.provider-check { position: absolute; top: 7px; right: 9px; color: #5c79d2; font-size: 12px; }
+.provider-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.provider-form-grid .setting-field > label { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 12px; font-weight: 500; color: #647493; min-height: 22px; }
+.provider-key-field .setting-title label { display: flex; align-items: center; gap: 8px; }
+.provider-key-field .setting-title { min-height: 22px; }
+.provider-field-step { margin-right: 1px; }
+.provider-other-model { margin-top: 10px; }
+.provider-key-help { display: flex; justify-content: space-between; align-items: start; gap: 15px; }
+.provider-key-help a { font-size: 10px; color: #6d86cc; margin-top: 9px; flex-shrink: 0; }
+.provider-advanced { padding-top: 17px; margin-top: 16px; border-top: 1px solid #f0f2f7; color: #9aa4b8; font-size: 11px; }
+.provider-advanced summary { cursor: pointer; width: fit-content; }
+.provider-advanced code { display: block; overflow-wrap: anywhere; color: #77839e; font-size: 11px; padding: 14px 0 0; }
+.provider-advanced > p { line-height: 1.8; margin: 12px 0; color: #929db1; }
+.provider-advanced .settings-grid { margin: 20px 0; padding: 0; }
+.provider-enable { display: flex; align-items: center; gap: 18px; padding-top: 18px; margin-top: 17px; border-top: 1px solid #f0f2f7; font-size: 12px; color: #6f7c99; flex-wrap: wrap; }
+.provider-enable select { width: 110px; height: 36px; }
+.provider-enable > span { font-size: 11px; color: #9ba4b6; }
+.provider-inherit-note { display: flex; align-items: start; gap: 10px; padding: 16px; border-radius: 12px; background: #f6f8fc; color: #7c8bab; margin-bottom: 22px; font-size: 12px; }
+.provider-inherit-note p { margin: 0; line-height: 1.8; }
+.provider-inherit-note small { display: block; color: #9ba5b7; }
+.provider-error { color: #b85e65; background: #fff5f5; padding: 12px 15px; border-radius: 10px; font-size: 12px; }
+@media (max-width: 1050px) { .provider-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) {
+  .provider-panel { padding: 20px 16px; }
+  .provider-cards { gap: 8px; }
+  .provider-choice { padding: 12px 9px; gap: 8px; min-height: 73px; }
+  .provider-mark { flex-basis: 28px; width: 28px; height: 28px; font-size: 17px; border-radius: 9px; }
+  .provider-choice strong { font-size: 12px; }
+  .provider-choice small { font-size: 9px; }
+  .provider-form-grid { grid-template-columns: 1fr; gap: 16px; }
+  .provider-step-title small { display: none; }
+}
 :root {
   font-family: Inter, "SF Pro Display", -apple-system, BlinkMacSystemFont,
     "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;

@@ -24,6 +24,8 @@ import {
   type User,
 } from "./api";
 import { Icon, Orb } from "./icons";
+import { ProviderPanel } from "./ProviderPanel";
+import { providerIssue, type Service } from "./providers";
 
 type Page = "overview" | "ai" | "connections" | "users" | "maintenance";
 const navigation: {
@@ -341,6 +343,8 @@ export function App() {
   }
   async function saveConfiguration(checkOnly = false) {
     if (!session || !config) return;
+    const issue = providerIssue(config.settings, edits);
+    if (issue) { setError(issue); return; }
     const changes = configurationChanges(config.settings, edits);
     await operation(async () => {
       const result = await mutate(
@@ -1660,15 +1664,16 @@ function SettingsPanel({
     );
   return (
     <div className="settings-panels">
-      {[...groups.entries()].map(([group, items]) => (
+      {[...groups.entries()].map(([group, items]) => ["model", "speech", "vision", "embedding"].includes(group) ? (
+        <ProviderPanel key={group} service={group as Service} settings={settings} edits={edits}
+          onEdits={(changes) => Object.entries(changes).forEach(([key, edit]) => onEdit(key, edit))} />
+      ) : (
         <section className="card" key={group}>
           <div className="section-head">
             <div>
               <h2>{niceGroup(group)}</h2>
               <p>
-                {group === "model"
-                  ? "通用模型配置优先；保持通用配置为空时使用 DeepSeek。密钥保存后不再回显。"
-                  : items.some((item) => item.secret)
+                {items.some((item) => item.secret)
                   ? "密钥加密保存在服务器，保存后不再回显。"
                   : "按需要调整，保存后对新请求生效。"}
               </p>
