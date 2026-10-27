@@ -7,7 +7,7 @@ export interface InstanceManifest {
   auth_methods: Array<'phone_password' | 'email_password'>;
   registration_policy: 'open' | 'invite_only' | 'closed';
   public_url: string;
-  dataflow: { conversation: string; voice: string; images: string; files: string };
+  dataflow: { conversation: string; voice: string; images: string; files: string; embeddings?: string };
   configuration_revision?: number;
 }
 
@@ -25,9 +25,12 @@ function dataflowDescription(value: unknown): string | undefined {
 
 export function readInstanceManifest(value: unknown): InstanceManifest {
   const item = value as InstanceManifest | null;
+  const publicUrl = item?.public_url == null ? '' : item.public_url;
   const keys = ['conversation', 'voice', 'images', 'files'] as const;
   const dataflow = item?.dataflow && typeof item.dataflow === 'object' && !Array.isArray(item.dataflow) ?
     Object.fromEntries(keys.map(key => [key, dataflowDescription(item.dataflow[key])])) : undefined;
+  const hasEmbeddings = Boolean(item?.dataflow && Object.prototype.hasOwnProperty.call(item.dataflow, 'embeddings'));
+  const embeddings = hasEmbeddings ? dataflowDescription(item?.dataflow.embeddings) : undefined;
   if (!item || typeof item !== 'object' || item.api_version !== 1 ||
       typeof item.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(item.id) ||
       typeof item.name !== 'string' || !item.name.trim() || item.name.length > 120 ||
@@ -35,11 +38,13 @@ export function readInstanceManifest(value: unknown): InstanceManifest {
       !['open', 'invite_only', 'closed'].includes(item.registration_policy) ||
       !Array.isArray(item.auth_methods) || !item.auth_methods.length ||
       item.auth_methods.some(method => !['phone_password', 'email_password'].includes(method)) ||
-      typeof item.public_url !== 'string' || !dataflow ||
-      keys.some(key => dataflow[key] === undefined)) {
+      typeof publicUrl !== 'string' || !dataflow ||
+      keys.some(key => dataflow[key] === undefined) || (hasEmbeddings && embeddings === undefined)) {
     throw new Error('此服务器版本不兼容，或尚未完成初始化。请联系服务器管理员。');
   }
-  return { ...item, dataflow: dataflow as InstanceManifest['dataflow'] };
+  return { ...item, public_url: publicUrl, dataflow: {
+    ...dataflow, ...(hasEmbeddings ? { embeddings } : {}),
+  } as InstanceManifest['dataflow'] };
 }
 
 /** A phone may deliberately use HTTP on a private LAN; public connections require TLS. */

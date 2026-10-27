@@ -78,6 +78,23 @@ test('native enable failure revokes newly granted server consent', async () => {
     { enabled: false },
   );
 });
+test('explicit provider renewal passes its displayed scope and updates the native epoch without clearing selected photos', async () => {
+  request.mockResolvedValue({ enabled: true, epoch: 8 });
+  await photoIndex.enable(api, 'one', { consentScope: 'image-and-text-policy' });
+  expect(request).toHaveBeenCalledWith('/photo-index/devices/device-a', 'PUT', {
+    enabled: true, cloud_processing: true, consent_scope: 'image-and-text-policy',
+  });
+  expect(native.enable).toHaveBeenCalledWith(api.baseUrl, 'one', 8);
+  expect(native.clearLocal).not.toHaveBeenCalled();
+  expect(native.disable).not.toHaveBeenCalled();
+});
+test('a rejected provider scope cannot schedule work or silently retry a new consent', async () => {
+  request.mockRejectedValue(new Error('photo_cloud_consent_changed'));
+  await expect(photoIndex.enable(api, 'one', { consentScope: 'old-policy' })).rejects.toThrow('photo_cloud_consent_changed');
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(native.enable).not.toHaveBeenCalled();
+  expect(native.clearLocal).not.toHaveBeenCalled();
+});
 test('offline disable still stops all local scanning before contacting the server', async () => {
   request.mockRejectedValue(new Error('offline'));
   await expect(photoIndex.disable(api, 'one')).rejects.toThrow(

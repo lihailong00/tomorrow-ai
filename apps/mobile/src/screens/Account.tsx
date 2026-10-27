@@ -18,6 +18,7 @@ import { validatePassword } from '../domain/password';
 import { PhotoIndexSettings } from '../features/photo-index/PhotoIndexSettings';
 import { EmailAuthScreen } from '../features/instances/EmailAuthScreen';
 import { InstanceConnectionCard } from '../features/instances/InstanceConnectionCard';
+import { version as appVersion } from '../../package.json';
 
 export function IntroScreen({
   onContinue,
@@ -143,19 +144,32 @@ export function AuthScreen(props: { expired: boolean; notice?: string }) {
       <Button onPress={() => navigate({ name: 'settings' })}>选择服务器</Button>
     </ScrollView>;
   }
-  if (instance?.auth_methods.includes('email_password') &&
-      (instance.deployment_mode === 'self_hosted' || !instance.auth_methods.includes('phone_password'))) {
-    return <EmailAuthScreen {...props} />;
+  const emailSupported = instance?.auth_methods.includes('email_password') === true;
+  const phoneSupported = !instance || instance.auth_methods.includes('phone_password');
+  // A connection or capability change must discard credentials and method state.
+  const connectionKey = JSON.stringify([preferences.serverUrl, instance?.id, instance?.auth_methods]);
+  return <PasswordAuthScreen key={connectionKey} {...props} emailSupported={emailSupported}
+    phoneSupported={phoneSupported} preferEmail={instance?.deployment_mode === 'self_hosted'} />;
+}
+
+function PasswordAuthScreen({ emailSupported, phoneSupported, preferEmail, ...props }: {
+  expired: boolean; notice?: string; emailSupported: boolean; phoneSupported: boolean; preferEmail: boolean;
+}) {
+  const [method, setMethod] = useState<'email' | 'phone'>(emailSupported && (preferEmail || !phoneSupported) ? 'email' : 'phone');
+  if (method === 'email') {
+    return <EmailAuthScreen {...props} onSwitchMethod={phoneSupported ? () => setMethod('phone') : undefined} />;
   }
-  return <PhoneAuthScreen {...props} />;
+  return <PhoneAuthScreen {...props} onSwitchMethod={emailSupported ? () => setMethod('email') : undefined} />;
 }
 
 function PhoneAuthScreen({
   expired,
   notice,
+  onSwitchMethod,
 }: {
   expired: boolean;
   notice?: string;
+  onSwitchMethod?: () => void;
 }) {
   const { api, signIn, navigate, preferences } = useApp();
   const [mode, setMode] = useState<'login' | 'register' | 'reset'>('login');
@@ -301,6 +315,8 @@ function PhoneAuthScreen({
           ? '验证手机号，为账号设置新密码。'
           : '登录后，接着上次的想法继续。'}
       </Text>
+      {onSwitchMethod && <Button variant="ghost" disabled={busy}
+        onPress={() => { if (!pending.current) onSwitchMethod(); }}>使用邮箱密码登录</Button>}
       {expired && (
         <Notice>登录已失效，请重新登录。已保存的任务与记忆仍在服务端。</Notice>
       )}
@@ -521,7 +537,6 @@ export function SettingsScreen() {
   const {
     api,
     user,
-    preferences,
     signOut,
     updateUser,
     navigate,
@@ -529,6 +544,7 @@ export function SettingsScreen() {
   const [name, setName] = useState(user?.name ?? '');
   const [timezone, setTimezone] = useState(user?.timezone ?? 'Asia/Shanghai');
   const [notice, setNotice] = useState('');
+  const [showNotificationSettings, setShowNotificationSettings] = useState(false);
   const action = useAction();
   return (
     <ScrollView
@@ -610,19 +626,30 @@ export function SettingsScreen() {
             </Text>
             <Button
               variant="ghost"
+              loading={action.busy}
               onPress={() =>
-                action.run(async () => {
-                  const accepted = await platform.requestNotifications();
+                action.run(async ({ isCurrent }) => {
+                  const result = await platform.manageNotificationPermission();
+                  if (!isCurrent()) return;
+                  setShowNotificationSettings(result === 'blocked' || result === 'denied');
                   setNotice(
-                    accepted
+                    result === 'granted'
                       ? '通知权限已开启。App 前台可提示新的任务动态，远程推送仍需后续配置。'
-                      : '通知权限未开启。你可以在 App 内查看任务结果。',
+                      : result === 'settings'
+                      ? '已打开系统通知设置。开启通知后返回 App 即可。'
+                      : result === 'blocked'
+                      ? '系统已停止弹出通知授权，请点击“打开系统通知设置”后开启。'
+                      : '通知权限未开启。你可以在 App 内查看任务结果，也可在系统通知设置中开启。',
                   );
                 })
               }
             >
               管理通知权限
             </Button>
+            {showNotificationSettings && <Button variant="ghost" loading={action.busy}
+              onPress={() => action.run(async () => { await platform.openNotificationSettings(); })}>
+              打开系统通知设置
+            </Button>}
             <View style={s.divider} />
             <Text style={s.cardTitle}>清理本地临时文件</Text>
             <Text style={[s.small, { marginVertical: 7 }]}>
@@ -684,7 +711,7 @@ export function SettingsScreen() {
       <ErrorNotice message={action.error} />
       {notice ? <Notice>{notice}</Notice> : null}
       <Text style={[s.small, { textAlign: 'center', marginTop: 24 }]}>
-        妥啦 · 0.1.6
+        {`妥啦 · ${appVersion}`}
       </Text>
     </ScrollView>
   );

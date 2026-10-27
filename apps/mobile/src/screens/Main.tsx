@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Pressable,
@@ -28,6 +28,81 @@ type IconName = React.ComponentProps<typeof Icon>['name'];
 const accent = colors.accent;
 const secondary = colors.secondary;
 const tint = { blue: '#EAF1FF', peach: '#FFF0E8', lilac: '#EEEAFE' };
+
+// A filter or refresh starts a new generation, so late pages cannot mix lists.
+export function usePagedList<T extends { id: string }>(
+  load: (
+    offset: number,
+  ) => Promise<{ items: T[]; next_offset?: number | null }>,
+  deps: React.DependencyList,
+) {
+  const loader = useRef(load);
+  loader.current = load;
+  const generation = useRef(0);
+  const pending = useRef(false);
+  const [items, setItems] = useState<T[]>([]);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const request = useCallback(
+    async (offset: number, append: boolean, version: number) => {
+      pending.current = true;
+      setLoading(true);
+      setError(null);
+      try {
+        const page = await loader.current(offset);
+        if (version !== generation.current) return;
+        setItems(previous => {
+          const unique = new Map(
+            (append ? previous : []).map(item => [item.id, item]),
+          );
+          page.items.forEach(item => unique.set(item.id, item));
+          return [...unique.values()];
+        });
+        setNextOffset(page.next_offset ?? null);
+      } catch (failure) {
+        if (version === generation.current) {
+          setError(
+            failure instanceof Error ? failure.message : '读取失败，请重试',
+          );
+        }
+      } finally {
+        if (version === generation.current) {
+          pending.current = false;
+          setLoading(false);
+        }
+      }
+    },
+    [],
+  );
+  const refresh = useCallback(() => {
+    const version = ++generation.current;
+    setNextOffset(null);
+    request(0, false, version);
+  }, [request]);
+  useEffect(() => {
+    setItems([]);
+    refresh();
+    return () => {
+      generation.current += 1;
+    };
+    // The caller explicitly identifies the account, filter and revision.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+  const loadMore = () => {
+    if (nextOffset !== null && !pending.current) {
+      request(nextOffset, true, generation.current);
+    }
+  };
+  return {
+    items,
+    loading,
+    error,
+    refresh,
+    loadMore,
+    hasMore: nextOffset !== null,
+  };
+}
 
 function PageHeader({
   title,
@@ -230,13 +305,23 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
   const data = useResource(() => api.today(), [api, revision]);
   const action = useAction();
   const [briefExpanded, setBriefExpanded] = useState(false);
+  // Preview and totals can straddle a completion; refresh until both settle.
+  const hasActiveTasks = Boolean(
+    data.value && (
+      (data.value.stats.active_tasks ?? 0) > 0 || data.value.tasks.some(isActiveTask)
+    ),
+  );
+  const unreadCount = data.value
+    ? data.value.stats.unread_notifications ??
+      data.value.notifications.filter(item => !item.read).length
+    : 0;
   useEffect(() => {
-    if (!data.value?.tasks.some(isActiveTask)) {
+    if (!hasActiveTasks) {
       return;
     }
     const timer = setInterval(data.refresh, 8000);
     return () => clearInterval(timer);
-  }, [data.value, data.refresh]);
+  }, [hasActiveTasks, data.refresh]);
   const date = chineseDayLabel(new Date(), user?.timezone ?? 'Asia/Shanghai');
   return (
     <ScrollView
@@ -265,8 +350,8 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
           style={v.notificationButton}
         >
           <Icon name="bell" size={22} color={secondary} />
-          {data.value?.notifications.some(item => !item.read) && (
-            <View style={v.unreadDot} />
+          {unreadCount > 0 && (
+            <View accessibilityLabel="有未读通知" style={v.unreadDot} />
           )}
         </Pressable>
       </View>
@@ -423,29 +508,28 @@ export function TasksScreen() {
   const { api, navigate, revision, invalidate, formatDate } = useApp();
   const [view, setView] = useState<'tasks' | 'schedules'>('tasks');
   const [filter, setFilter] = useState('all');
-  const data = useResource(async () => {
-    const [tasks, schedules] = await Promise.all([
-      api.tasks(),
-      api.schedules(),
-    ]);
-    return { tasks: tasks.items, schedules: schedules.items };
-  }, [api, revision]);
+  const taskData = usePagedList(
+    offset => api.tasks({ status: filter, offset, limit: 50 }),
+    [api, filter, revision],
+  );
+  const data = useResource(() => api.schedules(), [api, revision]);
   const action = useAction();
-  const tasks =
-    data.value?.tasks.filter(
-      task =>
-        filter === 'all' ||
-        (filter === 'active'
-          ? isActiveTask(task)
-          : task.status === 'succeeded'),
-    ) ?? [];
+  const tasks = taskData.items;
+  const refresh = () => {
+    taskData.refresh();
+    data.refresh();
+  };
   return (
     <ScrollView
       showsVerticalScrollIndicator={false}
       refreshControl={
         <RefreshControl
-          refreshing={data.loading && Boolean(data.value)}
-          onRefresh={data.refresh}
+          refreshing={
+            view === 'tasks'
+              ? taskData.loading && tasks.length > 0
+              : data.loading && Boolean(data.value)
+          }
+          onRefresh={refresh}
           tintColor={accent}
         />
       }
@@ -500,102 +584,119 @@ export function TasksScreen() {
           ))}
         </View>
       )}
-      <ErrorNotice message={data.error} retry={data.refresh} />
+      <ErrorNotice
+        message={view === 'tasks' ? taskData.error : data.error}
+        retry={refresh}
+      />
       <ErrorNotice message={action.error} />
-      {data.loading && !data.value && <Loading />}
-      {data.value &&
-        (view === 'tasks' ? (
-          tasks.length ? (
-            tasks.map(task => <TaskCard key={task.id} task={task} />)
-          ) : (
-            <PageEmpty
-              icon="tasks"
-              title={filter === 'all' ? '还没有任务' : '暂无这类任务'}
-              body="可以从整理一份资料，或拆解一个计划开始。"
-              action="创建任务"
-              onAction={() => navigate({ name: 'newTask' })}
-            />
-          )
-        ) : data.value.schedules.length ? (
-          data.value.schedules.map(schedule => (
-            <View key={schedule.id} style={v.scheduleCard}>
+      {(view === 'tasks'
+        ? taskData.loading && !tasks.length
+        : data.loading && !data.value) && <Loading />}
+      {view === 'tasks' ? (
+        tasks.length ? (
+          <>
+            {tasks.map(task => (
+              <TaskCard key={task.id} task={task} />
+            ))}
+            {taskData.hasMore && (
+              <Button
+                variant="ghost"
+                disabled={taskData.loading}
+                onPress={taskData.loadMore}
+              >
+                {taskData.loading ? '正在加载…' : '加载更多任务'}
+              </Button>
+            )}
+          </>
+        ) : !taskData.loading && !taskData.error ? (
+          <PageEmpty
+            icon="tasks"
+            title={filter === 'all' ? '还没有任务' : '暂无这类任务'}
+            body="可以从整理一份资料，或拆解一个计划开始。"
+            action="创建任务"
+            onAction={() => navigate({ name: 'newTask' })}
+          />
+        ) : null
+      ) : data.value?.items.length ? (
+        data.value.items.map(schedule => (
+          <View key={schedule.id} style={v.scheduleCard}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={'编辑计划' + schedule.title}
+              onPress={() => navigate({ name: 'schedule', schedule })}
+            >
+              <View style={v.scheduleTop}>
+                <View style={v.scheduleIcon}>
+                  <Icon name="calendar" size={20} color="#8981BD" />
+                </View>
+                <View style={v.flex}>
+                  <Text style={v.itemTitle}>{schedule.title}</Text>
+                  <Text style={v.scheduleFrequency}>
+                    {frequencies[schedule.frequency]} · {schedule.time}
+                  </Text>
+                </View>
+                <Text
+                  style={[
+                    v.statusText,
+                    { color: schedule.enabled ? accent : secondary },
+                  ]}
+                >
+                  {schedule.enabled ? '已开启' : '已暂停'}
+                </Text>
+              </View>
+              <Text style={v.scheduleInstruction} numberOfLines={2}>
+                {schedule.instruction}
+              </Text>
+              <View style={v.scheduleNext}>
+                <Icon name="clock" size={13} color="#9AA3B2" />
+                <Text style={v.metadata}>
+                  下次：
+                  {schedule.enabled
+                    ? formatDate(schedule.next_run_at, schedule.timezone)
+                    : '恢复后继续'}{' '}
+                  · {schedule.timezone}
+                </Text>
+              </View>
+            </Pressable>
+            <View style={v.scheduleActions}>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={'编辑计划' + schedule.title}
-                onPress={() => navigate({ name: 'schedule', schedule })}
+                disabled={action.busy}
+                onPress={() =>
+                  action.run(async () => {
+                    await api.saveSchedule(
+                      { enabled: !schedule.enabled },
+                      schedule.id,
+                    );
+                    invalidate();
+                  })
+                }
+                style={v.scheduleAction}
               >
-                <View style={v.scheduleTop}>
-                  <View style={v.scheduleIcon}>
-                    <Icon name="calendar" size={20} color="#8981BD" />
-                  </View>
-                  <View style={v.flex}>
-                    <Text style={v.itemTitle}>{schedule.title}</Text>
-                    <Text style={v.scheduleFrequency}>
-                      {frequencies[schedule.frequency]} · {schedule.time}
-                    </Text>
-                  </View>
-                  <Text
-                    style={[
-                      v.statusText,
-                      { color: schedule.enabled ? accent : secondary },
-                    ]}
-                  >
-                    {schedule.enabled ? '已开启' : '已暂停'}
-                  </Text>
-                </View>
-                <Text style={v.scheduleInstruction} numberOfLines={2}>
-                  {schedule.instruction}
+                <Text style={v.primaryText}>
+                  {schedule.enabled ? '暂停计划' : '恢复计划'}
                 </Text>
-                <View style={v.scheduleNext}>
-                  <Icon name="clock" size={13} color="#9AA3B2" />
-                  <Text style={v.metadata}>
-                    下次：
-                    {schedule.enabled
-                      ? formatDate(schedule.next_run_at, schedule.timezone)
-                      : '恢复后继续'}{' '}
-                    · {schedule.timezone}
-                  </Text>
-                </View>
               </Pressable>
-              <View style={v.scheduleActions}>
-                <Pressable
-                  accessibilityRole="button"
-                  disabled={action.busy}
-                  onPress={() =>
-                    action.run(async () => {
-                      await api.saveSchedule(
-                        { enabled: !schedule.enabled },
-                        schedule.id,
-                      );
-                      invalidate();
-                    })
-                  }
-                  style={v.scheduleAction}
-                >
-                  <Text style={v.primaryText}>
-                    {schedule.enabled ? '暂停计划' : '恢复计划'}
-                  </Text>
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => navigate({ name: 'schedule', schedule })}
-                  style={v.scheduleAction}
-                >
-                  <Text style={v.actionText}>编辑</Text>
-                  <Icon name="chevronRight" size={13} color={secondary} />
-                </Pressable>
-              </View>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => navigate({ name: 'schedule', schedule })}
+                style={v.scheduleAction}
+              >
+                <Text style={v.actionText}>编辑</Text>
+                <Icon name="chevronRight" size={13} color={secondary} />
+              </Pressable>
             </View>
-          ))
-        ) : (
-          <PageEmpty
-            icon="calendar"
-            title="设定一个自动计划"
-            body="简报、回顾或固定的整理工作，设好时间后按计划执行。"
-            action="创建计划"
-            onAction={() => navigate({ name: 'schedule' })}
-          />
-        ))}
+          </View>
+        ))
+      ) : !data.loading && !data.error ? (
+        <PageEmpty
+          icon="calendar"
+          title="设定一个自动计划"
+          body="简报、回顾或固定的整理工作，设好时间后按计划执行。"
+          action="创建计划"
+          onAction={() => navigate({ name: 'schedule' })}
+        />
+      ) : null}
     </ScrollView>
   );
 }
@@ -603,7 +704,10 @@ export function TasksScreen() {
 export function MemoriesScreen() {
   const { api, navigate, revision, formatDate } = useApp();
   const [kind, setKind] = useState<MemoryKind | undefined>();
-  const data = useResource(() => api.memories(kind), [api, kind, revision]);
+  const data = usePagedList(
+    offset => api.memories(kind, { offset, limit: 50 }),
+    [api, kind, revision],
+  );
   const kindTint: Record<MemoryKind, string> = {
     preference: tint.blue,
     person: tint.peach,
@@ -616,7 +720,7 @@ export function MemoriesScreen() {
       showsVerticalScrollIndicator={false}
       refreshControl={
         <RefreshControl
-          refreshing={data.loading && Boolean(data.value)}
+          refreshing={data.loading && data.items.length > 0}
           onRefresh={data.refresh}
           tintColor={accent}
         />
@@ -656,66 +760,66 @@ export function MemoriesScreen() {
         )}
       </ScrollView>
       <ErrorNotice message={data.error} retry={data.refresh} />
-      {data.loading && !data.value && <Loading />}
-      {data.value &&
-        (data.value.items.length ? (
-          data.value.items.map(memory => (
-            <Pressable
-              key={memory.id}
-              accessibilityRole="button"
-              accessibilityLabel={'编辑记忆' + memory.title}
-              onPress={() => navigate({ name: 'memory', memory })}
-              style={({ pressed }) => [v.memoryCard, pressed && v.pressed]}
-            >
-              <View style={v.memoryCardHeader}>
-                <View
-                  style={[
-                    v.memoryKind,
-                    { backgroundColor: kindTint[memory.kind] },
-                  ]}
-                >
-                  <Icon
-                    name={
-                      memory.kind === 'project'
-                        ? 'file'
-                        : memory.kind === 'goal'
-                        ? 'sparkles'
-                        : 'memory'
-                    }
-                    size={13}
-                    color="#8F93B8"
-                  />
-                  <Text style={v.memoryKindText}>
-                    {memoryKinds[memory.kind]}
-                  </Text>
-                </View>
-                <Icon name="more" size={18} color="#A0A7B6" />
+      {data.loading && !data.items.length && <Loading />}
+      {data.items.length ? (
+        data.items.map(memory => (
+          <Pressable
+            key={memory.id}
+            accessibilityRole="button"
+            accessibilityLabel={'编辑记忆' + memory.title}
+            onPress={() => navigate({ name: 'memory', memory })}
+            style={({ pressed }) => [v.memoryCard, pressed && v.pressed]}
+          >
+            <View style={v.memoryCardHeader}>
+              <View
+                style={[
+                  v.memoryKind,
+                  { backgroundColor: kindTint[memory.kind] },
+                ]}
+              >
+                <Icon
+                  name={
+                    memory.kind === 'project'
+                      ? 'file'
+                      : memory.kind === 'goal'
+                      ? 'sparkles'
+                      : 'memory'
+                  }
+                  size={13}
+                  color="#8F93B8"
+                />
+                <Text style={v.memoryKindText}>{memoryKinds[memory.kind]}</Text>
               </View>
-              <Text style={v.memoryTitle}>{memory.title}</Text>
-              <Text style={v.memoryBody} numberOfLines={4}>
-                {memory.content}
+              <Icon name="more" size={18} color="#A0A7B6" />
+            </View>
+            <Text style={v.memoryTitle}>{memory.title}</Text>
+            <Text style={v.memoryBody} numberOfLines={4}>
+              {memory.content}
+            </Text>
+            <View style={v.memorySource}>
+              <Text style={v.sourceText} numberOfLines={1}>
+                来源：{memory.source || '你主动添加'}
               </Text>
-              <View style={v.memorySource}>
-                <Text style={v.sourceText} numberOfLines={1}>
-                  来源：{memory.source || '你主动添加'}
-                </Text>
-                <Text style={v.sourceText}>
-                  {formatDate(memory.updated_at)}
-                </Text>
-              </View>
-            </Pressable>
-          ))
-        ) : (
-          <PageEmpty
-            icon="memory"
-            title={
-              kind ? '还没有' + memoryKinds[kind] + '记忆' : '从一条偏好开始'
-            }
-            body="例如「我喜欢在上午处理重要工作」。你添加的记忆会帮助我提供更合适的建议。"
-            action="添加记忆"
-            onAction={() => navigate({ name: 'memory' })}
-          />
-        ))}
+              <Text style={v.sourceText}>{formatDate(memory.updated_at)}</Text>
+            </View>
+          </Pressable>
+        ))
+      ) : !data.loading && !data.error ? (
+        <PageEmpty
+          icon="memory"
+          title={
+            kind ? '还没有' + memoryKinds[kind] + '记忆' : '从一条偏好开始'
+          }
+          body="例如「我喜欢在上午处理重要工作」。你添加的记忆会帮助我提供更合适的建议。"
+          action="添加记忆"
+          onAction={() => navigate({ name: 'memory' })}
+        />
+      ) : null}
+      {data.hasMore && (
+        <Button variant="ghost" disabled={data.loading} onPress={data.loadMore}>
+          {data.loading ? '正在加载…' : '加载更多记忆'}
+        </Button>
+      )}
       <Text style={v.bottomNote}>删除的记忆将不再用于之后的回答。</Text>
     </ScrollView>
   );
@@ -749,20 +853,38 @@ export function CapabilitiesScreen() {
       contentContainerStyle={v.pageContent}
     >
       <PageHeader title="能力" subtitle="连接你的工具，让帮助更具体。" />
-      <Pressable accessibilityRole="button" accessibilityLabel="导入 AI 对话"
-        onPress={() => navigate({ name: 'aiHistory' })} style={v.assistantCard}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="导入 AI 对话"
+        onPress={() => navigate({ name: 'aiHistory' })}
+        style={v.assistantCard}
+      >
         <View style={v.flex}>
           <Text style={v.assistantTitle}>带上过去的 AI 对话</Text>
-          <Text style={v.assistantDescription}>ChatGPT、Claude、DeepSeek · 导入、搜索与整理记忆候选</Text>
-          <View style={v.assistantLink}><Text style={v.primaryText}>导入 AI 对话</Text><Icon name="arrowRight" size={15} color={accent} /></View>
+          <Text style={v.assistantDescription}>
+            ChatGPT、Claude、DeepSeek · 导入、搜索与整理记忆候选
+          </Text>
+          <View style={v.assistantLink}>
+            <Text style={v.primaryText}>导入 AI 对话</Text>
+            <Icon name="arrowRight" size={15} color={accent} />
+          </View>
         </View>
       </Pressable>
-      <Pressable accessibilityRole="button" accessibilityLabel="连接手机应用"
-        onPress={() => navigate({ name: 'integrations' })} style={v.assistantCard}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="连接手机应用"
+        onPress={() => navigate({ name: 'integrations' })}
+        style={v.assistantCard}
+      >
         <View style={v.flex}>
           <Text style={v.assistantTitle}>连接手机应用</Text>
-          <Text style={v.assistantDescription}>微信、QQ、办公与生活应用 · 选择通知或分享资料给妥啦</Text>
-          <View style={v.assistantLink}><Text style={v.primaryText}>管理手机资料</Text><Icon name="arrowRight" size={15} color={accent} /></View>
+          <Text style={v.assistantDescription}>
+            微信、QQ、办公与生活应用 · 选择通知或分享资料给妥啦
+          </Text>
+          <View style={v.assistantLink}>
+            <Text style={v.primaryText}>管理手机资料</Text>
+            <Icon name="arrowRight" size={15} color={accent} />
+          </View>
         </View>
       </Pressable>
       <ErrorNotice message={data.error} retry={data.refresh} />

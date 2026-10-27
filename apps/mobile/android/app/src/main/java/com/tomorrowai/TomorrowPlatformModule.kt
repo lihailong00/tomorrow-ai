@@ -12,6 +12,8 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.os.SystemClock
 import android.provider.OpenableColumns
+import android.provider.Settings
+import android.net.Uri
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -31,6 +33,7 @@ import javax.crypto.spec.GCMParameterSpec
 /** Android capabilities behind the shared platform port. */
 class TomorrowPlatformModule(private val context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
   private val securePrefs = context.getSharedPreferences("tomorrow_secure", Context.MODE_PRIVATE)
+  private val permissionPrefs = context.getSharedPreferences("tomorrow_permissions", Context.MODE_PRIVATE)
   private val attachmentDir get() = File(context.cacheDir, "attachments").apply { mkdirs() }
   private var pickerPromise: Promise? = null
   private var recorder: MediaRecorder? = null
@@ -200,10 +203,54 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
     } catch (error: Exception) { promise.reject("E_SHARE", error.message, error) }
   }
 
+  private fun notificationPermissionState(): String {
+    if (NotificationManagerCompat.from(context).areNotificationsEnabled()) return "granted"
+    // Before Android 13 notification access can only be changed in system settings.
+    if (Build.VERSION.SDK_INT < 33) return "blocked"
+    if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return "blocked"
+    val activity = context.currentActivity ?: return "requestable"
+    return if (permissionPrefs.getBoolean("notifications_requested", false) &&
+      !activity.shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) "blocked" else "requestable"
+  }
+
+  @ReactMethod fun notificationPermissionStatus(promise: Promise) = onUi {
+    promise.resolve(notificationPermissionState())
+  }
+
   @ReactMethod fun requestNotifications(promise: Promise) = onUi {
-    if (Build.VERSION.SDK_INT >= 33) withPermission(Manifest.permission.POST_NOTIFICATIONS, promise) {
-      promise.resolve(NotificationManagerCompat.from(context).areNotificationsEnabled())
-    } else promise.resolve(NotificationManagerCompat.from(context).areNotificationsEnabled())
+    if (Build.VERSION.SDK_INT < 33 || notificationPermissionState() != "requestable") {
+      promise.resolve(NotificationManagerCompat.from(context).areNotificationsEnabled()); return@onUi
+    }
+    val activity = context.currentActivity as? PermissionAwareActivity
+    if (activity == null) { promise.reject("E_ACTIVITY", "请在应用前台重试"); return@onUi }
+    if (permissionBusy) { promise.reject("E_BUSY", "请先完成当前权限请求"); return@onUi }
+    permissionBusy = true
+    try {
+      activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), PERMISSION_REQUEST, PermissionListener { _, _, results ->
+        permissionBusy = false
+        // An empty result can mean the dialog was dismissed; it is still requestable.
+        if (results.isNotEmpty()) permissionPrefs.edit().putBoolean("notifications_requested", true).apply()
+        promise.resolve(NotificationManagerCompat.from(context).areNotificationsEnabled())
+        true
+      })
+    } catch (error: Exception) {
+      permissionBusy = false
+      promise.reject("E_PERMISSION", "无法打开通知授权，请重试或使用系统通知设置", error)
+    }
+  }
+
+  @ReactMethod fun openNotificationSettings(promise: Promise) = onUi {
+    val activity = context.currentActivity
+    if (activity == null) { promise.reject("E_ACTIVITY", "请在应用前台重试"); return@onUi }
+    val intents = listOf(
+      Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+      Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
+    )
+    for (intent in intents) {
+      try { activity.startActivity(intent); promise.resolve(null); return@onUi }
+      catch (_: Exception) { /* Some Android variants only expose app details. */ }
+    }
+    promise.reject("E_SETTINGS", "无法打开系统设置，请在系统设置中找到妥啦并开启通知")
   }
 
   @ReactMethod fun showNotification(title: String, body: String, promise: Promise) {

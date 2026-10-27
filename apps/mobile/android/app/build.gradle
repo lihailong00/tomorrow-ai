@@ -2,6 +2,22 @@ apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
 apply plugin: "com.facebook.react"
 
+// RN 0.82.1 loses the user's font scale on Android 13 and earlier. Backport
+// upstream 642f086 in the prebuilt AAR initializer, including every reinitialization.
+// Both the package version and exact original method are guarded until RN is upgraded.
+com.tomorrowai.gradle.ReactNativeFontScalePatch.requireSupportedVersion(
+    new groovy.json.JsonSlurper().parse(file("../../node_modules/react-native/package.json")).version
+)
+androidComponents.onVariants(androidComponents.selector().all()) { variant ->
+    variant.instrumentation.transformClassesWith(
+        com.tomorrowai.gradle.ReactNativeFontScaleVisitorFactory,
+        com.android.build.api.instrumentation.InstrumentationScope.ALL
+    ) {}
+    variant.instrumentation.setAsmFramesComputationMode(
+        com.android.build.api.instrumentation.FramesComputationMode.COMPUTE_FRAMES_FOR_INSTRUMENTED_METHODS
+    )
+}
+
 def offlineBundle = providers.gradleProperty("offlineBundle").getOrElse("false").toBoolean()
 
 /**
@@ -95,8 +111,8 @@ android {
         applicationId "com.tomorrowai"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 12
-        versionName "0.1.11"
+        versionCode 13
+        versionName "0.1.12"
         buildConfigField "boolean", "OFFLINE_BUNDLE", offlineBundle.toString()
     }
     signingConfigs {

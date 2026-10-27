@@ -56,6 +56,19 @@ export function newRequestId(): string {
     .slice(2, 14)}`;
 }
 type Fetcher = typeof fetch;
+function listQuery(
+  options?: Record<string, string | number | boolean | undefined>,
+): string {
+  const entries = Object.entries(options ?? {}).filter(
+    ([, value]) => value !== undefined,
+  );
+  return entries.length
+    ? '?' +
+        entries
+          .map(([key, value]) => `${key}=${encodeURIComponent(String(value))}`)
+          .join('&')
+    : '';
+}
 export class ApiClient {
   readonly baseUrl: string;
   private disposed = false;
@@ -83,8 +96,14 @@ export class ApiClient {
     if (this.disposed || !this.baseUrl) {
       throw new ApiError('connection_required', '请先检查并确认服务器连接。');
     }
+    if (signal?.aborted) throw new ApiError('cancelled', '操作已取消。');
     if (this.verifyIdentity) await this.verifyIdentity();
-    if (this.disposed) throw new ApiError('connection_changed', '服务器连接已变化，请重新操作。');
+    if (this.disposed)
+      throw new ApiError(
+        'connection_changed',
+        '服务器连接已变化，请重新操作。',
+      );
+    if (signal?.aborted) throw new ApiError('cancelled', '操作已取消。');
     const controller = new AbortController();
     this.requests.add(controller);
     const cancel = () => controller.abort();
@@ -122,8 +141,16 @@ export class ApiClient {
         credentials: 'omit',
         redirect: 'error',
       } as RequestInit & { redirect: 'error' });
-      if (this.disposed) throw new ApiError('connection_changed', '服务器连接已变化，请重新操作。');
-      if (response.redirected) throw new ApiError('redirect_blocked', '接口发生跳转，请重新检查服务器地址。');
+      if (this.disposed)
+        throw new ApiError(
+          'connection_changed',
+          '服务器连接已变化，请重新操作。',
+        );
+      if (response.redirected)
+        throw new ApiError(
+          'redirect_blocked',
+          '接口发生跳转，请重新检查服务器地址。',
+        );
       const text = await response.text();
       const retryHeader = Number(response.headers?.get?.('Retry-After'));
       const retryAfterSeconds =
@@ -160,7 +187,11 @@ export class ApiClient {
           retryAfterSeconds,
         );
       }
-      if (this.disposed) throw new ApiError('connection_changed', '服务器连接已变化，请重新操作。');
+      if (this.disposed)
+        throw new ApiError(
+          'connection_changed',
+          '服务器连接已变化，请重新操作。',
+        );
       return data as T;
     } catch (error) {
       if (error instanceof ApiError) {
@@ -260,9 +291,9 @@ export class ApiClient {
   logout = () => this.request<{ ok: boolean }>('/auth/logout', 'POST', {});
   today = () => this.request<Today>('/today');
   briefing = () => this.request<Task>('/briefing', 'POST', {});
-  memories = (kind?: MemoryKind) =>
-    this.request<{ items: Memory[] }>(
-      `/memories${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`,
+  memories = (kind?: MemoryKind, page?: { offset?: number; limit?: number }) =>
+    this.request<{ items: Memory[]; next_offset?: number | null }>(
+      `/memories${listQuery({ ...page, kind })}`,
     );
   saveMemory = (
     data: {
@@ -271,6 +302,7 @@ export class ApiClient {
       kind: MemoryKind;
       source?: string;
       version?: number;
+      client_request_id?: string;
     },
     id?: string,
   ) =>
@@ -284,7 +316,10 @@ export class ApiClient {
       `/memories/${encodeURIComponent(id)}`,
       'DELETE',
     );
-  tasks = () => this.request<{ items: Task[] }>('/tasks');
+  tasks = (page?: { offset?: number; limit?: number; status?: string }) =>
+    this.request<{ items: Task[]; next_offset?: number | null }>(
+      `/tasks${listQuery(page)}`,
+    );
   task = (id: string) => this.request<Task>(`/tasks/${encodeURIComponent(id)}`);
   createTask = (
     instruction: string,
@@ -307,7 +342,7 @@ export class ApiClient {
         Schedule,
         'title' | 'instruction' | 'frequency' | 'time' | 'timezone' | 'enabled'
       >
-    >,
+    > & { client_request_id?: string },
     id?: string,
   ) =>
     this.request<Schedule>(
@@ -320,8 +355,8 @@ export class ApiClient {
       `/schedules/${encodeURIComponent(id)}`,
       'DELETE',
     );
-  conversations = () =>
-    this.request<{ items: Conversation[] }>('/conversations');
+  conversations = (page?: { offset?: number; limit?: number }) =>
+    this.request<{ items: Conversation[]; next_offset?: number | null }>(`/conversations${listQuery(page)}`);
   messages = (id: string) =>
     this.request<{ items: Message[] }>(
       `/conversations/${encodeURIComponent(id)}/messages`,
@@ -348,7 +383,15 @@ export class ApiClient {
     } as any);
     return this.request<Upload>('/uploads', 'POST', data, signal);
   };
-  uploads = () => this.request<{ items: Upload[] }>('/uploads');
+  uploads = (
+    page?: { offset?: number; limit?: number; kind?: 'all' | 'file' | 'audio' },
+    signal?: AbortSignal,
+  ) =>
+    this.request<{
+      items: Upload[];
+      next_offset?: number | null;
+      has_more?: boolean;
+    }>(`/uploads${listQuery(page)}`, 'GET', undefined, signal);
   deleteUpload = (id: string) =>
     this.request<{ ok: boolean }>(
       '/uploads/' + encodeURIComponent(id),
@@ -362,15 +405,16 @@ export class ApiClient {
       signal,
     );
   capabilities = () => this.request<CapabilityResponse>('/capabilities');
-  notifications = () =>
-    this.request<{ items: Notification[] }>('/notifications');
+  notifications = (page?: { offset?: number; limit?: number; read?: boolean }) =>
+    this.request<{ items: Notification[]; next_offset?: number | null }>(`/notifications${listQuery(page)}`);
   readNotification = (id: string) =>
     this.request<{ ok: boolean }>(
       `/notifications/${encodeURIComponent(id)}/read`,
       'POST',
       {},
     );
-  artifacts = () => this.request<{ items: Artifact[] }>('/artifacts');
+  artifacts = (page?: { offset?: number; limit?: number }) =>
+    this.request<{ items: Artifact[]; next_offset?: number | null }>(`/artifacts${listQuery(page)}`);
   artifact = (id: string) =>
     this.request<Artifact>(`/artifacts/${encodeURIComponent(id)}`);
   connectors = () => this.request<{ items: Connector[] }>('/connectors');

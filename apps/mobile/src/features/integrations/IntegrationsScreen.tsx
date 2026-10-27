@@ -88,7 +88,7 @@ function SourceBadge({ id, name }: { id: string; name: string }) {
 
 function useRequestScope(api: ApiClient, userId?: string) {
   const scope = useMemo(
-    () => ({ active: true, controller: new AbortController() }),
+    () => ({ active: true, controller: new AbortController(), api, userId }),
     [api, userId],
   );
   useEffect(() => {

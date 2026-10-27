@@ -18,6 +18,7 @@ export interface LocalFile {
   size?: number;
   duration_ms?: number;
 }
+export type NotificationPermissionStatus = 'granted' | 'requestable' | 'blocked';
 interface NativePort {
   secureGet(key: string): Promise<string | null>;
   secureSet(key: string, value: string): Promise<void>;
@@ -29,6 +30,8 @@ interface NativePort {
   startRecording(): Promise<void>;
   stopRecording(): Promise<LocalFile | null>;
   requestNotifications(): Promise<boolean>;
+  notificationPermissionStatus(): Promise<NotificationPermissionStatus>;
+  openNotificationSettings(): Promise<void>;
   clearCache(): Promise<void>;
   showNotification(title: string, body: string): Promise<void>;
 }
@@ -170,6 +173,22 @@ export const platform = {
       throw missing();
     }
     return native.requestNotifications();
+  },
+  async manageNotificationPermission(): Promise<'granted' | 'denied' | 'blocked' | 'settings'> {
+    const status = await native?.notificationPermissionStatus?.();
+    if (status === 'blocked') {
+      await platform.openNotificationSettings();
+      return 'settings';
+    }
+    if (await platform.requestNotifications()) return 'granted';
+    return (await native?.notificationPermissionStatus?.()) === 'blocked' ? 'blocked' : 'denied';
+  },
+  async openNotificationSettings(): Promise<void> {
+    if (native?.openNotificationSettings) {
+      await native.openNotificationSettings();
+    } else {
+      await Linking.openSettings();
+    }
   },
   async showNotification(title: string, body: string) {
     if (!native?.showNotification) {

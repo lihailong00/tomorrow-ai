@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import { Alert, RefreshControl, ScrollView, Text, View } from 'react-native';
-import { useAction, useApp, useResource } from '../app/context';
+import { useAction, useApp } from '../app/context';
 import { Upload } from '../domain/types';
 import {
   Button,
@@ -11,6 +11,10 @@ import {
   Pill,
 } from '../ui/components';
 import { styles as s } from '../ui/theme';
+import { usePagedList } from './Main';
+
+type UploadKind = 'all' | 'file' | 'audio';
+let nextArchiveOwner = 0;
 
 function fileDescription(item: Upload) {
   if (/\.(txt|md|csv|tsv|json|log)$/i.test(item.name)) {
@@ -26,28 +30,85 @@ function fileDescription(item: Upload) {
 }
 
 export function UploadsScreen() {
-  const { api, navigate, formatDate } = useApp();
-  const data = useResource(() => api.uploads(), [api]);
+  const { api, user, preferences } = useApp();
+  // Remount immediately on an account/instance change, including the render
+  // before old request effects are cleaned up. Never show another scope's list.
+  const owner = useMemo(
+    () => ({
+      id: ++nextArchiveOwner,
+      api,
+      userId: user?.id,
+      serverUrl: preferences?.serverUrl,
+      instanceId: preferences?.instance?.id,
+    }),
+    [api, user?.id, preferences?.serverUrl, preferences?.instance?.id],
+  );
+  return <OwnedUploads key={owner.id} />;
+}
+
+function OwnedUploads() {
+  const [kind, setKind] = useState<UploadKind>('all');
+  return <UploadsList key={kind} kind={kind} setKind={setKind} />;
+}
+
+function UploadsList({
+  kind,
+  setKind,
+}: {
+  kind: UploadKind;
+  setKind: (kind: UploadKind) => void;
+}) {
+  const { api, navigate, formatDate, revision } = useApp();
+  const data = usePagedList<Upload>(
+    offset => api.uploads({ offset, limit: 50, kind }),
+    [api, revision],
+  );
   const action = useAction();
   return (
     <ScrollView
       contentContainerStyle={s.content}
       refreshControl={
         <RefreshControl
-          refreshing={data.loading && Boolean(data.value)}
+          refreshing={data.loading && data.items.length > 0}
           onRefresh={data.refresh}
         />
       }
     >
       <Text style={s.title}>我的资料</Text>
       <Text style={s.subtitle}>收好文件与录音，需要时随时找回。</Text>
+      <View
+        style={{
+          flexDirection: 'row',
+          flexWrap: 'wrap',
+          gap: 8,
+          marginTop: 16,
+        }}
+      >
+        {(
+          [
+            ['all', '全部资料'],
+            ['file', '文件'],
+            ['audio', '录音'],
+          ] as const
+        ).map(([value, label]) => (
+          <Button
+            key={value}
+            variant={kind === value ? 'primary' : 'secondary'}
+            onPress={() => setKind(value)}
+          >
+            {label}
+          </Button>
+        ))}
+      </View>
       <ErrorNotice message={data.error} retry={data.refresh} />
       <ErrorNotice message={action.error} />
-      {data.loading && !data.value && <Loading label="正在查看已保存的资料…" />}
-      {data.value &&
-        (data.value.items.length ? (
+      {data.loading && !data.items.length && (
+        <Loading label="正在查看已保存的资料…" />
+      )}
+      {(data.items.length > 0 || (!data.loading && !data.error)) &&
+        (data.items.length ? (
           <View style={{ marginTop: 24 }}>
-            {data.value.items.map(item => (
+            {data.items.map(item => (
               <Card key={item.id}>
                 <Pill tone="neutral">
                   {item.mime_type.startsWith('audio/') ? '录音' : '文件'}
@@ -77,9 +138,9 @@ export function UploadsScreen() {
                           text: '删除资料',
                           style: 'destructive',
                           onPress: () =>
-                            action.run(async () => {
+                            action.run(async ({ isCurrent }) => {
                               await api.deleteUpload(item.id);
-                              data.refresh();
+                              if (isCurrent()) data.refresh();
                             }),
                         },
                       ],
@@ -94,12 +155,32 @@ export function UploadsScreen() {
         ) : (
           <Empty
             symbol="▤"
-            title="给想法一点材料"
-            body="在对话中选择文件或录制语音，上传成功的资料会出现在这里。"
-            action="去对话上传"
-            onAction={() => navigate({ name: 'chat' })}
+            title={kind === 'all' ? '给想法一点材料' : '还没有这类资料'}
+            body={
+              kind === 'all'
+                ? '在对话中选择文件或录制语音，上传成功的资料会出现在这里。'
+                : '可以切换到全部资料，查看已保存的其他内容。'
+            }
+            action={kind === 'all' ? '去对话上传' : '查看全部资料'}
+            onAction={() =>
+              kind === 'all' ? navigate({ name: 'chat' }) : setKind('all')
+            }
           />
         ))}
+      {data.hasMore && (
+        <Button
+          variant="secondary"
+          loading={data.loading}
+          onPress={data.loadMore}
+        >
+          加载更多资料
+        </Button>
+      )}
+      {data.items.length > 0 && (
+        <Text style={[s.small, { textAlign: 'center', marginTop: 12 }]}>
+          已加载 {data.items.length} 份资料
+        </Text>
+      )}
       <Text style={[s.small, { textAlign: 'center', marginTop: 20 }]}>
         这里展示的是服务端资料。尚未上传的本机缓存可在设置里清理。
       </Text>

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -10,8 +10,9 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { newRequestId } from '../api/client';
+import { errorMessage, newRequestId } from '../api/client';
 import { useAction, useApp, useResource } from '../app/context';
+import type { RetainedRouteScope } from '../app/navigation';
 import type { Message, Upload } from '../domain/types';
 import { LocalFile, platform } from '../platform/ports';
 import {
@@ -25,10 +26,58 @@ import {
 import { ResultText } from '../ui/ResultText';
 import { colors, styles as s } from '../ui/theme';
 import { AssistantOrb, Icon } from '../ui/visuals';
-import { ModeNotice } from './Main';
+import { ModeNotice, usePagedList } from './Main';
 
 type Attachment = { file: LocalFile; upload?: Upload; transcript?: string };
 type VoiceInput = { file: LocalFile; upload?: Upload; text?: string };
+type ChatSnapshot = {
+  id?: string;
+  draft: string;
+  attachment: Attachment | null;
+  messages: Message[];
+  messageVersion: number;
+  sending: boolean;
+  sendError: string | null;
+};
+
+/** Only the navigation entry owns this memory; no hidden screen stays mounted. */
+export function createChatEntryState(
+  conversationId?: string,
+  prompt?: string,
+  scope?: RetainedRouteScope,
+) {
+  let snapshot: ChatSnapshot = {
+    id: conversationId,
+    draft: prompt ?? '',
+    attachment: null,
+    messages: [],
+    messageVersion: 0,
+    sending: false,
+    sendError: null,
+  };
+  const listeners = new Set<() => void>();
+  return {
+    scope,
+    request: { key: '', id: newRequestId() },
+    getSnapshot: () => snapshot,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    update: (change: (previous: ChatSnapshot) => ChatSnapshot) => {
+      if (scope && !scope.isRetained()) return;
+      snapshot = change(snapshot);
+      listeners.forEach(listener => listener());
+    },
+  };
+}
+type ChatEntryState = ReturnType<typeof createChatEntryState>;
+
+function mergeMessages(history: Message[], current: Message[]) {
+  const known = new Set(history.map(message => message.id));
+  return [...history, ...current.filter(message => !known.has(message.id))];
+}
+
 const isTextFile = (file: LocalFile) =>
   /\.(txt|md|csv|tsv|json|log|docx|xlsx)$/i.test(file.name);
 const isAudioFile = (file: LocalFile) => file.mime_type.startsWith('audio/');
@@ -36,19 +85,36 @@ const isAudioFile = (file: LocalFile) => file.mime_type.startsWith('audio/');
 export function ChatScreen({
   conversationId,
   prompt,
+  onConversationCreated,
+  navigationActions,
+  entryState,
 }: {
   conversationId?: string;
   prompt?: string;
+  onConversationCreated?: (id: string) => void;
+  navigationActions?: React.ReactNode;
+  entryState?: ChatEntryState;
 }) {
   const { api, invalidate, formatDate } = useApp();
-  const { height: windowHeight } = useWindowDimensions();
+  const { height: windowHeight, fontScale } = useWindowDimensions();
   const [availableHeight, setAvailableHeight] = useState(windowHeight);
-  const [id, setId] = useState(conversationId);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [draft, setDraft] = useState(prompt ?? '');
+  const localState = useRef<{ api: typeof api; value: ChatEntryState } | null>(null);
+  if (!localState.current || localState.current.api !== api) {
+    localState.current = { api, value: createChatEntryState(conversationId, prompt) };
+  }
+  const state = entryState ?? localState.current.value;
+  const { id, messages, draft, attachment, sending, sendError } =
+    useSyncExternalStore(state.subscribe, state.getSnapshot, state.getSnapshot);
+  const setDraft = (next: React.SetStateAction<string>) => state.update(old => ({
+    ...old,
+    draft: typeof next === 'function' ? next(old.draft) : next,
+  }));
+  const setAttachment = (next: React.SetStateAction<Attachment | null>) => state.update(old => ({
+    ...old,
+    attachment: typeof next === 'function' ? next(old.attachment) : next,
+  }));
   const draftRef = useRef(draft);
   draftRef.current = draft;
-  const [attachment, setAttachment] = useState<Attachment | null>(null);
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [voice, setVoice] = useState<VoiceInput | null>(null);
@@ -56,15 +122,33 @@ export function ChatScreen({
   const voiceGeneration = useRef(0);
   const mounted = useRef(true);
   const voiceAbort = useRef<AbortController | null>(null);
+  const attachmentAbort = useRef<AbortController | null>(null);
   const recordingRef = useRef(false);
   const scroll = useRef<ScrollView>(null);
-  const request = useRef({ key: '', id: newRequestId() });
+  const composerScroll = useRef<ScrollView>(null);
+  const composerTop = useRef(0);
+  const inputFocused = useRef(false);
+  // Rotation and keyboard reflow can move a field that already has focus.
+  const revealFocusedInput = () => {
+    if (inputFocused.current) {
+      composerScroll.current?.scrollTo({
+        y: composerTop.current,
+        animated: false,
+      });
+    }
+  };
+  // A newly created thread already has its messages locally. Updating its route
+  // identity must not trigger a history request that could overwrite a later reply.
+  const initialConversationId = useRef(id).current;
   const history = useResource(
-    () =>
-      conversationId
-        ? api.messages(conversationId)
-        : Promise.resolve({ items: [] as Message[] }),
-    [api, conversationId],
+    async () => {
+      const version = state.getSnapshot().messageVersion;
+      const result = initialConversationId
+        ? await api.messages(initialConversationId)
+        : { items: [] as Message[] };
+      return { ...result, version };
+    },
+    [api, initialConversationId, state],
   );
   const capabilities = useResource(() => api.capabilities(), [api]);
   const sendAction = useAction();
@@ -77,15 +161,23 @@ export function ChatScreen({
     );
   useEffect(() => {
     if (history.value) {
-      setMessages(history.value.items);
+      const loaded = history.value;
+      state.update(old => ({
+        ...old,
+        // A history snapshot begun before a successful send cannot erase it.
+        messages: loaded.version === old.messageVersion
+          ? loaded.items
+          : mergeMessages(loaded.items, old.messages),
+      }));
     }
-  }, [history.value]);
+  }, [history.value, state]);
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
       voiceGeneration.current += 1;
       voiceAbort.current?.abort();
+      attachmentAbort.current?.abort();
       if (recordingRef.current) {
         platform.stopRecording().catch(() => {});
       }
@@ -181,49 +273,96 @@ export function ChatScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording, seconds]);
   const send = () =>
-    sendAction.run(async () => {
-      const text = draft.trim();
-      if (!text || recording || fileAction.busy || voice || !attachmentReady) {
+    sendAction.run(async ({ isCurrent }) => {
+      const before = state.getSnapshot();
+      const text = before.draft.trim();
+      const selected = before.attachment;
+      const ready = !selected || Boolean(selected.upload &&
+        (isTextFile(selected.file) || selected.transcript));
+      if (!text || before.sending || recording || fileAction.busy || voice || !ready) {
         return;
       }
       const uploadIds =
-        attachment?.upload &&
-        (isTextFile(attachment.file) || attachment.transcript)
-          ? [attachment.upload.id]
+        selected?.upload &&
+        (isTextFile(selected.file) || selected.transcript)
+          ? [selected.upload.id]
           : [];
-      const key = JSON.stringify({ text, id, uploadIds });
-      if (request.current.key !== key) {
-        request.current = { key, id: newRequestId() };
+      const key = JSON.stringify({ text, id: before.id, uploadIds });
+      if (state.request.key !== key) {
+        state.request = { key, id: newRequestId() };
       }
-      const result = await api.chat(text, id, request.current.id, uploadIds);
-      setMessages(old => [
-        ...old,
-        {
-          id: request.current.id,
+      const requestId = state.request.id;
+      // A retained entry can complete while its screen is unmounted. Popped,
+      // reset, or previous-owner entries can never publish their result.
+      const canApply = () => state.scope
+        ? state.scope.isRetained()
+        : isCurrent();
+      state.update(old => ({ ...old, sending: true, sendError: null }));
+      try {
+        const result = await api.chat(text, before.id, requestId, uploadIds);
+        if (!canApply()) return;
+        const userMessage: Message = result.user_message ?? {
+          id: requestId,
           conversation_id: result.conversation_id,
           role: 'user',
-          content:
-            text +
-            (uploadIds.length ? '\n\n附件：' + attachment?.file.name : ''),
+          content: text,
+          attachments:
+            selected?.upload && uploadIds.length
+              ? [{
+                  upload_id: selected.upload.id,
+                  name: selected.upload.name,
+                  mime_type: selected.upload.mime_type,
+                  size: selected.upload.size,
+                  unavailable: false,
+                }]
+              : [],
           created_at: new Date().toISOString(),
-        },
-        result.message,
-      ]);
-      setId(result.conversation_id);
-      setDraft('');
-      setAttachment(null);
-      request.current = { key: '', id: newRequestId() };
-      invalidate();
+        };
+        state.update(old => ({
+          ...old,
+          id: result.conversation_id,
+          messages: mergeMessages(old.messages, [userMessage, result.message]),
+          messageVersion: old.messageVersion + 1,
+          draft: old.draft === before.draft ? '' : old.draft,
+          attachment: old.attachment === before.attachment ? null : old.attachment,
+          sending: false,
+        }));
+        state.scope?.updateRoute(current => current.name === 'chat'
+          ? { ...current, conversationId: result.conversation_id, prompt: undefined }
+          : current);
+        if (isCurrent()) onConversationCreated?.(result.conversation_id);
+        state.request = { key: '', id: newRequestId() };
+        invalidate();
+      } catch (failure) {
+        if (canApply()) {
+          state.update(old => ({ ...old, sendError: errorMessage(failure) }));
+        }
+      } finally {
+        if (canApply()) state.update(old => ({ ...old, sending: false }));
+      }
     });
   const sendDisabled =
     !draft.trim() ||
-    sendAction.busy ||
+    sending ||
     recording ||
     Boolean(voice) ||
     fileAction.busy ||
     !attachmentReady;
   const supportMaxHeight = Math.max(64, Math.min(130, availableHeight * 0.28));
-  const inputMaxHeight = Math.max(51, Math.min(110, availableHeight * 0.22));
+  // Keep one scaled line visible even when the keyboard reduces the viewport.
+  // Font scaling stays native; only the input's layout allowance changes.
+  const inputMinHeight = Math.max(
+    chat.input.minHeight,
+    Math.ceil(
+      chat.input.lineHeight * fontScale +
+        chat.input.paddingTop +
+        chat.input.paddingBottom,
+    ),
+  );
+  const inputMaxHeight = Math.max(
+    inputMinHeight,
+    Math.min(110, availableHeight * 0.22),
+  );
   return (
     <View
       style={[s.fill, chat.chatRoot]}
@@ -285,6 +424,12 @@ export function ChatScreen({
               <Text selectable style={[s.body, { color: colors.ink }]}>
                 {message.content}
               </Text>
+              {(message.attachments ?? []).map(file => (
+                <Text key={file.upload_id} selectable style={s.small}>
+                  附件：{file.name}
+                  {file.unavailable ? '（已删除或不可用）' : ''}
+                </Text>
+              ))}
             </View>
           ) : (
             <View key={message.id} style={chat.assistantMessage}>
@@ -321,15 +466,24 @@ export function ChatScreen({
             </View>
           ),
         )}
-        {sendAction.busy && (
+        {sending && (
           <View style={chat.thinking}>
             <ActivityIndicator color={colors.accent} size="small" />
             <Text style={s.small}>正在整理思路…</Text>
           </View>
         )}
-        <ErrorNotice message={sendAction.error} />
+        <ErrorNotice message={sendError} />
       </ScrollView>
-      <View style={chat.composerArea}>
+      <ScrollView
+        ref={composerScroll}
+        testID="chat-composer-scroll"
+        style={chat.composerViewport}
+        contentContainerStyle={chat.composerArea}
+        keyboardShouldPersistTaps="handled"
+        nestedScrollEnabled
+        bounces={false}
+        onLayout={revealFocusedInput}
+      >
         {(fileAction.error || attachment || recording || voice) && (
           <ScrollView
             style={[chat.composerSupport, { maxHeight: supportMaxHeight }]}
@@ -450,13 +604,20 @@ export function ChatScreen({
                     variant="ghost"
                     loading={fileAction.busy}
                     onPress={() =>
-                      fileAction.run(async () => {
-                        const upload = await api.upload(attachment.file);
-                        setAttachment(old =>
-                          old && old.file.uri === attachment.file.uri
-                            ? { ...old, upload }
-                            : old,
-                        );
+                      fileAction.run(async ({ isCurrent }) => {
+                        const controller = new AbortController();
+                        attachmentAbort.current = controller;
+                        try {
+                          const upload = await api.upload(attachment.file, controller.signal);
+                          if (!isCurrent()) return;
+                          setAttachment(old =>
+                            old && old.file.uri === attachment.file.uri
+                              ? { ...old, upload }
+                              : old,
+                          );
+                        } finally {
+                          if (attachmentAbort.current === controller) attachmentAbort.current = null;
+                        }
                       })
                     }
                   >
@@ -467,15 +628,24 @@ export function ChatScreen({
                     variant="ghost"
                     loading={fileAction.busy}
                     onPress={() =>
-                      fileAction.run(async () => {
-                        const transcript = await api.transcribe(
-                          attachment.upload!.id,
-                        );
-                        setAttachment(old =>
-                          old ? { ...old, transcript: transcript.text } : old,
-                        );
-                        if (!draft.trim()) {
-                          setDraft('请整理这段录音的主要内容。');
+                      fileAction.run(async ({ isCurrent }) => {
+                        const controller = new AbortController();
+                        attachmentAbort.current = controller;
+                        try {
+                          const transcript = await api.transcribe(
+                            attachment.upload!.id, controller.signal,
+                          );
+                          if (!isCurrent()) return;
+                          setAttachment(old =>
+                            old && old.file.uri === attachment.file.uri
+                              ? { ...old, transcript: transcript.text }
+                              : old,
+                          );
+                          if (!draftRef.current.trim()) {
+                            setDraft('请整理这段录音的主要内容。');
+                          }
+                        } finally {
+                          if (attachmentAbort.current === controller) attachmentAbort.current = null;
                         }
                       })
                     }
@@ -518,10 +688,18 @@ export function ChatScreen({
             )}
           </ScrollView>
         )}
-        <View style={chat.composer}>
+        <View
+          style={chat.composer}
+          testID="chat-composer-content"
+          onLayout={event => {
+            composerTop.current = event.nativeEvent.layout.y;
+            revealFocusedInput();
+          }}
+        >
           <TextInput
             accessibilityLabel="给助手的消息"
             multiline
+            scrollEnabled
             maxLength={20000}
             placeholder={
               recording
@@ -531,24 +709,35 @@ export function ChatScreen({
             placeholderTextColor={colors.muted}
             value={draft}
             onChangeText={setDraft}
-            editable={!sendAction.busy}
-            style={[chat.input, { maxHeight: inputMaxHeight }]}
+            onFocus={() => {
+              inputFocused.current = true;
+              revealFocusedInput();
+            }}
+            onBlur={() => {
+              inputFocused.current = false;
+            }}
+            editable={!sending}
+            style={[
+              chat.input,
+              { minHeight: inputMinHeight, maxHeight: inputMaxHeight },
+            ]}
           />
           <View style={chat.composerActions}>
             <View style={chat.inputTools}>
+              {navigationActions}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="选择附件"
                 style={[
                   chat.toolButton,
-                  (fileAction.busy || recording || sendAction.busy) &&
+                  (fileAction.busy || recording || sending) &&
                     s.disabled,
                 ]}
-                disabled={fileAction.busy || recording || sendAction.busy}
+                disabled={fileAction.busy || recording || sending}
                 onPress={() =>
-                  fileAction.run(async () => {
+                  fileAction.run(async ({ isCurrent }) => {
                     const file = await platform.pickDocument();
-                    if (file) {
+                    if (file && isCurrent()) {
                       setAttachment({ file });
                     }
                   })
@@ -562,15 +751,19 @@ export function ChatScreen({
                 style={[
                   chat.toolButton,
                   recording && chat.recordingTool,
-                  (fileAction.busy || sendAction.busy) && s.disabled,
+                  (fileAction.busy || sending) && s.disabled,
                 ]}
-                disabled={fileAction.busy || sendAction.busy || Boolean(voice)}
+                disabled={fileAction.busy || sending || Boolean(voice)}
                 onPress={() =>
-                  fileAction.run(async () => {
+                  fileAction.run(async ({ isCurrent }) => {
                     if (recording) {
                       await finishRecording();
                     } else {
                       await platform.startRecording();
+                      if (!isCurrent()) {
+                        await platform.stopRecording().catch(() => {});
+                        return;
+                      }
                       recordingRef.current = true;
                       setSeconds(0);
                       setRecording(true);
@@ -584,9 +777,11 @@ export function ChatScreen({
                   <Icon name="mic" size={21} color={colors.secondary} />
                 )}
               </Pressable>
-              <Text numberOfLines={1} style={chat.memoryHint}>
-                记忆由你主动添加
-              </Text>
+              {!navigationActions && (
+                <Text numberOfLines={1} style={chat.memoryHint}>
+                  记忆由你主动添加
+                </Text>
+              )}
             </View>
             <Pressable
               accessibilityRole="button"
@@ -595,7 +790,7 @@ export function ChatScreen({
               onPress={send}
               style={[chat.sendButton, sendDisabled && chat.sendDisabled]}
             >
-              {sendAction.busy ? (
+              {sending ? (
                 <ActivityIndicator size="small" color="white" />
               ) : (
                 <Icon
@@ -607,19 +802,19 @@ export function ChatScreen({
             </Pressable>
           </View>
         </View>
-      </View>
+      </ScrollView>
     </View>
   );
 }
 
 export function ConversationsScreen() {
   const { api, navigate, formatDate } = useApp();
-  const data = useResource(() => api.conversations(), [api]);
+  const data = usePagedList(offset => api.conversations({ offset, limit: 50 }), [api]);
   return (
     <ScrollView
       refreshControl={
         <RefreshControl
-          refreshing={data.loading && Boolean(data.value)}
+          refreshing={data.loading && data.items.length > 0}
           onRefresh={data.refresh}
         />
       }
@@ -642,11 +837,10 @@ export function ConversationsScreen() {
         </Pressable>
       </View>
       <ErrorNotice message={data.error} retry={data.refresh} />
-      {data.loading && !data.value && <Loading />}
-      {data.value &&
-        (data.value.items.length ? (
+      {data.loading && !data.items.length && <Loading />}
+      {data.items.length ? (
           <View style={chat.conversationList}>
-            {data.value.items.map(item => (
+            {data.items.map(item => (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={'继续对话：' + item.title}
@@ -668,13 +862,14 @@ export function ConversationsScreen() {
               </Pressable>
             ))}
           </View>
-        ) : (
+        ) : !data.loading && !data.error ? (
           <Empty
             symbol="✧"
             title="还没有对话记录"
             body="聊过的内容会保存在你的账号里。"
           />
-        ))}
+        ) : null}
+      {data.hasMore && <Button variant="ghost" disabled={data.loading} onPress={data.loadMore}>{data.loading ? '正在加载…' : '加载更多对话'}</Button>}
     </ScrollView>
   );
 }
@@ -758,9 +953,9 @@ const chat = StyleSheet.create({
     paddingTop: 9,
     paddingBottom: 12,
     backgroundColor: colors.background,
-    flexShrink: 1,
-    minHeight: 0,
+    flexShrink: 0,
   },
+  composerViewport: { flexGrow: 0, flexShrink: 1, minHeight: 0 },
   composerSupport: {
     flexGrow: 0,
     flexShrink: 1,

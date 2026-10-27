@@ -54,7 +54,7 @@ export const photoIndex = {
   // No network request: terminate background access before changing an owner/server.
   suspend: () => native ? native.disable() : Promise.resolve(),
   status: (server: string, user: string) => port().status(server, user),
-  async enable(api: ApiClient, user: string) {
+  async enable(api: ApiClient, user: string, options?: { consentScope: string }) {
     const device = await port().status(api.baseUrl, user);
     if (!(await port().requestAccess()))
       throw new Error('未获得相册访问权限，索引保持关闭。');
@@ -62,7 +62,7 @@ export const photoIndex = {
     const consent = await api.request<{ enabled: boolean; epoch: number }>(
       path,
       'PUT',
-      { enabled: true, cloud_processing: true },
+      { enabled: true, cloud_processing: true, ...(options ? { consent_scope: options.consentScope } : {}) },
     );
     try {
       await port().enable(api.baseUrl, user, consent.epoch);

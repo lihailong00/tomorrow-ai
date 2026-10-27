@@ -6,7 +6,9 @@ import { Button, ErrorNotice, Field, Notice, Section } from '../../ui/components
 import { styles as s } from '../../ui/theme';
 import { AssistantOrb } from '../../ui/visuals';
 
-export function EmailAuthScreen({ expired, notice }: { expired: boolean; notice?: string }) {
+export function EmailAuthScreen({ expired, notice, onSwitchMethod }: {
+  expired: boolean; notice?: string; onSwitchMethod?: () => void;
+}) {
   const { api, preferences, signIn, navigate } = useApp();
   const instance = preferences.instance!;
   const [registering, setRegistering] = useState(false);
@@ -17,24 +19,31 @@ export function EmailAuthScreen({ expired, notice }: { expired: boolean; notice?
   const [invite, setInvite] = useState('');
   const [recovery, setRecovery] = useState(false);
   const mounted = useRef(true);
+  const pending = useRef(false);
   React.useEffect(() => () => { mounted.current = false; }, []);
   const action = useAction();
-  const submit = () => action.run(async () => {
-    const address = email.trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address) || address.length > 254) throw new Error('请输入有效的邮箱地址。');
-    validatePassword(password);
-    if (registering && password !== confirmation) throw new Error('两次输入的密码不一致。');
-    if (registering && instance.registration_policy === 'closed') throw new Error('当前服务器未开放注册，请联系管理员。');
-    if (registering && instance.registration_policy === 'invite_only' && !invite.trim()) throw new Error('请输入管理员提供的邀请码。');
-    const session = registering
-      ? await api.register(address, password, name, 'Asia/Shanghai', invite || undefined)
-      : await api.login(address, password);
-    if (mounted.current) await signIn(session);
-  });
+  const submit = () => {
+    if (pending.current) return Promise.resolve();
+    pending.current = true;
+    return action.run(async () => {
+      const address = email.trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address) || address.length > 254) throw new Error('请输入有效的邮箱地址。');
+      validatePassword(password);
+      if (registering && password !== confirmation) throw new Error('两次输入的密码不一致。');
+      if (registering && instance.registration_policy === 'closed') throw new Error('当前服务器未开放注册，请联系管理员。');
+      if (registering && instance.registration_policy === 'invite_only' && !invite.trim()) throw new Error('请输入管理员提供的邀请码。');
+      const session = registering
+        ? await api.register(address, password, name, 'Asia/Shanghai', invite || undefined)
+        : await api.login(address, password);
+      if (mounted.current) await signIn(session);
+    }).finally(() => { pending.current = false; });
+  };
   return <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={s.content}>
     <View style={{ alignItems: 'center', paddingVertical: 18 }}><AssistantOrb size={62} /></View>
     <Text style={[s.title, { textAlign: 'center' }]}>{registering ? '创建你的账号' : '邮箱密码登录'}</Text>
     <Text style={[s.subtitle, { textAlign: 'center' }]}>{instance.name}</Text>
+    {onSwitchMethod && <Button variant="ghost" disabled={action.busy}
+      onPress={() => { if (!pending.current) onSwitchMethod(); }}>使用手机号密码登录</Button>}
     {expired && <Notice>登录已失效，请重新登录。</Notice>}
     {notice ? <Notice>{notice}</Notice> : null}
     {registering && <Field label="怎么称呼你" value={name} onChangeText={setName} editable={!action.busy} maxLength={80} />}

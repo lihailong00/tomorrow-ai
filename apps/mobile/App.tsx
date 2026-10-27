@@ -7,6 +7,7 @@ import React, {
 } from 'react';
 import {
   BackHandler,
+  Keyboard,
   KeyboardAvoidingView,
   Pressable,
   StatusBar,
@@ -16,9 +17,10 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { ApiClient, normalizeServerUrl } from './src/api/client';
-import { inspectInstance } from './src/api/instance';
+import { createInstanceIdentityGuard, inspectInstance } from './src/api/instance';
 import { connectionFromLink } from './src/domain/instance';
-import { AppProvider, MainTab, Route } from './src/app/context';
+import { AppProvider, MainTab } from './src/app/context';
+import { useRouteStack } from './src/app/navigation';
 import { useForegroundNotifications } from './src/app/notifications';
 import type { AuthSession } from './src/domain/types';
 import { readableDate } from './src/domain/types';
@@ -30,7 +32,7 @@ import {
   MemoriesScreen,
   TasksScreen,
 } from './src/screens/Main';
-import { ChatScreen, ConversationsScreen } from './src/screens/Chat';
+import { ChatScreen, ConversationsScreen, createChatEntryState } from './src/screens/Chat';
 import { UploadsScreen } from './src/screens/Uploads';
 import { IntegrationsScreen } from './src/features/integrations/IntegrationsScreen';
 import { AiHistoryScreen } from './src/features/ai-history/AiHistoryScreen';
@@ -59,12 +61,41 @@ function Application() {
   const [expired, setExpired] = useState(false);
   const [authNotice, setAuthNotice] = useState('');
   const [tab, setTab] = useState<MainTab>('today');
-  const [routes, setRoutes] = useState<Route[]>([{ name: 'main' }]);
+  const [shellHeight, setShellHeight] = useState<number>();
+  const [keyboardVisible, setKeyboardVisible] = useState(() =>
+    Keyboard.isVisible(),
+  );
+  useEffect(() => {
+    const shown = Keyboard.addListener('keyboardDidShow', () =>
+      setKeyboardVisible(true),
+    );
+    const hidden = Keyboard.addListener('keyboardDidHide', () =>
+      setKeyboardVisible(false),
+    );
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
+  const navigationOwner = useMemo(() => ({
+    serverUrl: preferences.serverUrl,
+    instanceId: preferences.instance?.id,
+    token: session?.token,
+    userId: session?.user.id,
+    tab,
+  }), [preferences.serverUrl, preferences.instance?.id, session?.token, session?.user.id, tab]);
+  const { entry, depth, navigate, back, getEntryState, resetRoutes } = useRouteStack(navigationOwner);
   const [revision, setRevision] = useState(0);
   const [pendingInputs, setPendingInputs] = useState(0);
   const inputCleanup = useRef<Promise<void>>(Promise.resolve());
   const activeConnection = useRef(defaultServerUrl);
-  const route = routes[routes.length - 1];
+  const route = entry.route;
+  // Measure the whole shell so moving the header cannot change this predicate.
+  const compactChatHeader =
+    route.name === 'chat' &&
+    keyboardVisible &&
+    shellHeight !== undefined &&
+    shellHeight < 220;
   const clearInputs = useCallback(() => {
     const next = inputCleanup.current.catch(() => {}).then(() => appInputs.clear());
     inputCleanup.current = next;
@@ -82,7 +113,7 @@ function Application() {
     update();
     const unsubscribe = platform.onForeground(update);
     return () => { active = false; unsubscribe(); };
-  }, [session?.user.id, route.name, revision]);
+  }, [session, route.name, revision]);
 
   useEffect(() => {
     let alive = true;
@@ -158,38 +189,30 @@ function Application() {
     activeToken.current = undefined;
     setSession(null);
     setExpired(true);
-    setRoutes([{ name: 'main' }]);
+    resetRoutes([{ name: 'main' }]);
     platform.removeSession().catch(() => {});
-  }, [clearInputs]);
+  }, [clearInputs, resetRoutes]);
+  const identityGuard = useMemo(() => createInstanceIdentityGuard(preferences.serverUrl, {
+    allowInsecureLan: preferences.allowInsecureLan,
+    expectedId: preferences.instance?.id,
+  }), [preferences.serverUrl, preferences.instance?.id, preferences.allowInsecureLan]);
   const api = useMemo(() => {
     const token = session?.token;
-    let verified: Promise<void> | undefined;
     return new ApiClient(preferences.connectionError ? '' : preferences.serverUrl, token, () => {
       // A delayed response from the previous account must not log out the new one.
       if (activeToken.current === token) {
         unauthorized();
       }
-    }, fetch, () => {
-      if (!verified) {
-        verified = inspectInstance(preferences.serverUrl, {
-          allowInsecureLan: preferences.allowInsecureLan,
-          expectedId: preferences.instance?.id,
-        }).then(() => {}).catch(error => { verified = undefined; throw error; });
-      }
-      return verified;
-    });
-  }, [preferences.serverUrl, preferences.instance?.id, preferences.connectionError,
-      preferences.allowInsecureLan, session?.token, unauthorized]);
+    }, fetch, identityGuard.verify);
+  }, [preferences.serverUrl, preferences.connectionError, session?.token, unauthorized, identityGuard]);
+  useEffect(() => {
+    // Subscribe before foreground polling: a check begun before returning to
+    // the app must not release queued credentials after the server changes.
+    const unsubscribe = platform.onForeground(identityGuard.invalidate);
+    return () => { unsubscribe(); identityGuard.dispose(); };
+  }, [identityGuard]);
   useEffect(() => () => api.dispose(), [api]);
   useForegroundNotifications(api, session?.user.id);
-  const navigate = useCallback(
-    (next: Route) => setRoutes(old => [...old, next]),
-    [],
-  );
-  const back = useCallback(
-    () => setRoutes(old => (old.length > 1 ? old.slice(0, -1) : old)),
-    [],
-  );
   useEffect(() => {
     if (booting) return;
     let alive = true;
@@ -199,16 +222,16 @@ function Application() {
         if (!alive) return;
         // A scanned link opens a review form; it never switches or signs in.
         setPreferences(current => ({ ...current, pendingConnection }));
-        setRoutes([{ name: 'main' }, { name: 'settings' }]);
+        resetRoutes([{ name: 'main' }, { name: 'settings' }]);
       } catch { /* Ignore unrelated or malformed external intents. */ }
     };
     void platform.initialConnectionLink().then(link => { if (link) acceptLink(link); }).catch(() => {});
     const unsubscribe = platform.onConnectionLink(acceptLink);
     return () => { alive = false; unsubscribe(); };
-  }, [booting]);
+  }, [booting, resetRoutes]);
   useEffect(() => {
     const listener = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (routes.length > 1) {
+      if (depth > 1) {
         back();
         return true;
       }
@@ -219,7 +242,7 @@ function Application() {
       return false;
     });
     return () => listener.remove();
-  }, [routes.length, tab, session, back]);
+  }, [depth, tab, session, back]);
   const savePreferences = async (next: Preferences) => {
     const changed = next.serverUrl !== preferences.serverUrl || next.instance?.id !== preferences.instance?.id;
     if (changed) {
@@ -231,9 +254,10 @@ function Application() {
       activeToken.current = undefined;
       await platform.removeSession();
       setSession(null);
-      setRoutes([{ name: 'main' }]);
+      resetRoutes([{ name: 'main' }]);
     }
-    const { pendingConnection: _pending, ...saved } = next;
+    const saved = { ...next };
+    delete saved.pendingConnection;
     await platform.savePreferences(saved);
     activeConnection.current = next.serverUrl;
     setPreferences(next);
@@ -265,7 +289,7 @@ function Application() {
     setExpired(false);
     setAuthNotice('');
     setTab('today');
-    setRoutes([{ name: 'main' }]);
+    resetRoutes([{ name: 'main' }]);
   };
   const signOut = async () => {
     await photoIndex.suspend();
@@ -282,7 +306,7 @@ function Application() {
     activeToken.current = undefined;
     setSession(null);
     setExpired(false);
-    setRoutes([{ name: 'main' }]);
+    resetRoutes([{ name: 'main' }]);
     setTab('today');
   };
   if (booting) {
@@ -309,9 +333,21 @@ function Application() {
       case 'chat':
         page = (
           <ChatScreen
-            key={String(routes.length) + (route.conversationId ?? 'new')}
             conversationId={route.conversationId}
             prompt={route.prompt}
+            entryState={getEntryState(scope => createChatEntryState(route.conversationId, route.prompt, scope))}
+            navigationActions={
+              compactChatHeader ? (
+                <>
+                  <IconButton label="返回" icon="back" onPress={back} />
+                  <IconButton
+                    label="历史对话"
+                    icon="history"
+                    onPress={() => navigate({ name: 'conversations' })}
+                  />
+                </>
+              ) : undefined
+            }
           />
         );
         break;
@@ -404,12 +440,20 @@ function Application() {
     >
       <View style={s.screen}>
         <AmbientBackground />
-        <SafeAreaView style={shell.safeArea} edges={['top', 'bottom']}>
+        <SafeAreaView
+          style={shell.safeArea}
+          edges={['top', 'bottom']}
+          testID="application-shell"
+          onLayout={event => setShellHeight(event.nativeEvent.layout.height)}
+        >
           <StatusBar
             barStyle="dark-content"
             backgroundColor={colors.background}
           />
-          <View style={s.header}>
+          <View
+            testID="application-header"
+            style={[s.header, compactChatHeader && shell.hiddenHeader]}
+          >
             {main ? (
               <View style={s.row}>
                 <AssistantOrb size={34} />
@@ -451,6 +495,7 @@ function Application() {
             </Pressable>
           )}
           <KeyboardAvoidingView
+            key={entry.key}
             style={s.fill}
             behavior={platform.keyboardBehavior}
           >
@@ -516,6 +561,7 @@ function Application() {
   );
 }
 const shell = StyleSheet.create({
+  hiddenHeader: { display: 'none' },
   safeArea: { flex: 1, backgroundColor: 'transparent' },
   brand: { marginLeft: 5 },
   chatTitle: { color: colors.ink, fontSize: 17, fontWeight: '500' },

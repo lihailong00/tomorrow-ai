@@ -34,6 +34,7 @@ import {
 import { ResultText } from '../ui/ResultText';
 import { colors, styles as s } from '../ui/theme';
 import { Icon } from '../ui/visuals';
+import { usePagedList } from './Main';
 
 export function TaskDetailScreen({ id }: { id: string }) {
   const { api, revision, invalidate, navigate, formatDate } = useApp();
@@ -55,8 +56,9 @@ export function TaskDetailScreen({ id }: { id: string }) {
         text: '停止任务',
         style: 'destructive',
         onPress: () =>
-          action.run(async () => {
+          action.run(async ({ isCurrent }) => {
             await api.cancelTask(id);
+            if (!isCurrent()) return;
             invalidate();
           }),
       },
@@ -148,8 +150,9 @@ export function TaskDetailScreen({ id }: { id: string }) {
                       {
                         text: '确认继续',
                         onPress: () =>
-                          action.run(async () => {
+                          action.run(async ({ isCurrent }) => {
                             await api.approveTask(id);
+                            if (!isCurrent()) return;
                             invalidate();
                           }),
                       },
@@ -374,7 +377,7 @@ export function NewTaskScreen() {
         loading={action.busy}
         disabled={!instruction.trim()}
         onPress={() =>
-          action.run(async () => {
+          action.run(async ({ isCurrent }) => {
             const text = instruction.trim();
             if (!text) {
               return;
@@ -394,6 +397,7 @@ export function NewTaskScreen() {
               approval,
               request.current.id,
             );
+            if (!isCurrent()) return;
             invalidate();
             navigate({ name: 'task', id: task.id });
           })
@@ -410,6 +414,7 @@ export function MemoryEditor({ memory }: { memory?: Memory }) {
   const [title, setTitle] = useState(memory?.title ?? '');
   const [content, setContent] = useState(memory?.content ?? '');
   const [kind, setKind] = useState<MemoryKind>(memory?.kind ?? 'preference');
+  const creationRequestId = useRef(newRequestId()).current;
   const action = useAction();
   return (
     <ScrollView
@@ -447,7 +452,7 @@ export function MemoryEditor({ memory }: { memory?: Memory }) {
         value={title}
         onChangeText={setTitle}
         placeholder="例如：我的工作节奏"
-        maxLength={200}
+        maxLength={120}
       />
       <Field
         label="希望助手记住什么"
@@ -470,18 +475,22 @@ export function MemoryEditor({ memory }: { memory?: Memory }) {
           loading={action.busy}
           disabled={!content.trim()}
           onPress={() =>
-            action.run(async () => {
+            action.run(async ({ isCurrent }) => {
               await api.saveMemory(
                 {
                   title: title.trim() || undefined,
                   content: content.trim(),
                   kind,
                   ...(!memory
-                    ? { source: '用户主动添加' }
+                    ? {
+                        source: '用户主动添加',
+                        client_request_id: creationRequestId,
+                      }
                     : { version: memory.version }),
                 },
                 memory?.id,
               );
+              if (!isCurrent()) return;
               invalidate();
               back();
             })
@@ -505,8 +514,9 @@ export function MemoryEditor({ memory }: { memory?: Memory }) {
                     text: '删除记忆',
                     style: 'destructive',
                     onPress: () =>
-                      action.run(async () => {
+                      action.run(async ({ isCurrent }) => {
                         await api.deleteMemory(memory.id);
+                        if (!isCurrent()) return;
                         invalidate();
                         back();
                       }),
@@ -535,6 +545,7 @@ export function ScheduleEditor({ schedule }: { schedule?: Schedule }) {
     schedule?.timezone ?? user?.timezone ?? 'Asia/Shanghai',
   );
   const [enabled, setEnabled] = useState(schedule?.enabled ?? true);
+  const creationRequestId = useRef(newRequestId()).current;
   const action = useAction();
   return (
     <ScrollView
@@ -637,7 +648,7 @@ export function ScheduleEditor({ schedule }: { schedule?: Schedule }) {
           loading={action.busy}
           disabled={!title.trim() || !instruction.trim()}
           onPress={() =>
-            action.run(async () => {
+            action.run(async ({ isCurrent }) => {
               if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
                 throw new Error('时间格式应为 08:00 或 18:30。');
               }
@@ -656,9 +667,11 @@ export function ScheduleEditor({ schedule }: { schedule?: Schedule }) {
                   time,
                   timezone,
                   enabled,
+                  ...(!schedule ? { client_request_id: creationRequestId } : {}),
                 },
                 schedule?.id,
               );
+              if (!isCurrent()) return;
               invalidate();
               back();
             })
@@ -682,8 +695,9 @@ export function ScheduleEditor({ schedule }: { schedule?: Schedule }) {
                     text: '删除计划',
                     style: 'destructive',
                     onPress: () =>
-                      action.run(async () => {
+                      action.run(async ({ isCurrent }) => {
                         await api.deleteSchedule(schedule.id);
+                        if (!isCurrent()) return;
                         invalidate();
                         back();
                       }),
@@ -702,14 +716,14 @@ export function ScheduleEditor({ schedule }: { schedule?: Schedule }) {
 
 export function NotificationsScreen() {
   const { api, navigate, invalidate, formatDate } = useApp();
-  const data = useResource(() => api.notifications(), [api]);
+  const data = usePagedList(offset => api.notifications({ offset, limit: 50 }), [api]);
   const action = useAction();
   return (
     <ScrollView
       contentContainerStyle={s.content}
       refreshControl={
         <RefreshControl
-          refreshing={data.loading && Boolean(data.value)}
+          refreshing={data.loading && data.items.length > 0}
           onRefresh={data.refresh}
         />
       }
@@ -718,16 +732,16 @@ export function NotificationsScreen() {
       <Text style={s.subtitle}>任务进展和待确认事项。</Text>
       <ErrorNotice message={data.error} retry={data.refresh} />
       <ErrorNotice message={action.error} />
-      {data.loading && !data.value && <Loading />}
-      {data.value &&
-        (data.value.items.length ? (
+      {data.loading && !data.items.length && <Loading />}
+      {data.items.length ? (
           <View style={{ marginTop: 24 }}>
-            {data.value.items.map(item => (
+            {data.items.map(item => (
               <Pressable
                 key={item.id}
                 onPress={() =>
-                  action.run(async () => {
+                  action.run(async ({ isCurrent }) => {
                     await api.readNotification(item.id);
+                    if (!isCurrent()) return;
                     invalidate();
                     data.refresh();
                     if (item.task_id) {
@@ -772,20 +786,21 @@ export function NotificationsScreen() {
               </Pressable>
             ))}
           </View>
-        ) : (
+        ) : !data.loading && !data.error ? (
           <Empty
             symbol="◷"
             title="此刻，没有需要打扰你的事"
             body="有新的进展时，回来就能看到。"
           />
-        ))}
+        ) : null}
+      {data.hasMore && <Button variant="ghost" disabled={data.loading} onPress={data.loadMore}>{data.loading ? '正在加载…' : '加载更多消息'}</Button>}
     </ScrollView>
   );
 }
 
 export function ArtifactsScreen() {
   const { api, navigate, formatDate } = useApp();
-  const data = useResource(() => api.artifacts(), [api]);
+  const data = usePagedList(offset => api.artifacts({ offset, limit: 50 }), [api]);
   const [expanded, setExpanded] = useState<string | null>(null);
   const action = useAction();
   return (
@@ -793,7 +808,7 @@ export function ArtifactsScreen() {
       contentContainerStyle={s.content}
       refreshControl={
         <RefreshControl
-          refreshing={data.loading && Boolean(data.value)}
+          refreshing={data.loading && data.items.length > 0}
           onRefresh={data.refresh}
         />
       }
@@ -802,11 +817,10 @@ export function ArtifactsScreen() {
       <Text style={s.subtitle}>整理好的文稿，随时查看和分享。</Text>
       <ErrorNotice message={data.error} retry={data.refresh} />
       <ErrorNotice message={action.error} />
-      {data.loading && !data.value && <Loading />}
-      {data.value &&
-        (data.value.items.length ? (
+      {data.loading && !data.items.length && <Loading />}
+      {data.items.length ? (
           <View style={{ marginTop: 24 }}>
-            {data.value.items.map(item => (
+            {data.items.map(item => (
               <Card key={item.id}>
                 <Pressable
                   onPress={() =>
@@ -858,7 +872,7 @@ export function ArtifactsScreen() {
               </Card>
             ))}
           </View>
-        ) : (
+        ) : !data.loading && !data.error ? (
           <Empty
             symbol="▤"
             title="这里会收好每一份成果"
@@ -866,7 +880,8 @@ export function ArtifactsScreen() {
             action="交代一个任务"
             onAction={() => navigate({ name: 'newTask' })}
           />
-        ))}
+        ) : null}
+      {data.hasMore && <Button variant="ghost" disabled={data.loading} onPress={data.loadMore}>{data.loading ? '正在加载…' : '加载更多成果'}</Button>}
     </ScrollView>
   );
 }

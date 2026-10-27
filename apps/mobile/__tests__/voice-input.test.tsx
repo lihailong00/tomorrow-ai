@@ -3,7 +3,6 @@ import { Text, TextInput } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { ChatScreen } from '../src/screens/Chat';
 import { AppProvider, AppContextValue } from '../src/app/context';
-import { platform } from '../src/platform/ports';
 import { Button } from '../src/ui/components';
 
 jest.mock('../src/platform/ports', () => ({

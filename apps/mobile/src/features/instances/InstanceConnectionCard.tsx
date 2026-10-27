@@ -67,6 +67,7 @@ export function InstanceConnectionCard() {
       <Text style={s.small}>对话：{manifest.dataflow.conversation}</Text>
       <Text style={s.small}>语音：{manifest.dataflow.voice}</Text>
       <Text style={s.small}>图片：{manifest.dataflow.images}</Text>
+      <Text style={s.small}>文字向量：{manifest.dataflow.embeddings ?? '服务器未提供处理去向'}</Text>
       <Text style={s.small}>文件：{manifest.dataflow.files}</Text>
       <Text style={[s.small, s.topGap]}>自建服务不会自动转到官方服务器。使用外部模型时，相关内容会发送给配置的服务商。</Text>
     </View>}

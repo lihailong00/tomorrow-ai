@@ -70,6 +70,14 @@ export type Message = {
   content: string;
   created_at: string;
   model_mode?: string | null;
+  attachments?: MessageAttachment[];
+};
+export type MessageAttachment = {
+  upload_id: string;
+  name: string;
+  mime_type: string;
+  size: number;
+  unavailable?: boolean;
 };
 export type Conversation = { id: string; title: string; updated_at: string };
 export type Artifact = {
@@ -115,6 +123,8 @@ export type Today = {
     tasks_completed: number;
     active_routines: number;
     memory_count: number;
+    active_tasks?: number;
+    unread_notifications?: number;
   };
   runtime: RuntimeInfo;
 };
@@ -122,6 +132,7 @@ export type CapabilityResponse = { items: Capability[]; runtime: RuntimeInfo };
 export type ChatResponse = {
   conversation_id: string;
   message: Message;
+  user_message?: Message | null;
   agent_run_id?: string;
 };
 export type Upload = {
