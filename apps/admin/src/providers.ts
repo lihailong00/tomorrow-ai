@@ -118,6 +118,17 @@ export function endpoint(base: string): string {
     return url.origin + url.pathname.replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
   } catch { return base.replace(/\/+$/, ""); }
 }
+// Match the server fallback policy: a compatible protocol alone does not make
+// a custom speech endpoint safe or usable for the other services.
+export function officialQwenBase(base: string): boolean {
+  try {
+    const url = new URL(base.trim());
+    const official = ["dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"].includes(url.hostname) ||
+      url.hostname.endsWith(".cn-beijing.maas.aliyuncs.com") || url.hostname.endsWith(".ap-southeast-1.maas.aliyuncs.com");
+    return official && url.protocol === "https:" && !url.username && !url.password && !url.href.includes("?") && !url.href.includes("#") &&
+      url.pathname.replace(/\/+$/, "") === "/compatible-mode/v1";
+  } catch { return false; }
+}
 export function currentService(settings: Setting[], edits: Edits, service: Service) {
   const keys = binding(settings, edits, service);
   let base = value(settings, edits, keys.base).trim();
@@ -127,8 +138,10 @@ export function currentService(settings: Setting[], edits: Edits, service: Servi
     name ||= "deepseek-flash";
   }
   const inherited = (service === "vision" || service === "embedding") && !base;
-  const inheritedBase = value(settings, edits, "ASR_PROTOCOL") === "qwen_asr" ?
-    value(settings, edits, "ASR_BASE_URL") : "";
+  const asrBase = value(settings, edits, "ASR_BASE_URL").trim();
+  const inheritedBase = value(settings, edits, "ASR_PROTOCOL") === "qwen_asr" && officialQwenBase(asrBase) ? asrBase : "";
+  const canInherit = Boolean(inheritedBase) && hasKey(settings, edits, "ASR_API_KEY");
+  const inheritanceReady = Boolean(inheritedBase) && (canInherit || hasKey(settings, edits, keys.key));
   const candidates = presets.filter(preset => preset.services.includes(service));
   const preset = candidates.find(preset => {
     if (preset.protocol && preset.protocol !== value(settings, edits, keys.protocol!)) return false;
@@ -142,13 +155,16 @@ export function currentService(settings: Setting[], edits: Edits, service: Servi
     } catch { return false; }
   });
   return {
-    keys, base, name, inherited, inheritedBase, preset,
+    keys, base, name, inherited, inheritedBase, canInherit, inheritanceReady, preset,
     id: inherited ? "inherit" : (!base && service === "speech") ? "disabled" : preset?.id ?? "custom",
     hasKey: hasKey(settings, edits, keys.key),
   };
 }
 export function selectionEdits(settings: Setting[], edits: Edits, service: Service, id: string, regionBase?: string): Edits {
   const current = currentService(settings, edits, service);
+  if (id === "inherit" && !current.canInherit) {
+    throw new Error("沿用仅支持已配置 API Key 的官方百炼语音服务；当前语音服务请为图片理解和向量检索单独配置。");
+  }
   if (!regionBase && current.id === id) return {};
   const preset = presets.find(item => item.id === id && item.services.includes(service));
   const keys = service === "model" ?

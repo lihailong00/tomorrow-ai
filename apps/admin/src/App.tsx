@@ -23,6 +23,7 @@ import {
   type ProviderProbe,
   type Status,
   type User,
+  type UserPage,
 } from "./api";
 import { Icon, Orb } from "./icons";
 import { ProviderPanel } from "./ProviderPanel";
@@ -171,20 +172,25 @@ function Modal({
   title,
   children,
   onClose,
+  busy = false,
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
+  busy?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     ref.current?.showModal();
   }, []);
   return (
-    <dialog ref={ref} className="dialog" onCancel={onClose}>
+    <dialog ref={ref} className="dialog" onCancel={(event) => {
+      event.preventDefault();
+      if (!busy) onClose();
+    }}>
       <div className="dialog-head">
         <h2>{title}</h2>
-        <button className="icon-button" aria-label="关闭" onClick={onClose}>
+        <button className="icon-button" aria-label="关闭" disabled={busy} onClick={onClose}>
           <Icon name="close" />
         </button>
       </div>
@@ -201,9 +207,13 @@ export function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
   const [users, setUsers] = useState<User[]>([]);
+  const [userPage, setUserPage] = useState({ offset: 0, limit: 100, total: 0, has_more: false });
+  const usersOffset = useRef(0);
+  const usersRequest = useRef(0);
   const [backups, setBackups] = useState<Backups | null>(null);
   const [page, setPage] = useState<Page>("overview");
   const [busy, setBusy] = useState(false);
+  const operationPending = useRef(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [menu, setMenu] = useState(false);
@@ -220,6 +230,8 @@ export function App() {
       setConfig(null);
       setStatus(null);
       setUsers([]);
+      usersOffset.current = 0;
+      setUserPage({ offset: 0, limit: 100, total: 0, has_more: false });
       setBackups(null);
       setEdits({});
       setCreateUser(false);
@@ -238,13 +250,14 @@ export function App() {
   }, []);
 
   const reload = useCallback(
-    async (current: Session) => {
+    async (current: Session, offset = usersOffset.current) => {
+      const requestId = ++usersRequest.current;
       const result = await Promise.allSettled([
         request<Status>("/status"),
         current.user.role === "owner"
           ? request<Config>("/config")
           : Promise.resolve(null),
-        request<{ items: User[] }>("/users"),
+        request<UserPage>(`/users?offset=${offset}&limit=100`),
         current.user.role === "owner"
           ? request<Backups>("/backups")
           : Promise.resolve(null),
@@ -255,9 +268,13 @@ export function App() {
       else handleError(s.reason);
       if (c.status === "fulfilled") setConfig(c.value);
       else handleError(c.reason);
-      if (u.status === "fulfilled") setUsers(u.value.items);
-      else if (u.reason instanceof ApiError && u.reason.status === 401)
-        handleError(u.reason);
+      if (requestId === usersRequest.current) {
+        if (u.status === "fulfilled") {
+          setUsers(u.value.items);
+          usersOffset.current = u.value.offset;
+          setUserPage(u.value);
+        } else handleError(u.reason);
+      }
       if (b.status === "fulfilled") setBackups(b.value);
       else
         setBackups({
@@ -319,6 +336,8 @@ export function App() {
   }, [session, backups, handleError]);
 
   async function operation(action: () => Promise<void>) {
+    if (operationPending.current) return false;
+    operationPending.current = true;
     setBusy(true);
     setError("");
     try {
@@ -328,10 +347,12 @@ export function App() {
       handleError(err);
       return false;
     } finally {
+      operationPending.current = false;
       setBusy(false);
     }
   }
   function authenticated(current: Session) {
+    usersOffset.current = 0;
     activeSession.current = current;
     setSession(current);
     setBoot("ready");
@@ -407,6 +428,8 @@ export function App() {
       setConfig(null);
       setStatus(null);
       setUsers([]);
+      usersOffset.current = 0;
+      setUserPage({ offset: 0, limit: 100, total: 0, has_more: false });
       setBackups(null);
       setEdits({});
       setBoot("login");
@@ -709,8 +732,8 @@ export function App() {
                   </div>
                   <Button
                     variant="secondary"
-                    disabled={session?.user.role !== "owner"}
-                    onClick={() => setCreateUser(true)}
+                    disabled={busy || session?.user.role !== "owner"}
+                    onClick={() => { if (!operationPending.current) setCreateUser(true); }}
                   >
                     <Icon name="plus" size={16} />
                     创建账号
@@ -796,6 +819,15 @@ export function App() {
                     创建第一个账号后，它会出现在这里。
                   </Empty>
                 )}
+                <nav className="user-pagination" aria-label="用户分页">
+                  <span className="muted">共 {userPage.total} 位用户{users.length > 0 ? ` · 第 ${userPage.offset + 1}–${userPage.offset + users.length} 位` : ""}</span>
+                  <div className="row-actions">
+                    <Button variant="secondary" disabled={busy || userPage.offset === 0}
+                      onClick={() => void operation(() => reload(session!, Math.max(0, userPage.offset - userPage.limit)))}>上一页</Button>
+                    <Button variant="secondary" disabled={busy || !userPage.has_more}
+                      onClick={() => void operation(() => reload(session!, userPage.offset + userPage.limit))}>下一页</Button>
+                  </div>
+                </nav>
               </section>
               <div className="footnote">
                 <Icon name="shield" size={15} />
@@ -914,7 +946,7 @@ export function App() {
         <UserForm
           title="创建账号"
           error={error}
-          onClose={() => setCreateUser(false)}
+          onClose={() => { if (!operationPending.current) setCreateUser(false); }}
           onSubmit={(values) =>
             operation(async () => {
               await mutate("/users", values);
@@ -931,7 +963,7 @@ export function App() {
           title={`重置 ${resetUser.name || resetUser.email} 的密码`}
           error={error}
           reset
-          onClose={() => setResetUser(null)}
+          onClose={() => { if (!operationPending.current) setResetUser(null); }}
           onSubmit={(values) =>
             operation(async () => {
               await mutate(
@@ -1581,11 +1613,14 @@ function DataFlow({ instance }: { instance?: Status["instance"] }) {
           云端图片理解 <strong>{destination("images")}</strong>
         </span>
         <span>
+          向量检索 <strong>{destination("embeddings")}</strong>
+        </span>
+        <span>
           附件存储 <strong>{destination("files")}</strong>
         </span>
       </div>
       <p>
-        自建服务不经过官方业务服务器。使用外部模型或语音服务时，相关内容会发送给你选择的服务商。云端图片理解由单独的图片模型配置决定。
+        自建服务不经过官方业务服务器。使用外部模型或语音服务时，相关内容会发送给你选择的服务商。云端图片理解与向量检索分别由对应模型配置决定。
       </p>
     </section>
   );
@@ -1957,7 +1992,7 @@ function UserForm({
   }) => Promise<unknown>;
 }) {
   return (
-    <Modal title={title} onClose={onClose}>
+    <Modal title={title} onClose={onClose} busy={busy}>
       {error && (
         <div className="alert alert-error" role="alert">
           {error}
@@ -1966,6 +2001,7 @@ function UserForm({
       <form
         onSubmit={(event) => {
           event.preventDefault();
+          if (busy) return;
           const form = new FormData(event.currentTarget);
           void onSubmit({
             email: String(form.get("email") ?? ""),
@@ -1979,15 +2015,15 @@ function UserForm({
           <>
             <label className="field-label">
               名称
-              <input name="name" required maxLength={80} autoComplete="off" />
+              <input name="name" required maxLength={80} autoComplete="off" disabled={busy} />
             </label>
             <label className="field-label">
               邮箱
-              <input name="email" type="email" required autoComplete="off" />
+              <input name="email" type="email" required autoComplete="off" disabled={busy} />
             </label>
             <label className="field-label">
               角色
-              <select name="role" defaultValue="user">
+              <select name="role" defaultValue="user" disabled={busy}>
                 <option value="user">普通用户</option>
                 <option value="admin">管理员</option>
               </select>
@@ -2004,6 +2040,7 @@ function UserForm({
             maxLength={128}
             autoComplete="new-password"
             placeholder="至少 12 个字符"
+            disabled={busy}
           />
         </label>
         <p className="input-help">
@@ -2012,7 +2049,7 @@ function UserForm({
             : "请使用安全的方式向用户交付账号和密码。"}
         </p>
         <div className="dialog-actions">
-          <Button variant="secondary" type="button" onClick={onClose}>
+          <Button variant="secondary" type="button" onClick={onClose} disabled={busy}>
             取消
           </Button>
           <Button type="submit" disabled={busy}>

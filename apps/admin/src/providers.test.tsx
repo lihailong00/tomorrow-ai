@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ProviderPanel } from "./ProviderPanel";
 import { configurationChanges, type Setting } from "./api";
-import { binding, currentService, providerIssue, selectionEdits, type Edits } from "./providers";
+import { binding, currentService, officialQwenBase, providerIssue, selectionEdits, type Edits } from "./providers";
 
 function fixture(extra: Record<string, string> = {}, locked: string[] = []): Setting[] {
   const entries: Record<string, string> = {
@@ -10,6 +10,7 @@ function fixture(extra: Record<string, string> = {}, locked: string[] = []): Set
     DEEPSEEK_BASE_URL: "", DEEPSEEK_MODEL: "", DEEPSEEK_API_KEY: "configured",
     ASR_BASE_URL: "", ASR_MODEL: "", ASR_API_KEY: "", ASR_PROTOCOL: "qwen_asr",
     PHOTO_VISION_BASE_URL: "", PHOTO_VISION_MODEL: "qwen3.7-flash", PHOTO_VISION_API_KEY: "", PHOTO_VISION_ENABLED: "true",
+    PHOTO_EMBEDDING_BASE_URL: "", PHOTO_EMBEDDING_MODEL: "text-embedding-v4", PHOTO_EMBEDDING_API_KEY: "", PHOTO_EMBEDDING_ENABLED: "true",
     ...extra,
   };
   return Object.entries(entries).map(([key, value]) => ({
@@ -96,5 +97,53 @@ describe("guided provider configuration", () => {
       MODEL_NAME: { mode: "replace", value: "my-local-model" }, MODEL_API_KEY: { mode: "delete", value: "" },
     };
     expect(providerIssue(settings, edits)).toBeUndefined();
+  });
+  it("offers inheritance only for the exact official Qwen endpoint policy", () => {
+    for (const base of [
+      "https://dashscope.aliyuncs.com/compatible-mode/v1/",
+      "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "https://workspace.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    ]) expect(officialQwenBase(base)).toBe(true);
+    for (const base of [
+      "http://127.0.0.1:18782/v1", "https://custom.example/v1",
+      "http://dashscope.aliyuncs.com/compatible-mode/v1",
+      "https://dashscope.aliyuncs.com.attacker.test/compatible-mode/v1",
+      "https://user@dashscope.aliyuncs.com/compatible-mode/v1",
+      "https://dashscope.aliyuncs.com/compatible-mode/v1?key=value",
+      "https://dashscope.aliyuncs.com/compatible-mode/v1?",
+      "https://dashscope.aliyuncs.com/compatible-mode/v1#fragment",
+      "https://dashscope.aliyuncs.com/compatible-mode/v1#",
+      "https://dashscope.aliyuncs.com/other/path",
+    ]) expect(officialQwenBase(base)).toBe(false);
+  });
+  it.each(["vision", "embedding"] as const)("does not advertise custom ASR as inheritable for %s", service => {
+    const settings = fixture({ ASR_BASE_URL: "http://127.0.0.1:18782/v1", ASR_API_KEY: "configured" });
+    const state = currentService(settings, {}, service);
+    expect(state.inheritedBase).toBe("");
+    expect(state.canInherit).toBe(false);
+    expect(state.inheritanceReady).toBe(false);
+    expect(() => selectionEdits(settings, {}, service, "inherit")).toThrow("官方百炼");
+    const html = renderToStaticMarkup(<ProviderPanel service={service} settings={settings} edits={{}} onEdits={() => {}} onTest={async () => { throw new Error("no calls expected"); }} />);
+    expect(html).toContain("当前语音服务无法沿用");
+    expect(html).not.toContain("沿用语音识别的百炼地址与密钥，无需重复填写");
+    expect(html).toMatch(/aria-label="沿用语音服务"[^>]+disabled=""/);
+    expect(configurationChanges(settings, {})).toEqual({});
+  });
+  it("requires a configured speech credential for a new inheritance selection", () => {
+    const settings = fixture({ ASR_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1" });
+    expect(currentService(settings, {}, "vision").canInherit).toBe(false);
+    const draft: Edits = { ASR_API_KEY: { mode: "replace", value: "fixture-only" } };
+    expect(currentService(settings, draft, "vision").canInherit).toBe(true);
+    expect(currentService(settings, { ...draft, ASR_PROTOCOL: { mode: "replace", value: "openai_transcriptions" } }, "vision").canInherit).toBe(false);
+    expect(currentService(settings, { ...draft, ASR_API_KEY: { mode: "delete", value: "" } }, "vision").canInherit).toBe(false);
+  });
+  it("recognizes the server's existing per-model key fallback without promising to reuse an absent speech key", () => {
+    const settings = fixture({ ASR_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1", PHOTO_VISION_API_KEY: "configured" });
+    const state = currentService(settings, {}, "vision");
+    expect(state.inheritanceReady).toBe(true);
+    expect(state.canInherit).toBe(false);
+    const html = renderToStaticMarkup(<ProviderPanel service="vision" settings={settings} edits={{}} onEdits={() => {}} />);
+    expect(html).toContain("使用此模型已配置的密钥");
   });
 });

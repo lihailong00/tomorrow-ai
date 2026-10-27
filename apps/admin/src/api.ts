@@ -65,6 +65,13 @@ export type User = {
   disabled: boolean;
   role: string;
 };
+export type UserPage = {
+  items: User[];
+  offset: number;
+  limit: number;
+  total: number;
+  has_more: boolean;
+};
 export type Backup = {
   id: string;
   status: string;

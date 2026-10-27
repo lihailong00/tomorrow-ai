@@ -1,6 +1,6 @@
 //! Instance administration lives on an independent router and never uses mobile bearer tokens.
 use axum::{
-    extract::{DefaultBodyLimit, FromRequestParts, Path, Request, State},
+    extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State},
     http::{header, request::Parts, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -724,16 +724,7 @@ async fn change_own_password(
     issue_session(&state, &session.user_id, &headers, Some(&replacement)).await
 }
 fn validate_email(input: &str) -> Result<String> {
-    let value = input.trim().to_lowercase();
-    if value.len() > 254
-        || !value.contains('@')
-        || value.chars().any(char::is_control)
-        || value.chars().any(char::is_whitespace)
-    {
-        Err(invalid())
-    } else {
-        Ok(value)
-    }
+    auth::normalize_email(input).map_err(|_| invalid())
 }
 
 async fn manifest(State(state): State<AdminState>) -> Result<Response> {
@@ -965,10 +956,29 @@ fn require_owner(session: &AdminSession) -> Result<()> {
     }
 }
 
-async fn users(State(state): State<AdminState>, _: AdminSession) -> Result<Json<Value>> {
-    let rows=sqlx::query("SELECT u.id,u.email,u.name,u.created_at,COALESCE(c.disabled,0) AS disabled,COALESCE(r.role,'user') AS role FROM users u LEFT JOIN admin_user_controls c ON c.user_id=u.id LEFT JOIN admin_roles r ON r.user_id=u.id ORDER BY u.created_at DESC,u.id LIMIT 500").fetch_all(&state.repository.pool()).await?;
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserListQuery {
+    offset: Option<i64>,
+    limit: Option<i64>,
+}
+async fn users(
+    State(state): State<AdminState>,
+    _: AdminSession,
+    Query(query): Query<UserListQuery>,
+) -> Result<Json<Value>> {
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(100);
+    if offset < 0 || !(1..=500).contains(&limit) {
+        return Err(invalid());
+    }
+    let pool = state.repository.pool();
+    let total: i64 = sqlx::query_scalar("SELECT CAST(COUNT(*) AS BIGINT) FROM users")
+        .fetch_one(&pool).await?;
+    let rows=sqlx::query("SELECT u.id,u.email,u.name,u.created_at,COALESCE(c.disabled,0) AS disabled,COALESCE(r.role,'user') AS role FROM users u LEFT JOIN admin_user_controls c ON c.user_id=u.id LEFT JOIN admin_roles r ON r.user_id=u.id ORDER BY u.created_at DESC,u.id LIMIT $1 OFFSET $2").bind(limit).bind(offset).fetch_all(&pool).await?;
     let items:Vec<Value>=rows.into_iter().map(|row|json!({"id":row.get::<String,_>("id"),"email":row.get::<String,_>("email"),"name":row.get::<String,_>("name"),"created_at":timestamp(row.get::<i64,_>("created_at")),"disabled":row.get::<i64,_>("disabled")!=0,"role":row.get::<String,_>("role")})).collect();
-    Ok(Json(json!({"items":items,"limit":500})))
+    let has_more = offset.saturating_add(items.len() as i64) < total;
+    Ok(Json(json!({"items":items,"offset":offset,"limit":limit,"total":total,"has_more":has_more})))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1413,6 +1423,76 @@ mod tests {
             body["csrf_token"].as_str().unwrap().into(),
             body["user"]["id"].as_str().unwrap().into(),
         )
+    }
+
+    #[tokio::test]
+    async fn users_pagination_reaches_accounts_beyond_five_hundred() {
+        let f = fixture().await;
+        let (cookie, _, _) = owner(&f.state).await;
+        let pool = f.state.repository.pool();
+        let mut tx = pool.begin().await.unwrap();
+        for index in 0..501 {
+            sqlx::query("INSERT INTO users(id,email,password_hash,name,timezone,created_at) VALUES($1,$2,$3,$4,'UTC',$5)")
+                .bind(format!("e02-user-{index:04}"))
+                .bind(format!("e02-{index:04}@example.test"))
+                .bind(DUMMY_HASH)
+                .bind(format!("Pagination {index}"))
+                .bind(1_i64)
+                .execute(&mut *tx).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+        let mut ids = std::collections::HashSet::new();
+        for offset in (0..600).step_by(100) {
+            let (status, _, body) = call(&f.state, Method::GET,
+                &format!("/admin/api/users?offset={offset}&limit=100"), None,
+                Some(&cookie), None, "https://unit.test").await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["total"], 502);
+            assert_eq!(body["offset"], offset);
+            assert_eq!(body["limit"], 100);
+            assert_eq!(body["has_more"], offset < 500);
+            let items = body["items"].as_array().unwrap();
+            assert_eq!(items.len(), if offset < 500 { 100 } else { 2 });
+            for item in items {
+                assert!(ids.insert(item["id"].as_str().unwrap().to_owned()), "duplicate page item");
+            }
+        }
+        assert_eq!(ids.len(), 502);
+        assert!(ids.contains("e02-user-0500"));
+        for query in ["offset=-1", "limit=0", "limit=501"] {
+            let (status, _, _) = call(&f.state, Method::GET,
+                &format!("/admin/api/users?{query}"), None, Some(&cookie), None,
+                "https://unit.test").await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "accepted {query}");
+        }
+        let (status, _, body) = call(&f.state, Method::GET, "/admin/api/users?offset=1000", None,
+            Some(&cookie), None, "https://unit.test").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["items"].as_array().unwrap().is_empty());
+        assert_eq!(body["has_more"], false);
+        assert_eq!(body["total"], 502);
+    }
+
+    #[tokio::test]
+    async fn malformed_email_creation_is_rejected_before_persistence() {
+        let f = fixture().await;
+        let (cookie, csrf, _) = owner(&f.state).await;
+        let before: i64 = sqlx::query_scalar("SELECT CAST(COUNT(*) AS BIGINT) FROM users")
+            .fetch_one(&f.state.repository.pool()).await.unwrap();
+        for email in ["@", "qa@", "@example.test", "qa@@example.test", "qa@example", "qa\r\n@example.test"] {
+            let (status, _, _) = call(&f.state, Method::POST, "/admin/api/users", Some(json!({
+                "email": email, "password": "valid account password", "name": "Invalid mailbox"
+            })), Some(&cookie), Some(&csrf), "https://unit.test").await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "accepted {email:?}");
+        }
+        let after: i64 = sqlx::query_scalar("SELECT CAST(COUNT(*) AS BIGINT) FROM users")
+            .fetch_one(&f.state.repository.pool()).await.unwrap();
+        assert_eq!(before, after);
+        let (status, _, body) = call(&f.state, Method::POST, "/admin/api/users", Some(json!({
+            "email": " User+tag@Example.TEST ", "password": "valid account password", "name": "Valid mailbox"
+        })), Some(&cookie), Some(&csrf), "https://unit.test").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["email"], "user+tag@example.test");
     }
     #[tokio::test]
     async fn model_connection_probe_requires_owner_csrf_and_never_saves_configuration() {

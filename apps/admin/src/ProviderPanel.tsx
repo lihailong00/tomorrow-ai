@@ -86,9 +86,10 @@ export function ProviderPanel({ service, settings, edits, onEdits, onTest }: {
         ))}
         {(service === "vision" || service === "embedding") && (
           <button type="button" role="radio" aria-label="沿用语音服务" aria-checked={inherited}
+            disabled={!state.canInherit}
             className={"provider-choice " + (inherited ? "provider-selected" : "")} onClick={() => choose("inherit")}>
             <span className="provider-mark provider-mark-neutral"><Icon name="link" size={18} /></span>
-            <span><strong>沿用语音服务</strong><small>使用已配置的百炼账号</small></span>
+            <span><strong>沿用语音服务</strong><small>{state.canInherit ? "使用已配置的百炼账号" : "需先配置官方百炼地址与密钥"}</small></span>
             {inherited && <span className="provider-check">✓</span>}
           </button>
         )}
@@ -109,7 +110,7 @@ export function ProviderPanel({ service, settings, edits, onEdits, onTest }: {
       {!disabled && (
         <>
           {inherited ? <div className="provider-inherit-note"><Icon name="link" size={18} /><p>
-            {state.inheritedBase ? "沿用语音识别的百炼地址与密钥，无需重复填写。" : "请先在“语音转文字”中配置阿里云百炼，或在上方单独选择服务商。"}
+            {state.inheritanceReady ? (state.hasKey ? "沿用语音识别的百炼地址，使用此模型已配置的密钥。" : "沿用语音识别的百炼地址与密钥，无需重复填写。") : "当前语音服务无法沿用。沿用仅支持官方百炼地址与已配置的密钥；请先配置百炼语音，或在上方为此模型单独选择服务商。"}
             <small>图片理解和向量检索仍分别使用各自的模型。</small>
           </p></div> : null}
           <div className="provider-form-grid">
@@ -194,7 +195,7 @@ export function ProviderPanel({ service, settings, edits, onEdits, onTest }: {
           </details>}
           {onTest && <div className="provider-test">
             <div className="provider-test-actions">
-              <button type="button" className="button button-secondary" disabled={testing}
+              <button type="button" className="button button-secondary" disabled={testing || inherited && !state.inheritanceReady}
                 onClick={() => void testConnection()} aria-label={titles[service] + "测试连接"}>
                 <Icon name={service === "speech" ? "phone" : "spark"} size={16} />
                 {testing ? ({ model: "正在连接模型…", speech: "正在校验转写…", vision: "正在校验识图…", embedding: "正在校验向量…" }[service]) : "测试连接"}

@@ -2122,3 +2122,13 @@ summary:focus-visible {
 .page-heading > div > p:last-child {
   color: #8794ae;
 }
+.user-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 20px;
+  padding: 0 26px 24px;
+  font-size: 12px;
+}
