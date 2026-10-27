@@ -15,6 +15,9 @@ import {
   connectUrl,
   request,
   remainingEdits,
+  userLoginIdentity,
+  userManagementLabel,
+  isValidEmailIdentifier,
   safePublicUrl,
   type Backups,
   type Config,
@@ -222,6 +225,7 @@ export function App() {
   const sidebar = useRef<HTMLElement>(null);
   const menuButton = useRef<HTMLButtonElement>(null);
   const [resetUser, setResetUser] = useState<User | null>(null);
+  const [accessUser, setAccessUser] = useState<User | null>(null);
   const [passwordChange, setPasswordChange] = useState(false);
   const [createUser, setCreateUser] = useState(false);
   const [edits, setEdits] = useState<Record<string, Edit>>({});
@@ -257,6 +261,7 @@ export function App() {
       setEdits({});
       setCreateUser(false);
       setResetUser(null);
+      setAccessUser(null);
       setPasswordChange(false);
       setNotice("");
       setMenu(false);
@@ -853,11 +858,11 @@ export function App() {
                           <td>
                             <div className="user-cell">
                               <span className="avatar avatar-soft">
-                                {(user.name || user.email || "用").slice(0, 1)}
+                                {(user.name || userLoginIdentity(user) || "用").slice(0, 1)}
                               </span>
                               <div>
                                 <strong>{user.name || "未命名用户"}</strong>
-                                <small>{user.email}</small>
+                                <small>{userLoginIdentity(user)}</small>
                               </div>
                             </div>
                           </td>
@@ -886,21 +891,7 @@ export function App() {
                               <button
                                 className="text-button"
                                 disabled={busy || !canManageUser(user)}
-                                onClick={() =>
-                                  void operation(async () => {
-                                    await mutate(
-                                      `/users/${encodeURIComponent(user.id)}`,
-                                      { disabled: !user.disabled },
-                                      "PATCH"
-                                    );
-                                    await reload(session!);
-                                    setNotice(
-                                      user.disabled
-                                        ? "已恢复用户访问。"
-                                        : "已停用账号并撤销会话。"
-                                    );
-                                  })
-                                }
+                                onClick={() => setAccessUser(user)}
                               >
                                 {user.disabled ? "启用" : "停用"}
                               </button>
@@ -1057,7 +1048,7 @@ export function App() {
       )}
       {resetUser && (
         <UserForm
-          title={`重置 ${resetUser.name || resetUser.email} 的密码`}
+          title={`重置 ${userManagementLabel(resetUser)} 的密码`}
           error={error}
           reset
           onClose={() => { if (!operationPending.current) setResetUser(null); }}
@@ -1068,11 +1059,31 @@ export function App() {
                 { new_password: values.password }
               );
               setResetUser(null);
-              setNotice("密码已重置，该用户需要重新登录。");
+              setNotice(`${userManagementLabel(resetUser)} 的密码已重置，该用户需要重新登录。`);
             })
           }
           busy={busy}
         />
+      )}
+      {accessUser && (
+        <Modal title={`${accessUser.disabled ? "启用" : "停用"} ${userManagementLabel(accessUser)}`}
+          busy={busy} onClose={() => { if (!operationPending.current) setAccessUser(null); }}>
+          <p className="modal-description">
+            {accessUser.disabled ? "确认恢复这个账号的访问权限。" : "确认停用这个账号并撤销其登录会话。"}
+            <br />登录账号：<strong>{userLoginIdentity(accessUser)}</strong>
+          </p>
+          {error && <div className="alert alert-error" role="alert">{error}</div>}
+          <div className="dialog-actions">
+            <Button variant="secondary" disabled={busy} onClick={() => { if (!operationPending.current) setAccessUser(null); }}>取消</Button>
+            <Button variant={accessUser.disabled ? "primary" : "danger"} disabled={busy}
+              onClick={() => void operation(async () => {
+                await mutate(`/users/${encodeURIComponent(accessUser.id)}`, { disabled: !accessUser.disabled }, "PATCH");
+                setAccessUser(null);
+                await reload(session!);
+                setNotice(accessUser.disabled ? `已恢复 ${userManagementLabel(accessUser)} 的访问。` : `已停用 ${userManagementLabel(accessUser)} 并撤销会话。`);
+              })}>{busy ? "处理中…" : accessUser.disabled ? "确认启用" : "确认停用"}</Button>
+          </div>
+        </Modal>
       )}
       {passwordChange && (
         <PasswordForm
@@ -1201,6 +1212,11 @@ function AuthPage({
     setLocalError("");
     const data = new FormData(event.currentTarget);
     const body = Object.fromEntries(data.entries());
+    if (!isValidEmailIdentifier(String(body.email ?? ""))) {
+      setLocalError("请输入有效的邮箱地址。");
+      setBusy(false);
+      return;
+    }
     if (String(body.password).length < 12 && setup) {
       setLocalError("管理员密码至少需要 12 个字符。");
       setBusy(false);
@@ -1317,8 +1333,12 @@ function AuthPage({
               管理员邮箱
               <input
                 name="email"
-                type="email"
+                type="text"
+                inputMode="email"
+                autoCapitalize="none"
+                spellCheck={false}
                 autoComplete="username"
+                maxLength={254}
                 required
                 placeholder="you@example.com"
               />
@@ -2088,11 +2108,12 @@ function UserForm({
     role: string;
   }) => Promise<unknown>;
 }) {
+  const [localError, setLocalError] = useState("");
   return (
     <Modal title={title} onClose={onClose} busy={busy}>
-      {error && (
+      {(localError || error) && (
         <div className="alert alert-error" role="alert">
-          {error}
+          {localError || error}
         </div>
       )}
       <form
@@ -2100,6 +2121,11 @@ function UserForm({
           event.preventDefault();
           if (busy) return;
           const form = new FormData(event.currentTarget);
+          setLocalError("");
+          if (!reset && !isValidEmailIdentifier(String(form.get("email") ?? ""))) {
+            setLocalError("请输入有效的邮箱地址。");
+            return;
+          }
           void onSubmit({
             email: String(form.get("email") ?? ""),
             name: String(form.get("name") ?? ""),
@@ -2116,7 +2142,8 @@ function UserForm({
             </label>
             <label className="field-label">
               邮箱
-              <input name="email" type="email" required autoComplete="off" disabled={busy} />
+              <input name="email" type="text" inputMode="email" autoCapitalize="none" spellCheck={false}
+                maxLength={254} required autoComplete="off" disabled={busy} />
             </label>
             <label className="field-label">
               角色

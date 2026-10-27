@@ -7,7 +7,10 @@ import {
   request,
   remainingEdits,
   safePublicUrl,
+  userLoginIdentity,
+  userManagementLabel,
   type Setting,
+  type User,
 } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -20,6 +23,25 @@ const key: Setting = {
   source: "database",
   configured: true,
 };
+
+describe("account management identities", () => {
+  const user: User = { id: "fixture", email: "fixture@phone.tomorrow.local", name: "同名用户", created_at: "2026-10-28T00:00:00Z", disabled: false, role: "user" };
+  it("distinguishes same-name phone accounts by their actual login numbers", () => {
+    const first = { ...user, phone: "+8613800138000" };
+    const second = { ...user, phone: "+8613900139000" };
+    expect(userLoginIdentity(first)).toBe(first.phone);
+    expect(userManagementLabel(first)).toBe("同名用户（+8613800138000）");
+    expect(userManagementLabel(second)).toBe("同名用户（+8613900139000）");
+    expect(userManagementLabel(first)).not.toContain("phone.tomorrow.local");
+  });
+  it("preserves email identities for old and email-only API responses", () => {
+    const email = { ...user, email: "mail@example.test" };
+    expect(userLoginIdentity(email)).toBe(email.email);
+    expect(userLoginIdentity({ ...email, phone: null })).toBe(email.email);
+    expect(userLoginIdentity({ ...email, phone: " " })).toBe(email.email);
+    expect(userManagementLabel({ ...email, name: "" })).toBe(email.email);
+  });
+});
 
 describe("API credential boundaries", () => {
   it("does not discard a valid session for an incorrect current password", () => {

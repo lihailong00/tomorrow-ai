@@ -60,11 +60,19 @@ export type Status = {
 export type User = {
   id: string;
   email: string;
+  phone?: string | null;
   name: string;
   created_at: string;
   disabled: boolean;
   role: string;
 };
+export function userLoginIdentity(user: User): string {
+  return user.phone?.trim() || user.email;
+}
+export function userManagementLabel(user: User): string {
+  const identity = userLoginIdentity(user);
+  return user.name && user.name !== identity ? `${user.name}（${identity}）` : identity;
+}
 export type UserPage = {
   items: User[];
   offset: number;
@@ -90,6 +98,18 @@ export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {
     super(message);
   }
+}
+
+// Practical mailbox policy shared by admin forms and the standalone import
+// page. Keep parity with tomorrow_domain::auth::normalize_email; the server
+// owns normalization and remains authoritative for the submitted identifier.
+export function isValidEmailIdentifier(input: string): boolean {
+  const value = input.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "").toLowerCase();
+  const at = value.indexOf("@");
+  const domain = value.slice(at + 1);
+  return at > 0 && new TextEncoder().encode(value).length <= 254 &&
+    !/[\u0000-\u001f\u007f-\u009f]/u.test(input) && !/\p{White_Space}/u.test(value) &&
+    !domain.includes("@") && domain.includes(".") && domain.split(".").every(part => part.length > 0);
 }
 
 export function isSessionExpired(error: unknown): boolean {

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ProviderPanel } from "./ProviderPanel";
 import { configurationChanges, type Setting } from "./api";
-import { binding, currentService, officialQwenBase, providerIssue, selectionEdits, type Edits } from "./providers";
+import { binding, currentService, officialQwenBase, privateUrl, providerIssue, selectionEdits, type Edits } from "./providers";
 
 function fixture(extra: Record<string, string> = {}, locked: string[] = []): Setting[] {
   const entries: Record<string, string> = {
@@ -153,6 +153,31 @@ describe("guided provider configuration", () => {
       expect(radios.length).toBeGreaterThan(1);
       expect(radios.filter(radio => radio.includes('tabindex="0"')).length).toBe(1);
       expect(radios.filter(radio => radio.includes('disabled=""')).every(radio => radio.includes('tabindex="-1"'))).toBe(true);
+    }
+  });
+  it("permits keyless inference only for the exact Rust/Pi private hosts and address ranges", () => {
+    const settings = fixture();
+    for (const host of [
+      "localhost", "api", "backend", "tomorrow-api", "host.docker.internal", "ollama", "vllm", "lmstudio",
+      "127.0.0.1", "127.255.255.255", "10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.0.1",
+      "[::1]", "[0:0:0:0:0:0:0:1]", "[fc00::1]", "[fd12:3456:789a::1]", "[fdff:ffff::1]",
+    ]) {
+      const base = `http://${host}:19483/v1`;
+      expect(privateUrl(base), base).toBe(true);
+      const edits: Edits = { MODEL_BASE_URL: { mode: "replace", value: base }, MODEL_NAME: { mode: "replace", value: "private-local" }, MODEL_API_KEY: { mode: "delete", value: "" } };
+      expect(providerIssue(settings, edits), base).toBeUndefined();
+    }
+  });
+  it("rejects lookalike public hosts and invalid private URLs without exempting vendor credentials", () => {
+    for (const base of [
+      "https://api.deepseek.com", "https://public.example.test/v1", "http://backend.example.test/v1",
+      "http://10.attacker.test/v1", "http://127.evil.test/v1", "http://172.15.255.255/v1", "http://172.32.0.1/v1",
+      "http://169.254.169.254/latest", "http://100.64.0.1/v1", "http://0.0.0.0/v1", "http://8.8.8.8/v1",
+      "http://[::]/v1", "http://[fe80::1]/v1", "http://[2001:db8::1]/v1", "http://[::ffff:127.0.0.1]/v1",
+      "ftp://backend/v1", "http://user:pass@backend/v1", "http://backend/v1?", "http://backend/v1#",
+    ]) {
+      expect(privateUrl(base), base).toBe(false);
+      expect(providerIssue(fixture(), { MODEL_BASE_URL: { mode: "replace", value: base }, MODEL_NAME: { mode: "replace", value: "public-model" }, MODEL_API_KEY: { mode: "delete", value: "" } }), base).toContain("API Key");
     }
   });
 });

@@ -208,11 +208,23 @@ export function selectionEdits(settings: Setting[], edits: Edits, service: Servi
   }
   return changes;
 }
-function privateUrl(base: string): boolean {
+export function privateUrl(base: string): boolean {
   try {
-    const host = new URL(base).hostname;
-    return ["localhost", "[::1]", "ollama", "vllm", "lmstudio", "host.docker.internal"].includes(host) ||
-      /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
+    const url = new URL(base);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.href.includes("?") || url.href.includes("#")) return false;
+    const host = url.hostname.toLowerCase();
+    // Administrator-selected inference services only. Match Rust's
+    // private_service_host and Pi's privateModelHost, never web-fetch policy.
+    if (["localhost", "api", "backend", "tomorrow-api", "ollama", "vllm", "lmstudio", "host.docker.internal"].includes(host)) return true;
+    if (host.startsWith("[") && host.endsWith("]")) {
+      const address = host.slice(1, -1);
+      return address === "::1" || /^f[cd][0-9a-f]{2}:/.test(address);
+    }
+    const octets = host.split(".").map(Number);
+    if (octets.length !== 4 || octets.some(part => !Number.isInteger(part) || part < 0 || part > 255) || !/^\d+\.\d+\.\d+\.\d+$/.test(host)) return false;
+    return octets[0] === 127 || octets[0] === 10 ||
+      octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31 ||
+      octets[0] === 192 && octets[1] === 168;
   } catch { return false; }
 }
 export function credentialScopeChanged(settings: Setting[], edits: Edits, service: Service): boolean {

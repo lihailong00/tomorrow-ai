@@ -15,6 +15,14 @@ const guides={chatgpt:'ChatGPT：设置 → 数据控制 → 导出数据，下�
 function guide(){$('guide').textContent=guides[$('provider').value]}
 guide();$('provider').onchange=guide;
 function notice(s){$('notice').textContent=s}
+// Same practical Unicode mailbox policy as admin forms and Rust normalize_email.
+function isValidEmailIdentifier(input){
+ const value=input.replace(/^\p{White_Space}+|\p{White_Space}+$/gu,'').toLowerCase();
+ const at=value.indexOf('@'),domain=value.slice(at+1);
+ return at>0&&new TextEncoder().encode(value).length<=254&&
+  !/[\u0000-\u001f\u007f-\u009f]/u.test(input)&&!/\p{White_Space}/u.test(value)&&
+  !domain.includes('@')&&domain.includes('.')&&domain.split('.').every(part=>part.length>0);
+}
 function controls(){
  document.querySelectorAll('button').forEach(b=>b.disabled=working);
  $('loginSubmit').disabled=working||!authReady;
@@ -94,7 +102,7 @@ async function discard(id){
  await refreshAfterAction('已取消并删除预览。');
 }
 function methodChanged(){
- const phone=$('authMethod').value==='phone_password';$('accountLabel').textContent=phone?'手机号':'邮箱';$('account').type=phone?'tel':'email';$('account').inputMode=phone?'tel':'email';$('account').placeholder=phone?'请输入11位手机号':'请输入邮箱';
+ const phone=$('authMethod').value==='phone_password';$('accountLabel').textContent=phone?'手机号':'邮箱';$('account').type=phone?'tel':'text';$('account').inputMode=phone?'tel':'email';$('account').autocapitalize='none';$('account').spellcheck=false;$('account').placeholder=phone?'请输入11位手机号':'请输入邮箱';
  if(phone)$('account').pattern='(?:\\+86|0086)?1[3-9][0-9]{9}';else $('account').removeAttribute('pattern');$('account').value='';$('password').value='';
 }
 async function loadAuth(){
@@ -114,7 +122,8 @@ $('loginForm').onsubmit=e=>{
  e.preventDefault();if(!authReady)return;
  run(async()=>{
   const phone=$('authMethod').value==='phone_password';
-  const data=await request(phone?'/auth/phone/login':'/auth/login','POST',{[phone?'phone':'email']:$('account').value.trim(),password:$('password').value});
+  if(!phone&&!isValidEmailIdentifier($('account').value))throw Error('请输入有效的邮箱地址');
+  const data=await request(phone?'/auth/phone/login':'/auth/login','POST',{[phone?'phone':'email']:$('account').value,password:$('password').value});
   token=data.token;$('password').value='';$('login').hidden=true;$('import').hidden=false;
   await loadPending(true);if(!pending.length)notice('已登录，可以选择导出文件。');
  });
