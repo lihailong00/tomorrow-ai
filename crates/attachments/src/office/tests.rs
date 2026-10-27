@@ -53,6 +53,16 @@ fn docx_preserves_chinese_paragraphs_tabs_line_breaks_and_standard_entities() {
 }
 
 #[test]
+fn docx_paired_and_empty_separators_extract_equivalent_text() {
+    let prefix = r#"<w:document xmlns:w="word"><w:p><w:r><w:t>one</w:t>"#;
+    let suffix = r#"<w:t>four</w:t></w:r></w:p></w:document>"#;
+    let empty = format!("{prefix}<w:tab/><w:t>two</w:t><w:br/><w:t>three</w:t><w:cr/>{suffix}");
+    let paired = format!("{prefix}<w:tab></w:tab><w:t>two</w:t><w:br></w:br><w:t>three</w:t><w:cr></w:cr>{suffix}");
+    assert_eq!(document(&empty), "one\ttwo\nthree\nfour");
+    assert_eq!(document(&paired), document(&empty));
+}
+
+#[test]
 fn docx_reads_tables_without_executing_fields_or_deleted_text() {
     let text = document(
         r#"<w:document xmlns:w="word"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>客户</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>甲方</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:instrText>INCLUDETEXT file:///etc/passwd</w:instrText><w:delText>删除</w:delText><w:t>当前内容</w:t></w:r></w:p></w:body></w:document>"#,

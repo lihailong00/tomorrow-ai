@@ -390,7 +390,7 @@ fn docx(package: &mut Package<'_>) -> Result<String, AttachmentError> {
                 "tc" => push(&mut out, "\t")?,
                 _ => {}
             },
-            Event::Empty(e) => match e.local_name().as_ref() {
+            Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
                 "tab" => push(&mut out, "\t")?,
                 "br" | "cr" => push(&mut out, "\n")?,
                 _ => {}

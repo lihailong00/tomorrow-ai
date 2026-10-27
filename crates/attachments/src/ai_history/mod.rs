@@ -305,6 +305,12 @@ async fn commit(
     {
         return Err(invalid("请选择至少一段预览中的对话"));
     }
+    if !archive.conversations.iter().any(|c| {
+        (selection.all == Some(true) && !excluded.contains(&c.external_key))
+            || keys.contains(&c.external_key)
+    }) {
+        return Err(invalid("请选择至少一段预览中的对话"));
+    }
     let rows=sqlx::query("SELECT external_key,digest,size_bytes FROM ai_history_conversations WHERE user_id=$1 AND provider=$2").bind(&user).bind(&archive.provider).fetch_all(&mut *tx).await?;
     let mut prior = HashMap::new();
     for r in rows {

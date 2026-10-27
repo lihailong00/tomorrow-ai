@@ -439,6 +439,45 @@ async fn preview_requires_confirmation_is_owner_scoped_and_commit_is_idempotent(
 }
 
 #[tokio::test]
+async fn excluding_every_conversation_rejects_without_consuming_the_preview() {
+    empty_selection_checks("sqlite::memory:").await;
+}
+
+#[tokio::test]
+#[ignore = "requires the isolated local tada_qa_e05 PostgreSQL database"]
+async fn postgres_empty_selection_preserves_the_preview() {
+    let database = std::env::var("E05_ATTACHMENTS_TEST_DATABASE_URL")
+        .expect("explicit isolated test database required");
+    let url = reqwest::Url::parse(&database).unwrap();
+    assert!(["postgres", "postgresql"].contains(&url.scheme()));
+    assert_eq!(url.host_str(), Some("127.0.0.1"));
+    assert_eq!(url.path(), "/tada_qa_e05");
+    empty_selection_checks(&database).await;
+}
+
+async fn empty_selection_checks(database: &str) {
+    let (state, user, token, _) = fixture_at(database).await;
+    let mut data = claude();
+    let mut second = data[0].clone();
+    second["uuid"] = json!("second-claude");
+    data.as_array_mut().unwrap().push(second);
+    let preview = upload(&state, &token, "claude", data).await;
+    let path = format!("/v1/ai-history/previews/{}", preview["id"].as_str().unwrap());
+    let excluded = preview["items"].as_array().unwrap().iter().map(|item| item["key"].clone()).collect::<Vec<_>>();
+    let (status, _) = request(&state, &token, "POST", &(path.clone() + "/commit"), Some(json!({"all":true,"exclude_keys":excluded}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, retained) = request(&state, &token, "GET", &path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(retained["completed"], true);
+    assert_eq!(retained["items"].as_array().unwrap().len(), 2);
+    assert!(state.search_ai_history(&user, "", None, 0, 20).await.unwrap()["items"].as_array().unwrap().is_empty());
+    let (status, committed) = request(&state, &token, "POST", &(path + "/commit"), Some(json!({"keys":[retained["items"][0]["key"]]}))).await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(committed["imported"], 1);
+    cleanup(state).await;
+}
+
+#[tokio::test]
 async fn selected_conversations_and_updates_preserve_stable_ids_and_preview_cleanup() {
     let (state, user, a, _) = fixture().await;
     let mut data = claude();
