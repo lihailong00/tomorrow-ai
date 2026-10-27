@@ -2,7 +2,7 @@ pub const PAGE: &str = r##"<!doctype html><html lang="zh-CN"><meta charset="utf-
 <style>body{margin:0;background:linear-gradient(135deg,#f7f4f5,#eaf1ff);color:#30394d;font:16px/1.7 system-ui,sans-serif}main{max-width:840px;margin:48px auto;padding:24px}h1{font-size:32px;margin-bottom:4px}p{color:#748097}.card{padding:28px;background:#ffffffdc;border:1px solid white;border-radius:28px;margin:20px 0}input,select,button{font:inherit;border:1px solid #dee4ef;border-radius:14px;padding:12px;box-sizing:border-box}input{max-width:100%}button{background:#4269c7;color:white;cursor:pointer}button.secondary{background:#eef3ff;color:#4269c7}button:disabled{opacity:.5;cursor:wait}.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}.muted{font-size:14px;color:#748097}label{display:block;margin:12px 0}#notice{white-space:pre-wrap;color:#4269c7}article{border-top:1px solid #e9edf5;padding:16px 0}pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}[hidden]{display:none!important}</style>
 <main><span>妥啦 · 让过去的对话接着帮你</span><h1>导入其他 AI 对话</h1><p>支持 ChatGPT、Claude、DeepSeek 的官方 ZIP / JSON 导出文件。</p>
 <section id="login" class="card"><h2>登录妥啦账号</h2><p>与手机使用同一个账号。登录凭据只用于妥啦服务，不需要其他 AI 平台的密码。</p><p id="loginStatus" class="muted">正在检查此服务器支持的登录方式…</p><form id="loginForm"><label id="methodLabel" hidden>登录方式<select id="authMethod"></select></label><label><span id="accountLabel">账号</span><input id="account" autocomplete="username" required maxlength="254"></label><label>密码<input id="password" type="password" autocomplete="current-password" required></label><button id="loginSubmit" disabled>登录</button></form><button id="retryLogin" type="button" class="secondary" hidden>重新检查登录方式</button></section>
-<section id="import" class="card" hidden><div class="row"><h2>选择导出文件</h2><button id="logout" class="secondary">退出</button></div><label>来源<select id="provider"><option value="chatgpt">ChatGPT</option><option value="claude">Claude</option><option value="deepseek">DeepSeek</option></select></label><p id="guide"></p><input id="file" type="file" accept=".zip,.json,application/json,application/zip"><p class="muted">单文件最多 25 MB。ZIP 无需解压；大包可解压后分批选择 conversations*.json。原始压缩包不长期保存。文件上传后先预览，确认后才供助手检索；长期记忆另行确认。</p><button id="upload">上传并预览</button><p class="muted">下载链接可能需要原平台登录。请先在原平台下载文件，再在这里选择；这页不会获取你的其他平台登录凭据。</p></section>
+<section id="import" class="card" hidden><div class="row"><h2>选择导出文件</h2><button id="logout" class="secondary">退出</button></div><p id="signedInAs" class="muted"></p><label>来源<select id="provider"><option value="chatgpt">ChatGPT</option><option value="claude">Claude</option><option value="deepseek">DeepSeek</option></select></label><p id="guide"></p><input id="file" type="file" accept=".zip,.json,application/json,application/zip"><p class="muted">单文件最多 25 MB。ZIP 无需解压；大包可解压后分批选择 conversations*.json。原始压缩包不长期保存。文件上传后先预览，确认后才供助手检索；长期记忆另行确认。</p><button id="upload">上传并预览</button><p class="muted">下载链接可能需要原平台登录。请先在原平台下载文件，再在这里选择；这页不会获取你的其他平台登录凭据。</p></section>
 <section id="pending" class="card" hidden><h2>待确认的导入</h2><p id="pendingStatus" class="muted"></p><div id="pendingItems"></div><button id="refreshPending" type="button" class="secondary">刷新待确认列表</button></section>
 <section id="preview" class="card" hidden><h2>确认导入范围</h2><p id="summary"></p><p id="warnings" class="muted"></p><div class="row"><button id="commit">确认导入全部</button><button id="cancel" class="secondary">取消并删除预览</button></div><div id="items"></div><button id="more" class="secondary" hidden>查看更多</button></section><p id="notice" role="status"></p><p class="muted">导入完成后，在手机「能力 → 导入 AI 对话」中查看、搜索或删除。刷新后登录同一账号，可继续未完成的导入；待确认预览在一小时后自动清理。</p></main>
 <script>
@@ -23,8 +23,17 @@ function isValidEmailIdentifier(input){
   !/[\u0000-\u001f\u007f-\u009f]/u.test(input)&&!/\p{White_Space}/u.test(value)&&
   !domain.includes('@')&&domain.includes('.')&&domain.split('.').every(part=>part.length>0);
 }
+// Match Rust normalize_phone: limit the raw UTF-8 bytes before removing separators.
+function normalizePhoneIdentifier(input){
+ if(new TextEncoder().encode(input).length>64)return null;
+ // White_Space matches Rust char::is_whitespace; JS \s also accepts the unsupported BOM.
+ const compact=input.replace(/[\p{White_Space}-]/gu,'');
+ const number=compact.replace(/^(?:\+86|0086)/u,'');
+ return /^1[3-9][0-9]{9}$/u.test(number)?'+86'+number:null;
+}
 function controls(){
  document.querySelectorAll('button').forEach(b=>b.disabled=working);
+ document.querySelectorAll('#loginForm input,#loginForm select').forEach(field=>field.disabled=working);
  $('loginSubmit').disabled=working||!authReady;
  $('upload').disabled=working||!pendingReady||Boolean(batch)||pending.length>=2;
 }
@@ -36,12 +45,13 @@ function resetAuth(){
  token='';pending=[];pendingReady=false;clearPreview();
  $('login').hidden=false;$('import').hidden=true;$('pending').hidden=true;
  $('pendingItems').replaceChildren();$('pendingStatus').textContent='';
- $('password').value='';$('account').value='';$('file').value='';controls();
+ $('password').value='';$('account').value='';$('file').value='';$('signedInAs').textContent='';controls();
 }
 async function request(path,method='GET',body){
  const multipart=body instanceof FormData;
+ const sessionRequest=Boolean(token)&&path!=='/auth/login'&&path!=='/auth/phone/login';
  const response=await fetch('/v1'+path,{method,credentials:'omit',redirect:'error',cache:'no-store',headers:{Accept:'application/json',...(token?{Authorization:'Bearer '+token}:{}),...(body&&!multipart?{'Content-Type':'application/json'}:{})},...(body?{body:multipart?body:JSON.stringify(body)}:{})});
- if(response.status===401){resetAuth();const error=Error('登录已失效，请重新登录。');error.status=401;throw error}
+ if(response.status===401&&sessionRequest){resetAuth();const error=Error('登录已失效，请重新登录。');error.status=401;throw error}
  let data;try{data=await response.json()}catch{throw Error('服务未返回有效数据，请检查文件大小或稍后重试')}
  if(!response.ok){const error=Error(data.error?.message||'操作失败');error.status=response.status;throw error}
  return data;
@@ -123,7 +133,7 @@ async function discard(id){
 }
 function methodChanged(){
  const phone=$('authMethod').value==='phone_password';$('accountLabel').textContent=phone?'手机号':'邮箱';$('account').type=phone?'tel':'text';$('account').inputMode=phone?'tel':'email';$('account').autocapitalize='none';$('account').spellcheck=false;$('account').placeholder=phone?'请输入11位手机号':'请输入邮箱';
- if(phone)$('account').pattern='(?:\\+86|0086)?1[3-9][0-9]{9}';else $('account').removeAttribute('pattern');$('account').value='';$('password').value='';
+ $('account').removeAttribute('pattern');$('account').value='';$('password').value='';
 }
 async function loadAuth(){
  authReady=false;controls();$('retryLogin').hidden=true;$('loginStatus').textContent='正在检查此服务器支持的登录方式…';
@@ -142,9 +152,11 @@ $('loginForm').onsubmit=e=>{
  e.preventDefault();if(!authReady)return;
  run(async()=>{
   const phone=$('authMethod').value==='phone_password';
-  if(!phone&&!isValidEmailIdentifier($('account').value))throw Error('请输入有效的邮箱地址');
-  const data=await request(phone?'/auth/phone/login':'/auth/login','POST',{[phone?'phone':'email']:$('account').value,password:$('password').value});
-  token=data.token;$('password').value='';$('login').hidden=true;$('import').hidden=false;
+  const account=phone?normalizePhoneIdentifier($('account').value):$('account').value;
+  if(phone&&!account)throw Error('请输入有效的中国大陆手机号');
+  if(!phone&&!isValidEmailIdentifier(account))throw Error('请输入有效的邮箱地址');
+  const data=await request(phone?'/auth/phone/login':'/auth/login','POST',{[phone?'phone':'email']:account,password:$('password').value});
+  token=data.token;$('password').value='';$('signedInAs').textContent='当前账号：'+(data.user?.phone||data.user?.email||account);$('login').hidden=true;$('import').hidden=false;
   await loadPending(true);if(!pending.length)notice('已登录，可以选择导出文件。');
  });
 };
