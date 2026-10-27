@@ -69,6 +69,34 @@ impl Repository {
     pub fn pool(&self) -> AnyPool {
         self.pool.clone()
     }
+    /// Home totals cover the owner history independently of its bounded previews.
+    pub async fn today_stats(&self, user_id: &str) -> Result<TodayStats, DomainError> {
+        let mut connection = self.pool.acquire().await?;
+        let unread = if connection.backend_name() == "PostgreSQL" {
+            "CAST(body AS JSONB)->>'read'='false'"
+        } else {
+            "json_extract(body, '$.read')=0"
+        };
+        let query = format!("SELECT
+            (SELECT COUNT(*) FROM tasks WHERE user_id=$1 AND status='succeeded') AS tasks_completed,
+            (SELECT COUNT(*) FROM tasks WHERE user_id=$1 AND status IN ('queued','running','waiting_approval','uncertain')) AS active_tasks,
+            (SELECT COUNT(*) FROM schedules WHERE user_id=$1 AND enabled<>0) AS active_routines,
+            (SELECT COUNT(*) FROM resources WHERE user_id=$1 AND kind='memory') AS memory_count,
+            (SELECT COUNT(*) FROM resources WHERE user_id=$1 AND kind='notification' AND {unread}) AS unread_notifications");
+        let row = sqlx::query(&query).bind(user_id).fetch_one(&mut *connection).await?;
+        Ok(TodayStats {
+            tasks_completed: row.try_get::<i64, _>("tasks_completed")? as usize,
+            active_routines: row.try_get::<i64, _>("active_routines")? as usize,
+            memory_count: row.try_get::<i64, _>("memory_count")? as usize,
+            active_tasks: row.try_get::<i64, _>("active_tasks")? as usize,
+            unread_notifications: row.try_get::<i64, _>("unread_notifications")? as usize,
+        })
+    }
+    pub async fn latest_succeeded_briefing(&self, user_id: &str) -> Result<Option<String>, DomainError> {
+        let row = sqlx::query("SELECT result FROM tasks WHERE user_id=$1 AND kind='briefing' AND status='succeeded' ORDER BY created_at DESC,id DESC LIMIT 1")
+            .bind(user_id).fetch_optional(&self.pool).await?;
+        Ok(row.map(|row| row.try_get::<Option<String>, _>("result")).transpose()?.flatten())
+    }
     pub async fn update_user(
         &self,
         user_id: &str,

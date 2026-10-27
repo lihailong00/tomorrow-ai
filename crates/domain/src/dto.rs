@@ -133,6 +133,10 @@ pub struct TodayStats {
     pub tasks_completed: usize,
     pub active_routines: usize,
     pub memory_count: usize,
+    #[serde(default)]
+    pub active_tasks: usize,
+    #[serde(default)]
+    pub unread_notifications: usize,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Today {

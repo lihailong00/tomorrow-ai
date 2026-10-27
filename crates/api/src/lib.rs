@@ -388,11 +388,9 @@ async fn today(State(state): State<Arc<AppState>>, auth: Auth) -> Result<Json<To
     let schedules = state.repository.schedules(&auth.user_id).await?;
     let memories = state.repository.memories(&auth.user_id).await?;
     let notifications = state.repository.notifications(&auth.user_id).await?;
-    let latest = tasks
-        .iter()
-        .find(|t| t.kind == "briefing" && t.status == "succeeded")
-        .and_then(|t| t.result.clone());
-    let briefing=latest.unwrap_or_else(||format!("你有 {} 个进行中的任务、{} 条记忆。点击生成简报，后台会依据已保存的资料整理。尚未连接的邮箱与日历不会出现在简报中。",tasks.iter().filter(|t|["queued","running","waiting_approval"].contains(&t.status.as_str())).count(),memories.len()));
+    let stats = state.repository.today_stats(&auth.user_id).await?;
+    let latest = state.repository.latest_succeeded_briefing(&auth.user_id).await?;
+    let briefing=latest.unwrap_or_else(||format!("你有 {} 个进行中的任务、{} 条记忆。点击生成简报，后台会依据已保存的资料整理。尚未连接的邮箱与日历不会出现在简报中。",stats.active_tasks,stats.memory_count));
     let timezone = user
         .timezone
         .parse::<chrono_tz::Tz>()
@@ -401,11 +399,6 @@ async fn today(State(state): State<Arc<AppState>>, auth: Auth) -> Result<Json<To
         .with_timezone(&timezone)
         .format("%Y-%m-%d")
         .to_string();
-    let stats = TodayStats {
-        tasks_completed: tasks.iter().filter(|t| t.status == "succeeded").count(),
-        active_routines: schedules.iter().filter(|s| s.enabled).count(),
-        memory_count: memories.len(),
-    };
     Ok(Json(Today {
         date,
         greeting: format!("你好，{}", user.name),
