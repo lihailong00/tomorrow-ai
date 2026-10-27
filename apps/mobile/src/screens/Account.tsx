@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
-import { normalizeServerUrl, ApiClient, ApiError } from '../api/client';
+import { ApiError } from '../api/client';
 import { useAction, useApp } from '../app/context';
 import { defaultServerUrl, platform } from '../platform/ports';
 import {
@@ -16,6 +16,8 @@ import { AssistantOrb, Icon } from '../ui/visuals';
 import { normalizePhoneNumber } from '../domain/phone';
 import { validatePassword } from '../domain/password';
 import { PhotoIndexSettings } from '../features/photo-index/PhotoIndexSettings';
+import { EmailAuthScreen } from '../features/instances/EmailAuthScreen';
+import { InstanceConnectionCard } from '../features/instances/InstanceConnectionCard';
 
 export function IntroScreen({
   onContinue,
@@ -130,7 +132,25 @@ export function IntroScreen({
   );
 }
 
-export function AuthScreen({
+export function AuthScreen(props: { expired: boolean; notice?: string }) {
+  const { preferences, navigate } = useApp();
+  const instance = preferences.instance;
+  if (preferences.connectionError ||
+      (preferences.serverUrl !== defaultServerUrl && !instance)) {
+    return <ScrollView contentContainerStyle={s.content}>
+      <Text style={s.title}>确认服务器连接</Text>
+      <Notice>{preferences.connectionError || '请先检查服务器身份，再使用这台服务器的账号登录。'}</Notice>
+      <Button onPress={() => navigate({ name: 'settings' })}>选择服务器</Button>
+    </ScrollView>;
+  }
+  if (instance?.auth_methods.includes('email_password') &&
+      (instance.deployment_mode === 'self_hosted' || !instance.auth_methods.includes('phone_password'))) {
+    return <EmailAuthScreen {...props} />;
+  }
+  return <PhoneAuthScreen {...props} />;
+}
+
+function PhoneAuthScreen({
   expired,
   notice,
 }: {
@@ -167,6 +187,7 @@ export function AuthScreen({
   const registering = mode === 'register';
   const resetting = mode === 'reset';
   const needsCode = mode !== 'login';
+  const registrationOpen = !preferences.instance || preferences.instance.registration_policy === 'open';
   const resetCode = () => {
     setCode('');
     setChallengeId('');
@@ -291,7 +312,7 @@ export function AuthScreen({
           padding: 4,
         }}
       >
-        {['登录', '创建账号'].map((label, i) => (
+        {(registrationOpen ? ['登录', '创建账号'] : ['登录']).map((label, i) => (
           <Pressable
             key={label}
             accessibilityRole="tab"
@@ -331,6 +352,7 @@ export function AuthScreen({
           </Pressable>
         ))}
       </View>
+      {!registrationOpen && <Notice>当前服务器未开放手机号自助注册，请联系管理员创建账号。</Notice>}
       {registering && (
         <Field
           label="怎么称呼你"
@@ -494,26 +516,14 @@ export function SettingsScreen() {
     api,
     user,
     preferences,
-    savePreferences,
     signOut,
     updateUser,
     navigate,
   } = useApp();
-  const [url, setUrl] = useState(preferences.serverUrl);
   const [name, setName] = useState(user?.name ?? '');
   const [timezone, setTimezone] = useState(user?.timezone ?? 'Asia/Shanghai');
   const [notice, setNotice] = useState('');
   const action = useAction();
-  const saveServer = () =>
-    action.run(async () => {
-      const serverUrl = normalizeServerUrl(url);
-      await savePreferences({
-        ...preferences,
-        serverUrl,
-        serverUrlCustomized: true,
-      });
-      setNotice('服务地址已保存。请在新服务上登录你的账号。');
-    });
   return (
     <ScrollView
       keyboardShouldPersistTaps="handled"
@@ -522,48 +532,7 @@ export function SettingsScreen() {
       <Text style={s.title}>设置</Text>
       <Text style={s.subtitle}>连接方式、个人资料与数据控制。</Text>
       <Section title="服务连接" />
-      <Card>
-        <Text style={s.small}>设置账号所使用的服务地址。</Text>
-        <Field
-          label="服务地址"
-          placeholder={defaultServerUrl}
-          value={url}
-          onChangeText={setUrl}
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="url"
-        />
-        <Text style={[s.small, s.topGap]}>
-          默认连接云端 HTTPS
-          服务，手机联网即可使用。也可以填写你自己的服务地址。
-        </Text>
-        <View style={[s.row, s.gap, s.topGap]}>
-          <View style={s.fill}>
-            <Button
-              variant="secondary"
-              loading={action.busy}
-              onPress={() =>
-                action.run(async () => {
-                  await new ApiClient(normalizeServerUrl(url)).health();
-                  setNotice('✓ 这个服务可以连接。保存后生效。');
-                })
-              }
-            >
-              测试连接
-            </Button>
-          </View>
-          <View style={s.fill}>
-            <Button loading={action.busy} onPress={saveServer}>
-              保存地址
-            </Button>
-          </View>
-        </View>
-        {url.trim().replace(/\/+$/, '') !== preferences.serverUrl && user && (
-          <Notice>
-            保存不同地址后会退出当前账号，避免把认证信息发送到另一个服务。
-          </Notice>
-        )}
-      </Card>
+      <InstanceConnectionCard />
       {user && (
         <>
           <Section title="个人资料" />
@@ -709,7 +678,7 @@ export function SettingsScreen() {
       <ErrorNotice message={action.error} />
       {notice ? <Notice>{notice}</Notice> : null}
       <Text style={[s.small, { textAlign: 'center', marginTop: 24 }]}>
-        妥啦 · 0.1.5
+        妥啦 · 0.1.6
       </Text>
     </ScrollView>
   );

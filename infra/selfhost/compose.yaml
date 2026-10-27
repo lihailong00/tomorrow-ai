@@ -1,0 +1,71 @@
+name: tada
+services:
+  initialize:
+    image: tada/server:${TADA_VERSION:-local}
+    build:
+      context: ../..
+      dockerfile: infra/selfhost/Dockerfile
+    user: "0:0"
+    entrypoint: ["python3", "/opt/tada/selfhost/initialize.py"]
+    restart: "no"
+    volumes:
+      - instance-data:/data
+      - database-secret:/secrets
+    network_mode: none
+
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg17-trixie
+    environment:
+      POSTGRES_USER: tomorrow
+      POSTGRES_DB: tomorrow
+      POSTGRES_PASSWORD_FILE: /run/tada-secrets/postgres-password
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - database-secret:/run/tada-secrets:ro
+    networks: [private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tomorrow -d tomorrow"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  server:
+    image: tada/server:${TADA_VERSION:-local}
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${TADA_BIND:-127.0.0.1}:${TADA_PORT:-8080}:8080"
+    environment:
+      # Nonsecret public settings. Configure provider keys in /admin after setup.
+      # Empty values use first-install defaults and remain editable in the UI.
+      # Explicit nonempty deployment overrides are displayed as locked there.
+      INSTANCE_MODE: ${INSTANCE_MODE:-}
+      INSTANCE_NAME: ${INSTANCE_NAME:-}
+      INSTANCE_PUBLIC_URL: ${INSTANCE_PUBLIC_URL:-}
+      REGISTRATION_POLICY: ${REGISTRATION_POLICY:-}
+    volumes:
+      - instance-data:/data
+    networks: [private, outbound]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+networks:
+  private:
+    internal: true
+  outbound: {}
+volumes:
+  instance-data:
+  postgres-data:
+  database-secret:

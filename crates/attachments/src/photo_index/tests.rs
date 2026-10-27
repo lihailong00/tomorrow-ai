@@ -7,19 +7,19 @@ use std::sync::{
 use tokio::sync::{Notify, Semaphore};
 use tower::ServiceExt;
 
-struct Fixture {
-    state: AttachmentsState,
-    token: String,
-    other: String,
-    device: String,
-    asset: String,
-    user: String,
+pub(super) struct Fixture {
+    pub(super) state: AttachmentsState,
+    pub(super) token: String,
+    pub(super) other: String,
+    pub(super) device: String,
+    pub(super) asset: String,
+    pub(super) user: String,
 }
 impl Fixture {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         Self::at("sqlite::memory:").await
     }
-    async fn at(url: &str) -> Self {
+    pub(super) async fn at(url: &str) -> Self {
         let repo = Repository::connect(url).await.unwrap();
         let mut users = Vec::new();
         let mut tokens = Vec::new();
@@ -52,13 +52,13 @@ impl Fixture {
             user: users.remove(0),
         }
     }
-    fn base(&self) -> String {
+    pub(super) fn base(&self) -> String {
         format!("/v1/photo-index/devices/{}", self.device)
     }
-    async fn call(&self, method: &str, path: &str, body: serde_json::Value) -> Response {
+    pub(super) async fn call(&self, method: &str, path: &str, body: serde_json::Value) -> Response {
         call(&self.state, &self.token, method, path, body).await
     }
-    async fn enable(&self) -> i64 {
+    pub(super) async fn enable(&self) -> i64 {
         let result = body(
             self.call("PUT", &self.base(), json!({"enabled":true}))
                 .await,
@@ -79,10 +79,10 @@ impl Fixture {
                 dimension: 2,
             }),
             postgres_vector,
-            active: Semaphore::new(2),
+            active: Arc::new(Semaphore::new(2)),
         });
     }
-    async fn cleanup(self) {
+    pub(super) async fn cleanup(self) {
         let root = self.state.config.root.clone();
         assert!(
             root.file_name()
@@ -118,7 +118,7 @@ async fn call(
         .await
         .unwrap()
 }
-async fn body(response: Response) -> serde_json::Value {
+pub(super) async fn body(response: Response) -> serde_json::Value {
     serde_json::from_slice(
         &to_bytes(response.into_body(), 2 * 1024 * 1024)
             .await

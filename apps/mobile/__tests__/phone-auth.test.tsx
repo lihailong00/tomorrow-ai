@@ -10,6 +10,7 @@ import { Button } from '../src/ui/components';
 
 jest.mock('../src/platform/ports', () => ({
   platform: { hasSecureStorage: true },
+  defaultServerUrl: 'https://test.local',
 }));
 jest.mock('../src/ui/visuals', () => ({
   AssistantOrb: () => null,

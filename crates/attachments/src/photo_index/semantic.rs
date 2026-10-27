@@ -6,16 +6,18 @@ use tokio::sync::Semaphore;
 
 const DIMENSION: usize = 1024;
 const WINDOW: i64 = 86_400;
+#[derive(Clone)]
 pub(crate) struct Config {
     pub endpoint: String,
     pub key: String,
     pub model: String,
     pub dimension: usize,
 }
+#[derive(Clone)]
 pub(crate) struct Runtime {
     pub config: Option<Config>,
     pub postgres_vector: bool,
-    pub active: Semaphore,
+    pub active: Arc<Semaphore>,
 }
 pub(super) fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -34,7 +36,9 @@ fn from_env() -> Result<Option<Config>, AttachmentError> {
     config_from(|name| std::env::var(name).ok())
 }
 
-fn config_from(get: impl Fn(&str) -> Option<String>) -> Result<Option<Config>, AttachmentError> {
+pub(crate) fn config_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> Result<Option<Config>, AttachmentError> {
     if get("PHOTO_EMBEDDING_ENABLED").is_some_and(|v| {
         matches!(
             v.trim().to_ascii_lowercase().as_str(),
@@ -74,11 +78,7 @@ fn config_from(get: impl Fn(&str) -> Option<String>) -> Result<Option<Config>, A
         return Ok(None);
     }
     let url = reqwest::Url::parse(base.trim()).map_err(|_| invalid())?;
-    let local = url.host_str().is_some_and(|h| {
-        h == "localhost"
-            || h.parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback())
-    });
+    let local = url.host_str().is_some_and(tomorrow_domain::model::private_service_host);
     if (url.scheme() != "https" && !(url.scheme() == "http" && local))
         || !url.username().is_empty()
         || url.password().is_some()
@@ -105,6 +105,20 @@ fn config_from(get: impl Fn(&str) -> Option<String>) -> Result<Option<Config>, A
 #[cfg(test)]
 mod config_tests {
     use super::*;
+    #[test]
+    fn explicit_private_embedding_services_support_http_without_borrowing_cloud_keys() {
+        let lookup = |base: &str| config_from(|name| match name {
+            "PHOTO_EMBEDDING_BASE_URL" => Some(base.into()),
+            "PHOTO_EMBEDDING_API_KEY" => Some("fixture-local-service-key".into()),
+            _ => None,
+        });
+        for base in ["http://ollama:11434/v1","http://host.docker.internal:11434/v1","http://192.168.1.9:8080/v1","http://[::1]:8080/v1"] {
+            assert!(lookup(base).unwrap().is_some());
+        }
+        for base in ["http://public.example.test/v1","http://169.254.169.254/latest","https://user:secret@example.test/v1"] {
+            assert!(lookup(base).is_err());
+        }
+    }
     #[test]
     fn reuses_only_an_official_asr_origin_and_can_be_disabled() {
         let lookup = |base: &str, disabled: bool| {
@@ -183,7 +197,7 @@ pub(super) async fn initialize(pool: &AnyPool) -> Result<Runtime, AttachmentErro
     Ok(Runtime {
         config: from_env()?,
         postgres_vector: vector,
-        active: Semaphore::new(2),
+        active: Arc::new(Semaphore::new(2)),
     })
 }
 

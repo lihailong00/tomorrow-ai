@@ -2,6 +2,23 @@ use super::*;
 use axum::{body::to_bytes, http::Request};
 use tower::ServiceExt;
 
+#[test]
+fn asr_configuration_supports_explicit_private_http_services_and_rejects_public_http() {
+    let configuration = |base: &str| super::asr_from_lookup(|key| match key {
+        "ASR_BASE_URL" => Some(base.to_owned()),
+        "ASR_MODEL" => Some("local-whisper".into()),
+        _ => None,
+    });
+    for base in ["http://127.0.0.1:8081/v1","http://host.docker.internal:8081/v1","http://192.168.1.20:8081/v1","http://[::1]:8081/v1"] {
+        let config = configuration(base).unwrap().unwrap();
+        assert!(config.endpoint.ends_with("/audio/transcriptions"));
+        assert!(config.api_key.is_none());
+    }
+    for base in ["http://asr.example.test/v1","http://169.254.169.254/latest","https://user:secret@example.test/v1"] {
+        assert!(configuration(base).is_err());
+    }
+}
+
 async fn fixture(
     max_bytes: u64,
     asr: Option<AsrConfig>,

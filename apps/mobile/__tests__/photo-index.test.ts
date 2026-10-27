@@ -59,6 +59,7 @@ test('explicit enable passes only identity and the new consent epoch to the plat
   await photoIndex.enable(api, 'one');
   expect(request).toHaveBeenCalledWith('/photo-index/devices/device-a', 'PUT', {
     enabled: true,
+    cloud_processing: true,
   });
   expect(native.enable).toHaveBeenCalledWith('https://example.test', 'one', 7);
   expect(native.enable.mock.invocationCallOrder[0]).toBeGreaterThan(

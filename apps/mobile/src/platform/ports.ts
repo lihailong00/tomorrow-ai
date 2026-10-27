@@ -2,6 +2,7 @@
  * Domain models and screens must not import native modules or platform SDKs.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { InstanceManifest, readInstanceManifest } from '../domain/instance';
 import {
   AppState,
   Linking,
@@ -49,6 +50,10 @@ export interface Preferences {
   serverUrl: string;
   onboarded: boolean;
   serverUrlCustomized?: boolean;
+  instance?: InstanceManifest;
+  allowInsecureLan?: boolean;
+  connectionError?: string;
+  pendingConnection?: { url: string; instanceId: string };
 }
 export const defaultServerUrl =
   'https://api.example.invalid';
@@ -74,7 +79,13 @@ export const platform = {
         saved = parsed;
       }
     } catch {
-      // A damaged preference file falls back to the built-in cloud service.
+      // Losing a self-host preference must never start sending to the official host.
+      return { serverUrl: '', onboarded: true, serverUrlCustomized: true,
+        connectionError: '本机服务设置已损坏，请重新选择服务器。' };
+    }
+    if (value !== null && typeof saved.serverUrl !== 'string') {
+      return { serverUrl: '', onboarded: true, serverUrlCustomized: true,
+        connectionError: '本机服务设置不完整，请重新选择服务器。' };
     }
     const preferences: Preferences = {
       serverUrl:
@@ -85,7 +96,13 @@ export const platform = {
       ...(saved.serverUrlCustomized === true
         ? { serverUrlCustomized: true }
         : {}),
+      ...(saved.allowInsecureLan === true ? { allowInsecureLan: true } : {}),
+      ...(typeof saved.connectionError === 'string' ? { connectionError: saved.connectionError } : {}),
     };
+    if (saved.instance) {
+      try { preferences.instance = readInstanceManifest(saved.instance); }
+      catch { preferences.connectionError = '保存的服务器身份不兼容，请重新检查连接。'; }
+    }
     if (
       !preferences.serverUrlCustomized &&
       legacyDefaultServer.test(preferences.serverUrl.trim())
@@ -182,5 +199,10 @@ export const platform = {
       throw new Error('只允许打开网页链接。');
     }
     await Linking.openURL(url);
+  },
+  initialConnectionLink: () => Linking.getInitialURL(),
+  onConnectionLink(listener: (url: string) => void): () => void {
+    const subscription = Linking.addEventListener('url', event => listener(event.url));
+    return () => subscription.remove();
   },
 };

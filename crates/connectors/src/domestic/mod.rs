@@ -25,11 +25,13 @@ use tomorrow_domain::{Capability, Repository, now};
 
 #[derive(Clone)]
 pub struct IntegrationState(Arc<Inner>);
+#[derive(Clone)]
 struct Inner {
     repo: Repository,
     pool: AnyPool,
     crypto: Option<Crypto>,
-    requests: Semaphore,
+    requests: Arc<Semaphore>,
+    runtime_values: Option<std::collections::HashMap<String, String>>,
 }
 
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
@@ -89,8 +91,21 @@ impl IntegrationState {
             repo,
             pool,
             crypto,
-            requests: Semaphore::new(8),
+            requests: Arc::new(Semaphore::new(8)),
+            runtime_values: None,
         })))
+    }
+    pub fn reconfigured(&self, values: &std::collections::HashMap<String, String>) -> Self {
+        let mut inner = (*self.0).clone();
+        inner.crypto = values.get("CONNECTOR_ENCRYPTION_KEY").and_then(|v| Crypto::from_hex(v).ok());
+        inner.runtime_values = Some(values.clone());
+        Self(Arc::new(inner))
+    }
+    fn value(&self, key: &str) -> Option<String> {
+        match &self.0.runtime_values { Some(values) => values.get(key).cloned(), None => std::env::var(key).ok() }
+    }
+    fn oauth_provider(&self, id: &str) -> Option<oauth::OAuthProvider> {
+        oauth::OAuthProvider::from_lookup(id, |key| self.value(key))
     }
     fn crypto(&self) -> Result<&Crypto> {
         self.0.crypto.as_ref().ok_or_else(not_configured)
@@ -98,8 +113,8 @@ impl IntegrationState {
     fn configured(&self, item: &catalog::Integration) -> bool {
         match item.mode {
             "import" => true,
-            "map" => providers::configured(item.id),
-            "oauth" => self.0.crypto.is_some() && oauth::OAuthProvider::from_env(item.id).is_some(),
+            "map" => self.value("AMAP_WEB_API_KEY").is_some_and(|v| !v.trim().is_empty()),
+            "oauth" => self.0.crypto.is_some() && self.oauth_provider(item.id).is_some(),
             _ => self.0.crypto.is_some(),
         }
     }
@@ -338,7 +353,7 @@ impl IntegrationState {
             return Err(ConnectorError::invalid());
         }
         self.crypto()?;
-        let provider = oauth::OAuthProvider::from_env(id).ok_or_else(not_configured)?;
+        let provider = self.oauth_provider(id).ok_or_else(not_configured)?;
         self.admit(user).await?;
         let secret = random_secret();
         let generation = self.reserve(user, id).await?;
@@ -371,7 +386,7 @@ impl IntegrationState {
             .as_deref()
             .filter(|code| !code.is_empty() && code.len() <= 4096)
             .ok_or_else(invalid_state)?;
-        let provider = oauth::OAuthProvider::from_env(id).ok_or_else(not_configured)?;
+        let provider = self.oauth_provider(id).ok_or_else(not_configured)?;
         let _permit = self.0.requests.try_acquire().map_err(|_| busy())?;
         let credentials = provider.exchange(code).await?;
         self.save(
@@ -427,7 +442,7 @@ impl IntegrationState {
             return timeout(READ_TIMEOUT, async {
                 self.admit(user).await?;
                 let _permit = self.0.requests.try_acquire().map_err(|_| busy())?;
-                providers::read(id, &json!({}), &query).await
+                providers::read_with_map_key(id, &json!({}), &query, self.value("AMAP_WEB_API_KEY").as_deref()).await
             })
             .await
             .unwrap_or_else(|_| Err(read_timeout()));
@@ -441,7 +456,7 @@ impl IntegrationState {
                     "mail" => mail::read(id, &credentials, &query).await?,
                     "oauth" => {
                         let provider =
-                            oauth::OAuthProvider::from_env(id).ok_or_else(not_configured)?;
+                            self.oauth_provider(id).ok_or_else(not_configured)?;
                         let (result, updated) = provider.read(&credentials, &query).await?;
                         // Persist rotated refresh credentials even if the subsequent
                         // resource read failed, without exposing that failure as data.

@@ -13,6 +13,17 @@
 !services/agent/tsconfig.json
 !services/agent/src/
 !services/agent/src/**
+!apps/
+!apps/admin/
+!apps/admin/package.json
+!apps/admin/pnpm-lock.yaml
+!apps/admin/tsconfig.json
+!apps/admin/vite.config.ts
+!apps/admin/index.html
+!apps/admin/src/
+!apps/admin/src/**
 !infra/
 !infra/deploy/
 !infra/deploy/**
+!infra/selfhost/
+!infra/selfhost/restore.py

@@ -1,9 +1,9 @@
 use std::{env, time::Duration};
 
-use reqwest::{header, redirect::Policy, Client, Url};
+use reqwest::{Client, Url, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
 
-use crate::{dto::Message, DomainError};
+use crate::{DomainError, dto::Message};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
@@ -65,9 +65,19 @@ struct ModelSettings {
 /// Injecting the lookup keeps resolution pure and independently testable.
 fn settings_from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> ModelSettings {
     let base_url = nonempty(lookup("MODEL_BASE_URL"));
-    let api_key = nonempty(lookup("MODEL_API_KEY"));
+    let mut api_key = nonempty(lookup("MODEL_API_KEY"));
     let model = nonempty(lookup("MODEL_NAME"));
     if base_url.is_some() || api_key.is_some() || model.is_some() {
+        // A keyless local model is opt-in through both explicit MODEL_BASE_URL
+        // and MODEL_NAME. Never borrow a cloud key for a different endpoint.
+        if api_key.is_none()
+            && model.is_some()
+            && base_url
+                .as_ref()
+                .is_some_and(|base| private_model_url(base))
+        {
+            api_key = Some("local-no-auth".into());
+        }
         return ModelSettings {
             base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.into()),
             api_key,
@@ -120,7 +130,12 @@ impl LlmProvider {
         if env::var("AGENT_MODE").as_deref() == Ok("pi") {
             return Self::local();
         }
-        let settings = settings_from_lookup(|name| env::var(name).ok());
+        Self::from_lookup(|name| env::var(name).ok())
+    }
+
+    /// A request pins one validated configuration; never changes process environment.
+    pub fn from_lookup(lookup: impl FnMut(&str) -> Option<String>) -> Self {
+        let settings = settings_from_lookup(lookup);
         if !settings.remote_intent {
             return Self::local();
         }
@@ -143,11 +158,7 @@ impl LlmProvider {
     /// Distinguishes an intended remote configuration from explicit local mode.
     /// An incomplete remote configuration must fail rather than silently run locally.
     pub fn mode(&self) -> &'static str {
-        if self.remote_intent {
-            "llm"
-        } else {
-            "local"
-        }
+        if self.remote_intent { "llm" } else { "local" }
     }
 
     pub fn model_name(&self) -> Option<&str> {
@@ -301,14 +312,51 @@ fn completion_endpoint(base_url: &str) -> Result<Url, DomainError> {
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
+        || (url.scheme() == "http" && !url.host_str().is_some_and(private_service_host))
     {
         return Err(DomainError::External(
-            "模型服务地址须为不含凭证、查询参数和片段的 HTTP(S) 地址".into(),
+            "模型服务地址须为不含凭证、查询参数和片段的 HTTPS 或内网 HTTP 地址".into(),
         ));
     }
     let path = format!("{}/chat/completions", url.path().trim_end_matches('/'));
     url.set_path(&path);
     Ok(url)
+}
+
+/// Private hosts are allowed only for administrator-selected inference services.
+/// This is not an allowlist for web fetching, redirects, or model-supplied URLs.
+pub fn private_service_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    if [
+        "localhost",
+        "api",
+        "backend",
+        "tomorrow-api",
+        "host.docker.internal",
+        "ollama",
+        "vllm",
+        "lmstudio",
+    ]
+    .contains(&host.as_str())
+    {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unique_local(),
+        Err(_) => false,
+    }
+}
+
+fn private_model_url(base: &str) -> bool {
+    Url::parse(base).is_ok_and(|url| {
+        ["http", "https"].contains(&url.scheme())
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.host_str().is_some_and(private_service_host)
+    })
 }
 
 fn model_transport_error(error: reqwest::Error) -> DomainError {
@@ -558,6 +606,62 @@ mod tests {
         assert!(completion_endpoint("file:///tmp/model").is_err());
     }
 
+    #[test]
+    fn administrator_inference_urls_allow_private_http_and_reject_public_http() {
+        for base in [
+            "http://127.0.0.1:11434/v1",
+            "http://[::1]:11434/v1",
+            "http://192.168.0.8:8080/v1",
+            "http://10.0.0.4:8080/v1",
+            "http://host.docker.internal:11434/v1",
+            "http://ollama:11434/v1",
+            "https://public-model.example.test/v1",
+        ] {
+            assert!(completion_endpoint(base).is_ok(), "{base}");
+        }
+        for base in [
+            "http://public-model.example.test/v1",
+            "http://8.8.8.8/v1",
+            "http://169.254.169.254/latest",
+            "http://user:secret@ollama:11434/v1",
+            "http://ollama:11434/v1?api_key=secret",
+        ] {
+            assert!(completion_endpoint(base).is_err(), "{base}");
+        }
+    }
+
+    #[test]
+    fn keyless_models_require_an_explicit_private_compatible_base_and_model() {
+        let local = settings_from_lookup(|name| match name {
+            "MODEL_BASE_URL" => Some("http://host.docker.internal:11434/v1".into()),
+            "MODEL_NAME" => Some("local-model".into()),
+            "DEEPSEEK_API_KEY" => Some("must-not-borrow-cloud-key".into()),
+            _ => None,
+        });
+        assert_eq!(local.api_key.as_deref(), Some("local-no-auth"));
+        assert_eq!(local.kind.name(), "openai-compatible");
+        for values in [
+            vec![("MODEL_BASE_URL", "http://ollama:11434/v1")],
+            vec![("MODEL_NAME", "local-model")],
+            vec![
+                ("MODEL_BASE_URL", "https://public-model.example.test/v1"),
+                ("MODEL_NAME", "model"),
+            ],
+            vec![
+                ("DEEPSEEK_BASE_URL", "http://ollama:11434/v1"),
+                ("DEEPSEEK_MODEL", "model"),
+            ],
+        ] {
+            let settings = settings_from_lookup(|key| {
+                values
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.to_string())
+            });
+            assert!(settings.api_key.is_none());
+        }
+    }
+
     #[tokio::test]
     async fn missing_key_returns_explicit_local_demo_without_network() {
         let provider = LlmProvider::local();
@@ -581,10 +685,12 @@ mod tests {
         );
         assert!(!provider.is_configured());
         assert_eq!(provider.mode(), "llm");
-        assert!(provider
-            .complete(&[message("user", "hello")])
-            .await
-            .is_err());
+        assert!(
+            provider
+                .complete(&[message("user", "hello")])
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

@@ -89,7 +89,7 @@ impl PhoneAuth {
         Self::from_settings(|key| std::env::var(key).ok())
     }
 
-    fn from_settings(get: impl Fn(&str) -> Option<String>) -> Result<Self, DomainError> {
+    pub fn from_settings(get: impl Fn(&str) -> Option<String>) -> Result<Self, DomainError> {
         let value = |key: &str| {
             get(key)
                 .map(|v| v.trim().to_owned())

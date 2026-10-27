@@ -304,7 +304,7 @@ impl Repository {
         run_id: &str,
         token: &str,
     ) -> Result<(String, String), DomainError> {
-        let row = sqlx::query("SELECT user_id,scope,task_id,task_attempt FROM agent_runs WHERE id=$1 AND token_hash=$2 AND status='running' AND lease_until>=$3")
+        let row = sqlx::query("SELECT user_id,scope,task_id,task_attempt FROM agent_runs WHERE id=$1 AND token_hash=$2 AND status='running' AND lease_until>=$3 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=agent_runs.user_id AND c.disabled<>0)")
             .bind(run_id).bind(auth::hash_token(token)).bind(now()).fetch_optional(&self.pool).await?
             .ok_or(DomainError::Forbidden)?;
         let user_id: String = row.get("user_id");

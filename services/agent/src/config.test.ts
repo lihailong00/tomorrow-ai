@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { streamSimple } from '@earendil-works/pi-ai/api/openai-completions';
 import { normalizeContext } from '@earendil-works/pi-ai/utils/transcript';
-import { authenticate, positiveInteger, resolveModel, serviceUrl } from './config.js';
+import { authenticate, positiveInteger, resolveModel, rustServiceUrl, serviceUrl } from './config.js';
 
 async function captureProviderRequest(env: NodeJS.ProcessEnv, content: string) {
   const { model, apiKey } = resolveModel(env);
@@ -83,4 +83,31 @@ test('service authentication and budget parsing fail closed', () => {
   assert.equal(positiveInteger(undefined, 10, 20), 10);
   for (const value of ['-1', '0', 'NaN', '21', '1.5']) assert.throws(() => positiveInteger(value, 10, 20));
   assert.throws(() => resolveModel({ DEEPSEEK_API_KEY: 'bad\nheader' }));
+});
+
+test('self-hosted private models support an explicit keyless endpoint without borrowing a cloud credential', () => {
+  for (const host of ['127.0.0.1:11434', 'localhost:11434', '192.168.1.20:8000', '10.0.0.2:8000',
+    '172.20.0.3:8000', '[::1]:11434', '[fd00::2]:8000', 'ollama:11434', 'vllm:8000', 'lmstudio:1234']) {
+    const settings = resolveModel({ MODEL_BASE_URL: `http://${host}/v1`, MODEL_NAME: 'local-model',
+      DEEPSEEK_API_KEY: 'unrelated-cloud-key' });
+    assert.equal(settings.apiKey, 'local-no-auth');
+    assert.equal(settings.model.baseUrl, `http://${host}/v1`);
+    assert.equal(settings.model.provider, 'tomorrow-compatible');
+  }
+  for (const endpoint of ['https://public.test/v1', 'http://public.test/v1', 'http://169.254.169.254/v1',
+    'http://172.32.0.1/v1', 'http://100.100.100.200/v1', 'https://user:pass@127.0.0.1/v1']) {
+    assert.throws(() => resolveModel({ MODEL_BASE_URL: endpoint, MODEL_NAME: 'local-model', DEEPSEEK_API_KEY: 'must-not-borrow' }));
+  }
+  assert.throws(() => resolveModel({ MODEL_BASE_URL: 'http://localhost:11434/v1' }));
+  assert.throws(() => resolveModel({ MODEL_NAME: 'unfinished', DEEPSEEK_API_KEY: 'must-not-borrow' }));
+});
+
+test('private Rust service roots are valid while runtime secrets never target public hosts', () => {
+  for (const endpoint of ['http://api:8080', 'http://backend:8080', 'http://tomorrow-api:8080',
+    'http://127.0.0.1:8080/', 'https://10.0.0.1:8443', 'http://[fd00::1]:8080']) {
+    assert.equal(rustServiceUrl(endpoint, true), endpoint.replace(/\/$/, ''));
+  }
+  assert.equal(rustServiceUrl('https://legacy-api.test'), 'https://legacy-api.test');
+  assert.throws(() => rustServiceUrl('https://legacy-api.test', true));
+  assert.throws(() => rustServiceUrl('http://public.test'));
 });

@@ -63,6 +63,7 @@ pub struct AttachmentsState {
     config: Arc<StorageConfig>,
     client: reqwest::Client,
     photo_index: Arc<photo_index::Runtime>,
+    photo_vision: Arc<photo_index::vision::Runtime>,
     #[cfg(feature = "s3")]
     s3: Option<s3::S3Storage>,
 }
@@ -238,6 +239,7 @@ impl AttachmentsState {
         .await?;
         asr::initialize(&pool).await?;
         let photo_index = Arc::new(photo_index::initialize(&pool).await?);
+        let photo_vision = Arc::new(photo_index::vision::initialize(&pool).await?);
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(120))
@@ -248,6 +250,7 @@ impl AttachmentsState {
             repo,
             pool,
             photo_index,
+            photo_vision,
             config: Arc::new(StorageConfig {
                 root,
                 max_bytes,
@@ -257,6 +260,23 @@ impl AttachmentsState {
             #[cfg(feature = "s3")]
             s3: None,
         })
+    }
+
+    /// Clone runtime provider configuration while sharing admission semaphores.
+    pub fn reconfigured(&self, values: &std::collections::HashMap<String, String>) -> Result<Self, AttachmentError> {
+        let get = |key: &str| values.get(key).cloned();
+        let mut next = self.clone();
+        let mut storage = (*self.config).clone();
+        storage.asr = asr_from_lookup(get).unwrap_or(None);
+        next.config = Arc::new(storage);
+        let mut photo = (*self.photo_index).clone();
+        photo.config = photo_index::semantic::config_from(get).unwrap_or(None);
+        next.photo_index = Arc::new(photo);
+        let mut vision = (*self.photo_vision).clone();
+        vision.config = photo_index::vision::config_from(get).unwrap_or(None);
+        vision.client = photo_index::vision::client_for(&vision.config)?;
+        next.photo_vision = Arc::new(vision);
+        Ok(next)
     }
 
     pub fn asr_configured(&self) -> bool {
@@ -941,17 +961,19 @@ fn percent_encode(value: &str) -> String {
 }
 
 fn asr_from_env() -> Result<Option<AsrConfig>, AttachmentError> {
-    let base = std::env::var("ASR_BASE_URL")
-        .ok()
+    asr_from_lookup(|key| std::env::var(key).ok())
+}
+
+fn asr_from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<AsrConfig>, AttachmentError> {
+    let base = get("ASR_BASE_URL")
         .filter(|s| !s.trim().is_empty());
-    let model = std::env::var("ASR_MODEL")
-        .ok()
+    let model = get("ASR_MODEL")
         .filter(|s| !s.trim().is_empty());
     match (base, model) {
         (None, None) => Ok(None),
         (Some(base), Some(model)) => {
             let base = base.trim().trim_end_matches('/');
-            let protocol = match std::env::var("ASR_PROTOCOL")
+            let protocol = match get("ASR_PROTOCOL")
                 .as_deref()
                 .unwrap_or("openai_transcriptions")
             {
@@ -980,13 +1002,13 @@ fn asr_from_env() -> Result<Option<AsrConfig>, AttachmentError> {
                 || url.password().is_some()
                 || url.query().is_some()
                 || url.fragment().is_some()
+                || (url.scheme() == "http" && !url.host_str().is_some_and(tomorrow_domain::model::private_service_host))
             {
                 return Err(AttachmentError::validation(
-                    "ASR_BASE_URL 须为不含凭据、查询参数和 fragment 的 HTTP(S) 服务地址",
+                    "ASR_BASE_URL 须为不含凭据、查询参数和 fragment 的 HTTPS 或内网 HTTP 服务地址",
                 ));
             }
-            let api_key = std::env::var("ASR_API_KEY")
-                .ok()
+            let api_key = get("ASR_API_KEY")
                 .filter(|s| !s.trim().is_empty());
             Ok(Some(AsrConfig {
                 endpoint,

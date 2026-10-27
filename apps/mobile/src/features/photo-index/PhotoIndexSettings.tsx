@@ -21,7 +21,9 @@ import { styles as s } from '../../ui/theme';
 
 const states: Record<string, string> = {
   queued: '等待充电和 Wi-Fi，随后开始处理',
-  scanning: '正在手机上分析照片',
+  scanning: '正在上传分析副本并整理照片',
+  analyzing: '云端正在分析照片，稍后自动同步结果',
+  cloud_consent_required: '处理方式已更新，请重新确认云端分析授权',
   idle: '等待新增照片，后台约每 6 小时检查一次',
   paused: '已停止扫描',
   no_permission: '相册权限已收回，扫描已暂停',
@@ -31,12 +33,14 @@ const states: Record<string, string> = {
 };
 
 export function PhotoIndexSettings() {
-  const { api, user } = useApp();
+  const { api, user, preferences } = useApp();
+  const imageDestination = preferences?.instance?.dataflow.images ?? '当前服务器配置的图片分析服务';
   const [local, setLocal] = useState<PhotoIndexStatus | null>(null);
   const [indexed, setIndexed] = useState(0);
   const [remoteEnabled, setRemoteEnabled] = useState(false);
   const [ready, setReady] = useState(false);
   const [unavailable, setUnavailable] = useState(false);
+  const [visionConfigured, setVisionConfigured] = useState(false);
   const [notice, setNotice] = useState('');
   const [query, setQuery] = useState('');
   const [searchMode, setSearchMode] = useState<'hybrid' | 'keyword'>('hybrid');
@@ -59,8 +63,10 @@ export function PhotoIndexSettings() {
         facts_ready?: number;
         semantic_ready?: number;
         semantic_configured?: boolean;
+        vision_configured?: boolean;
       }>(photoIndexPath(status.deviceId));
       setIndexed(remote.indexed);
+      setVisionConfigured(remote.vision_configured === true);
       setPrepared({
         facts: remote.facts_ready ?? 0,
         semantic: remote.semantic_ready ?? 0,
@@ -107,10 +113,10 @@ export function PhotoIndexSettings() {
         </Text>
         <Text style={[s.small, { marginVertical: 8 }]}>
           默认关闭。开启后，在充电且连接 Wi-Fi
-          时，分析你授权的照片。原图留在手机，只同步图片时间、尺寸、识别文字、场景标签和简要描述。
+          时，为你授权的照片生成高清分析副本，上传云端视觉模型提取文字、画面描述和标签。手机原图不修改，分析副本不落盘，服务器只保存分析结果与索引。
         </Text>
         <Text style={s.small}>
-          提取的文字也可能包含隐私，请只授权你愿意用于索引的照片。此功能不会自动把推测写成你的长期记忆。
+          处理去向：{imageDestination}。图片与识别结果可能含隐私，请只授权你愿意分析的照片。此功能不会自动把推测写成你的长期记忆。
         </Text>
         {!photoIndexAvailable ? (
           <Notice>当前设备暂不支持相册索引。</Notice>
@@ -125,6 +131,8 @@ export function PhotoIndexSettings() {
             {unavailable && (
               <Notice>当前服务尚未提供相册索引，请更新后端后再开启。</Notice>
             )}
+            {ready && !visionConfigured && <Notice>当前服务尚未配置云端图片分析，请稍后再开启。</Notice>}
+            {local?.state === 'cloud_consent_required' && <Notice>旧版只上传文字。新版会临时上传图片分析副本，需要你重新确认开启。</Notice>}
             {!ready && !unavailable && (
               <Notice>
                 请确认服务连接后再开启。已有本机任务可以随时关闭。
@@ -146,12 +154,12 @@ export function PhotoIndexSettings() {
                 </Button>
               ) : (
                 <Button
-                  disabled={!ready}
+                  disabled={!ready || !visionConfigured}
                   loading={action.busy}
                   onPress={() =>
                     Alert.alert(
                       '开启相册索引',
-                      '照片在手机上分析，原图不上传。识别出的文字、标签、描述和必要元信息会同步到你的账号。你可以选择只授权部分照片，并随时停止或清除索引。',
+                      `开启后，将在充电且连接 Wi-Fi 时，压缩你授权的照片并上传分析副本。处理去向：${imageDestination}。手机原图不修改；服务器在内存中临时处理图片，只保存分析结果和必要元信息。你可以只授权部分照片，并随时停止或清除索引。`,
                       [
                         { text: '暂不开启', style: 'cancel' },
                         {

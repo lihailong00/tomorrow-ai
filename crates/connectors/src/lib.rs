@@ -183,7 +183,7 @@ struct Inner {
     pool: AnyPool,
     config: Option<Config>,
     client: Client,
-    refresh_lock: Mutex<()>,
+    refresh_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -235,9 +235,17 @@ impl ConnectorState {
                 pool,
                 config,
                 client: http_client()?,
-                refresh_lock: Mutex::new(()),
+                refresh_lock: Arc::new(Mutex::new(())),
             }),
         })
+    }
+
+    pub fn reconfigured(&self, values: &std::collections::HashMap<String, String>) -> Result<Self> {
+        Ok(Self { inner: Arc::new(Inner {
+            repo: self.inner.repo.clone(), pool: self.inner.pool.clone(),
+            config: Config::from_lookup(|key| values.get(key).cloned()).ok(),
+            client: self.inner.client.clone(), refresh_lock: self.inner.refresh_lock.clone(),
+        }) })
     }
 
     pub fn is_configured(&self) -> bool {

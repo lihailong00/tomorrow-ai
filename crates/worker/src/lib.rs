@@ -15,6 +15,7 @@ pub struct WorkerEngine {
     repository: Repository,
     provider: Arc<ModelProvider>,
     agent: Option<AgentClient>,
+    settings: Option<tomorrow_settings::ConfigStore>,
 }
 
 impl WorkerEngine {
@@ -23,12 +24,17 @@ impl WorkerEngine {
             repository,
             provider: Arc::new(provider),
             agent: None,
+            settings: None,
         }
     }
 
     pub fn with_agent(mut self, agent: Option<AgentClient>) -> Self {
         self.agent = agent;
         self
+    }
+
+    pub fn with_settings(mut self, settings: tomorrow_settings::ConfigStore) -> Self {
+        self.settings = Some(settings); self
     }
 
     pub fn repository(&self) -> &Repository {
@@ -76,12 +82,19 @@ impl WorkerEngine {
     }
 
     async fn generate(&self, claim: &ClaimedTask) -> Result<(String, String)> {
+        let provider = match &self.settings {
+            Some(settings) if self.agent.is_none() => {
+                let values = settings.effective_values().await?;
+                Arc::new(ModelProvider::from_lookup(|key| values.get(key).cloned()))
+            }
+            _ => self.provider.clone(),
+        };
         // Read current memory after claiming, never use an old approval/context snapshot.
         let memories = self.repository.memories(&claim.user_id).await?;
         let tasks = self.repository.tasks(&claim.user_id).await?;
         let schedules = self.repository.schedules(&claim.user_id).await?;
         let context = local_context(&memories, &tasks, &schedules);
-        if self.agent.is_none() && self.provider.mode() == "local" {
+        if self.agent.is_none() && provider.mode() == "local" {
             return Ok((
                 local_document(&claim.task, &memories, &tasks, &schedules),
                 "local".into(),
@@ -112,7 +125,7 @@ impl WorkerEngine {
                 .await?;
             return Ok((content, "llm".into()));
         }
-        let reply = self.provider.complete(&messages).await?;
+        let reply = provider.complete(&messages).await?;
         Ok((reply.content, reply.mode))
     }
 }

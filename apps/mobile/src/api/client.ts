@@ -58,13 +58,21 @@ export function newRequestId(): string {
 type Fetcher = typeof fetch;
 export class ApiClient {
   readonly baseUrl: string;
+  private disposed = false;
+  private requests = new Set<AbortController>();
   constructor(
     baseUrl: string,
     private token?: string,
     private onUnauthorized?: () => void,
     private fetcher: Fetcher = fetch,
+    private verifyIdentity?: () => Promise<void>,
   ) {
-    this.baseUrl = normalizeServerUrl(baseUrl);
+    this.baseUrl = baseUrl ? normalizeServerUrl(baseUrl) : '';
+  }
+  dispose() {
+    this.disposed = true;
+    for (const controller of this.requests) controller.abort();
+    this.requests.clear();
   }
   async request<T>(
     path: string,
@@ -72,7 +80,13 @@ export class ApiClient {
     body?: unknown,
     signal?: AbortSignal,
   ): Promise<T> {
+    if (this.disposed || !this.baseUrl) {
+      throw new ApiError('connection_required', '请先检查并确认服务器连接。');
+    }
+    if (this.verifyIdentity) await this.verifyIdentity();
+    if (this.disposed) throw new ApiError('connection_changed', '服务器连接已变化，请重新操作。');
     const controller = new AbortController();
+    this.requests.add(controller);
     const cancel = () => controller.abort();
     signal?.addEventListener('abort', cancel);
     if (signal?.aborted) {
@@ -102,7 +116,11 @@ export class ApiClient {
           ? { body: multipart ? (body as FormData) : JSON.stringify(body) }
           : {}),
         signal: controller.signal,
-      });
+        credentials: 'omit',
+        redirect: 'error',
+      } as RequestInit & { redirect: 'error' });
+      if (this.disposed) throw new ApiError('connection_changed', '服务器连接已变化，请重新操作。');
+      if (response.redirected) throw new ApiError('redirect_blocked', '接口发生跳转，请重新检查服务器地址。');
       const text = await response.text();
       const retryHeader = Number(response.headers?.get?.('Retry-After'));
       const retryAfterSeconds =
@@ -139,6 +157,7 @@ export class ApiClient {
           retryAfterSeconds,
         );
       }
+      if (this.disposed) throw new ApiError('connection_changed', '服务器连接已变化，请重新操作。');
       return data as T;
     } catch (error) {
       if (error instanceof ApiError) {
@@ -156,6 +175,7 @@ export class ApiClient {
       );
     } finally {
       clearTimeout(timeout);
+      this.requests.delete(controller);
       signal?.removeEventListener('abort', cancel);
     }
   }
@@ -214,12 +234,14 @@ export class ApiClient {
     password: string,
     name: string,
     timezone = 'Asia/Shanghai',
+    inviteCode?: string,
   ) =>
     this.request<AuthSession>('/auth/register', 'POST', {
       email: email.trim(),
       password,
       name: name.trim(),
       timezone,
+      ...(inviteCode ? { invite_code: inviteCode.trim() } : {}),
     });
   me = () => this.request<User>('/me');
   updateMe = (data: Partial<Pick<User, 'name' | 'timezone'>>) =>

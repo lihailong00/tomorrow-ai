@@ -14,7 +14,7 @@ EnvironmentFile=/etc/tomorrow/runtime.env
 EnvironmentFile=/etc/tomorrow/database.env
 EnvironmentFile=-/etc/tomorrow/sms.env
 EnvironmentFile=-/etc/tomorrow/asr.env
-ExecStartPre=/usr/bin/curl --fail --silent --show-error --retry 15 --retry-delay 2 --retry-connrefused --max-time 5 --output /dev/null http://127.0.0.1:8090/health
+# The administration UI must start even before a model has been configured.
 ExecStart=/opt/tomorrow/bin/tomorrow-api
 TimeoutStartSec=120
 Restart=on-failure

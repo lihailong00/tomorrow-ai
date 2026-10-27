@@ -1,5 +1,15 @@
 # Linux cloud trial deployment
 
+The package now includes the administration UI at `/admin/`. For a new self-hosted
+installation, use [the complete Compose deployment](../../docs/selfhost.md).
+Native systemd installations use `TADA_RUNTIME_CONFIG=enabled`: configure providers
+through the UI after consuming the private `config/setup-token`. Existing native
+installations must first run the offline `tada-config --import-environment` helper
+with the effective private service environment, then remove only the migrated
+setting overrides. Keep database/internal-service settings as deployment secrets.
+The older model.env instructions below describe legacy environment operation;
+model settings in that file do not override the runtime configuration endpoint.
+
 This is a single-host deployment for a limited cloud trial: Rust API + Rust Worker +
 TypeScript Pi, PostgreSQL, private local upload storage, and an HTTPS ingress.
 The scheduler is the existing durable database polling mode (`local`). This

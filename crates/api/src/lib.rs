@@ -16,6 +16,8 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use utoipa::{OpenApi, ToSchema};
 mod agent_api;
 mod phone_api;
+pub mod admin;
+mod live;
 use tomorrow_domain::agent::AgentClient;
 
 #[derive(Clone)]
@@ -29,6 +31,8 @@ pub struct AppState {
     pub integrations: Option<IntegrationState>,
     pub agent: Option<AgentClient>,
     pub phone_auth: phone::PhoneAuth,
+    pub settings: Option<tomorrow_settings::ConfigStore>,
+    pub admin: Option<admin::AdminState>,
 }
 impl AppState {
     pub fn new(repository: Repository, provider: ModelProvider, database_url: &str) -> Self {
@@ -47,6 +51,8 @@ impl AppState {
             integrations: None,
             agent: None,
             phone_auth: phone::PhoneAuth::disabled(),
+            settings: None,
+            admin: None,
         }
     }
     pub fn with_phone_auth(mut self, phone_auth: phone::PhoneAuth) -> Self {
@@ -86,6 +92,8 @@ pub async fn serve() -> anyhow::Result<()> {
     let database =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:data/tomorrow.db".into());
     let repository = Repository::connect(&database).await?;
+    let settings = tomorrow_settings::ConfigStore::new(repository.pool()).await?;
+    let administration = admin::AdminState::new(repository.clone(), settings.clone()).await?;
     let attachments = AttachmentsState::new(repository.clone()).await?;
     let connectors = ConnectorState::new(repository.clone()).await?;
     let integrations = IntegrationState::new(repository.clone()).await?;
@@ -98,10 +106,12 @@ pub async fn serve() -> anyhow::Result<()> {
         tracing::warn!(error=%error,"SMS authentication disabled because configuration is unavailable");
         phone::PhoneAuth::disabled()
     });
+    state.settings = Some(settings.clone());
+    state.admin = Some(administration.clone());
     let address = std::env::var("API_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
     tracing::info!(address=%address,"Tomorrow API listening");
-    axum::serve(listener, app(state))
+    axum::serve(listener, live::router(state, settings, administration))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
@@ -260,6 +270,7 @@ struct RegisterInput {
     password: String,
     name: Option<String>,
     timezone: Option<String>,
+    invite_code: Option<String>,
 }
 #[derive(Deserialize, ToSchema)]
 struct LoginInput {
@@ -270,6 +281,22 @@ struct LoginInput {
 struct ProfileInput {
     name: Option<String>,
     timezone: Option<String>,
+}
+
+pub(crate) async fn ensure_login_method(state: &AppState, key: &str) -> Result<()> {
+    if let Some(settings) = &state.settings {
+        let values = settings.effective_values().await.map_err(|_| DomainError::Unavailable("登录配置暂时不可用".into()))?;
+        if values.get(key).map(String::as_str) != Some("true") { return Err(DomainError::Forbidden.into()); }
+    }
+    Ok(())
+}
+
+pub(crate) async fn ensure_registration_open(state: &AppState) -> Result<()> {
+    if let Some(settings) = &state.settings {
+        let metadata = settings.instance_metadata().await.map_err(|_| DomainError::Unavailable("注册配置暂时不可用".into()))?;
+        if metadata.registration_policy != "open" { return Err(DomainError::Forbidden.into()); }
+    }
+    Ok(())
 }
 
 #[utoipa::path(get,path="/v1/health",responses((status=200,description="Database health")))]
@@ -284,6 +311,12 @@ async fn register(
     State(state): State<Arc<AppState>>,
     Json(input): Json<RegisterInput>,
 ) -> Result<Json<AuthSession>> {
+    if let Some(administration) = &state.admin {
+        ensure_login_method(&state, "EMAIL_PASSWORD_ENABLED").await?;
+        return Ok(Json(admin::register_email(administration, &input.email, input.password,
+            input.name.as_deref().unwrap_or("新朋友"), input.timezone.as_deref().unwrap_or("Asia/Shanghai"),
+            input.invite_code.as_deref()).await?));
+    }
     let password = input.password;
     let hash = tokio::task::spawn_blocking(move || auth::hash_password(&password))
         .await
@@ -302,19 +335,24 @@ async fn login(
     State(state): State<Arc<AppState>>,
     Json(input): Json<LoginInput>,
 ) -> Result<Json<AuthSession>> {
+    ensure_login_method(&state, "EMAIL_PASSWORD_ENABLED").await?;
+    if let Some(administration) = &state.admin {
+        return Ok(Json(admin::email_login(administration, &input.email, input.password).await?));
+    }
     let (user, hash) = state
         .repository
         .credentials(&input.email)
         .await?
         .ok_or(DomainError::Unauthorized)?;
     let password = input.password;
+    let verified_hash = hash.clone();
     if !tokio::task::spawn_blocking(move || auth::verify_password(&password, &hash))
         .await
         .map_err(|_| DomainError::Internal("密码处理失败".into()))?
     {
         return Err(DomainError::Unauthorized.into());
     }
-    let token = state.repository.create_session(&user.id).await?;
+    let token = state.repository.create_session_for_password(&user.id, &verified_hash).await?;
     Ok(Json(AuthSession { user, token }))
 }
 #[utoipa::path(post,path="/v1/auth/logout",responses((status=200,description="Session revoked")))]
@@ -740,7 +778,10 @@ async fn run_chat(state: &AppState, user_id: &str, input: ChatInput) -> Result<C
 }
 #[utoipa::path(get,path="/v1/capabilities",responses((status=200,description="Accurate runtime capability states")))]
 async fn capabilities(State(state): State<Arc<AppState>>, auth: Auth) -> Result<Json<Value>> {
-    let configured = state.agent.is_some() || state.provider.is_configured();
+    let configured = if let Some(settings) = &state.settings {
+        settings.readiness().await.map_err(|_| DomainError::Unavailable("模型配置暂时不可用".into()))?
+            .groups.iter().any(|group| group.id == "model" && group.status == "configured")
+    } else { state.agent.is_some() || state.provider.is_configured() };
     let mut items = vec![
         Capability {
             id: "memories".into(),
@@ -784,13 +825,13 @@ async fn capabilities(State(state): State<Arc<AppState>>, auth: Auth) -> Result<
         name: "Agent 工具执行".into(),
         category: "ai".into(),
         description: "通过对话查询记忆、保存资料、创建待确认任务和计划草稿".into(),
-        status: if state.agent.is_some() {
+        status: if state.agent.is_some() && configured {
             "available"
         } else {
             "not_configured"
         }
         .into(),
-        detail: if state.agent.is_some() {
+        detail: if state.agent.is_some() && configured {
             "Pi 执行循环已配置；Rust 校验用户权限、审批与操作防重。服务不可用时明确报错。"
         } else {
             "当前使用直接模型调用，未启用 Pi 执行服务。"

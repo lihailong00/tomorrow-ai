@@ -1,9 +1,10 @@
-//! Opt-in, user/device-scoped derived photo data. No image bytes or local URIs.
+//! Opt-in, user/device-scoped photo indices; optional ephemeral cloud vision.
 use super::*;
 use axum::extract::Query;
 use serde_json::json;
 mod facts;
-mod semantic;
+pub(super) mod semantic;
+pub(super) mod vision;
 pub(super) use semantic::Runtime;
 #[cfg(test)]
 mod tests;
@@ -32,6 +33,7 @@ pub(super) fn router(state: AttachmentsState) -> Router {
             axum::routing::put(sync).delete(remove),
         )
         .layer(DefaultBodyLimit::max(96 * 1024))
+        .merge(vision::router())
         .with_state(state)
 }
 
@@ -39,9 +41,11 @@ pub(super) fn router(state: AttachmentsState) -> Router {
 #[serde(deny_unknown_fields)]
 struct Consent {
     enabled: bool,
+    #[serde(default)]
+    cloud_processing: bool,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct Metadata {
     taken_at: Option<i64>,
@@ -137,8 +141,16 @@ async fn status_for(
         .unwrap_or("");
     let semantic_ready:i64=sqlx::query_scalar("SELECT count(*) FROM photo_index_vectors v JOIN photo_index_assets a ON a.user_id=v.user_id AND a.device_id=v.device_id AND a.asset_id=v.asset_id AND a.revision=v.revision WHERE v.user_id=$1 AND v.device_id=$2 AND v.model=$3")
         .bind(user).bind(device).bind(model).fetch_one(&state.pool).await?;
+    let cloud: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM photo_cloud_consents WHERE user_id=$1 AND device_id=$2 AND epoch=$3",
+    )
+    .bind(user)
+    .bind(device)
+    .bind(epoch)
+    .fetch_one(&state.pool)
+    .await?;
     Ok(Json(
-        json!({"enabled":enabled,"epoch":epoch,"indexed":count,"facts_ready":facts_ready,"semantic_ready":semantic_ready,"semantic_configured":state.photo_index.config.is_some()}),
+        json!({"enabled":enabled,"epoch":epoch,"cloud_processing":enabled&&cloud==1,"vision_configured":state.photo_vision.config.is_some(),"indexed":count,"facts_ready":facts_ready,"semantic_ready":semantic_ready,"semantic_configured":state.photo_index.config.is_some()}),
     ))
 }
 
@@ -167,9 +179,24 @@ async fn consent(
     .bind(&device)
     .fetch_one(&mut *tx)
     .await?;
+    sqlx::query("DELETE FROM photo_cloud_consents WHERE user_id=$1 AND device_id=$2")
+        .bind(&user)
+        .bind(&device)
+        .execute(&mut *tx)
+        .await?;
+    if input.enabled && input.cloud_processing {
+        sqlx::query("INSERT INTO photo_cloud_consents(user_id,device_id,epoch)VALUES($1,$2,$3)")
+            .bind(&user)
+            .bind(&device)
+            .bind(epoch)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     // Return this mutation's epoch, not a later concurrent setting change.
-    Ok(Json(json!({"enabled":input.enabled,"epoch":epoch})))
+    Ok(Json(
+        json!({"enabled":input.enabled,"epoch":epoch,"cloud_processing":input.enabled&&input.cloud_processing}),
+    ))
 }
 
 async fn lock_consent(
@@ -194,6 +221,10 @@ async fn sync(
     uuid(&device)?;
     uuid(&asset)?;
     let user = state.user(&headers).await?;
+    persist_sync(&state, &user, &device, &asset, input, None).await
+}
+
+fn validate_sync(input: &Sync) -> Result<(), AttachmentError> {
     let m = &input.metadata;
     if input.revision.is_empty()
         || input.revision.len() > 128
@@ -229,9 +260,35 @@ async fn sync(
             return Err(invalid());
         }
     }
-    let metadata = serde_json::to_string(m).map_err(|_| invalid())?;
+    Ok(())
+}
+
+async fn persist_sync(
+    state: &AttachmentsState,
+    user: &str,
+    device: &str,
+    asset: &str,
+    input: Sync,
+    vision_hash: Option<(&str, &str, &str)>,
+) -> Result<Json<serde_json::Value>, AttachmentError> {
+    validate_sync(&input)?;
+    let metadata = serde_json::to_string(&input.metadata).map_err(|_| invalid())?;
     let mut tx = state.pool.begin().await?;
     lock_consent(&mut tx, &user, &device, input.epoch).await?;
+    if vision_hash.is_some() {
+        vision::lock_cloud_consent(&mut tx, user, device, input.epoch).await?;
+    }
+    if let Some((_, _, job)) = vision_hash {
+        let live:i64=sqlx::query_scalar("SELECT count(*) FROM photo_vision_jobs WHERE user_id=$1 AND device_id=$2 AND asset_id=$3 AND job_id=$4")
+            .bind(user).bind(device).bind(asset).bind(job).fetch_one(&mut *tx).await?;
+        if live != 1 {
+            return Err(AttachmentError::new(
+                StatusCode::CONFLICT,
+                "photo_job_cancelled",
+                "图片处理已取消，请重新同步",
+            ));
+        }
+    }
     let existing: Option<String> = sqlx::query_scalar(
         "SELECT revision FROM photo_index_assets WHERE user_id=$1 AND device_id=$2 AND asset_id=$3",
     )
@@ -278,6 +335,21 @@ async fn sync(
     for result in input.results {
         sqlx::query("INSERT INTO photo_index_results(user_id,device_id,asset_id,kind,processor,content)VALUES($1,$2,$3,$4,$5,$6)")
             .bind(&user).bind(&device).bind(&asset).bind(result.kind).bind(result.processor).bind(result.content).execute(&mut *tx).await?;
+    }
+    if let Some((hash, model, job)) = vision_hash {
+        sqlx::query("INSERT INTO photo_vision_results(user_id,device_id,asset_id,input_hash,model,revision)VALUES($1,$2,$3,$4,$5,$6)ON CONFLICT(user_id,device_id,asset_id)DO UPDATE SET input_hash=$4,model=$5,revision=$6")
+            .bind(user).bind(device).bind(asset).bind(hash).bind(model).bind(&input.revision).execute(&mut *tx).await?;
+        sqlx::query("UPDATE photo_vision_task_state SET status='complete' WHERE user_id=$1 AND device_id=$2 AND asset_id=$3 AND job_id=$4")
+            .bind(user).bind(device).bind(asset).bind(job).execute(&mut *tx).await?;
+    } else {
+        sqlx::query(
+            "DELETE FROM photo_vision_results WHERE user_id=$1 AND device_id=$2 AND asset_id=$3",
+        )
+        .bind(user)
+        .bind(device)
+        .bind(asset)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(Json(
@@ -432,6 +504,9 @@ async fn remove(
     let mut tx = state.pool.begin().await?;
     lock_consent(&mut tx, &user, &device, input.epoch).await?;
     for sql in [
+        "DELETE FROM photo_vision_results WHERE user_id=$1 AND device_id=$2 AND asset_id=$3",
+        "DELETE FROM photo_vision_jobs WHERE user_id=$1 AND device_id=$2 AND asset_id=$3",
+        "DELETE FROM photo_vision_task_state WHERE user_id=$1 AND device_id=$2 AND asset_id=$3",
         "DELETE FROM photo_index_vectors WHERE user_id=$1 AND device_id=$2 AND asset_id=$3",
         "DELETE FROM photo_index_facts WHERE user_id=$1 AND device_id=$2 AND asset_id=$3",
         "DELETE FROM photo_index_results WHERE user_id=$1 AND device_id=$2 AND asset_id=$3",
@@ -465,6 +540,10 @@ async fn clear(
     .execute(&mut *tx)
     .await?;
     for sql in [
+        "DELETE FROM photo_cloud_consents WHERE user_id=$1 AND device_id=$2",
+        "DELETE FROM photo_vision_results WHERE user_id=$1 AND device_id=$2",
+        "DELETE FROM photo_vision_jobs WHERE user_id=$1 AND device_id=$2",
+        "DELETE FROM photo_vision_task_state WHERE user_id=$1 AND device_id=$2",
         "DELETE FROM photo_index_vectors WHERE user_id=$1 AND device_id=$2",
         "DELETE FROM photo_index_facts WHERE user_id=$1 AND device_id=$2",
         "DELETE FROM photo_embedding_queries WHERE user_id=$1 AND device_id=$2",

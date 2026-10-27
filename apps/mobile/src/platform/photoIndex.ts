@@ -51,6 +51,8 @@ function port(): PhotoIndexPort {
 export const photoIndexPath = (device: string) =>
   `/photo-index/devices/${encodeURIComponent(device)}`;
 export const photoIndex = {
+  // No network request: terminate background access before changing an owner/server.
+  suspend: () => native ? native.disable() : Promise.resolve(),
   status: (server: string, user: string) => port().status(server, user),
   async enable(api: ApiClient, user: string) {
     const device = await port().status(api.baseUrl, user);
@@ -60,7 +62,7 @@ export const photoIndex = {
     const consent = await api.request<{ enabled: boolean; epoch: number }>(
       path,
       'PUT',
-      { enabled: true },
+      { enabled: true, cloud_processing: true },
     );
     try {
       await port().enable(api.baseUrl, user, consent.epoch);

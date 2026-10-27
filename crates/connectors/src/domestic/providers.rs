@@ -80,12 +80,16 @@ pub async fn verify(id: &str, credentials: &Value) -> Result<Value> {
 }
 
 pub async fn read(id: &str, credentials: &Value, query: &Value) -> Result<Value> {
+    read_with_map_key(id, credentials, query, amap_key().ok().as_deref()).await
+}
+
+pub async fn read_with_map_key(id: &str, credentials: &Value, query: &Value, map_key: Option<&str>) -> Result<Value> {
     if !query.is_object() {
         return Err(ConnectorError::invalid());
     }
     let client = http_client()?;
     match id {
-        "amap" => amap_read(&client, query).await,
+        "amap" => amap_read_with_key(&client, query, map_key.ok_or_else(|| ConnectorError::new(StatusCode::SERVICE_UNAVAILABLE, "not_configured", "高德地图尚未配置"))?).await,
         "yuque" => yuque_read(&client, credentials, query).await,
         "wecom" => wecom_read(&client, credentials, query).await,
         "zhihu" => zhihu_read(&client, credentials, query).await,
@@ -294,6 +298,11 @@ fn amap_success(value: &Value) -> Result<()> {
 
 async fn amap_read(client: &Client, query: &Value) -> Result<Value> {
     let key = amap_key()?;
+    amap_read_with_key(client, query, &key).await
+}
+
+async fn amap_read_with_key(client: &Client, query: &Value, key: &str) -> Result<Value> {
+    let key = key.to_owned();
     let operation = text_arg(query, "operation", 32)?.unwrap_or("search");
     let limit = bounded_number(query, "limit", 10, ITEM_LIMIT as u64)? as usize;
     match operation {

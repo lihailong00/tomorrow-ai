@@ -140,8 +140,11 @@ pub(super) fn required_configuration(id: &str) -> Vec<&'static str> {
 
 impl OAuthProvider {
     pub(super) fn from_env(id: &str) -> Option<Self> {
+        Self::from_lookup(id, |key| env::var(key).ok())
+    }
+    pub(super) fn from_lookup(id: &str, get: impl Fn(&str) -> Option<String>) -> Option<Self> {
         let names = required_configuration(id);
-        let mut values = names.iter().map(|key| env::var(key).ok());
+        let mut values = names.iter().map(|key| get(key));
         let client_id = values.next()??;
         let client_secret = values.next()??;
         let redirect_uri = values.next()??;

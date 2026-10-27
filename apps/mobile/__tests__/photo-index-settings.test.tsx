@@ -38,7 +38,7 @@ afterEach(() => {
 });
 
 async function setup(
-  remote: Record<string, unknown> = { enabled: false, indexed: 0 },
+  remote: Record<string, unknown> = { enabled: false, indexed: 0, vision_configured: true },
 ) {
   const request = jest.fn().mockResolvedValue(remote);
   let tree!: ReactTestRenderer;
@@ -49,6 +49,7 @@ async function setup(
           {
             api: { baseUrl: 'https://example.test', request },
             user: { id: 'user' },
+            preferences: { instance: { dataflow: { images: '阿里云百炼' } } },
           } as unknown as AppContextValue
         }
       >
@@ -143,6 +144,8 @@ test('enable only proceeds after the user confirms the settings disclosure', asy
   await act(async () => app.button('开启相册索引').props.onPress());
   expect(photoIndex.enable).not.toHaveBeenCalled();
   const buttons = alert.mock.calls[0][2]!;
+  expect(alert.mock.calls[0][1]).toContain('上传分析副本');
+  expect(alert.mock.calls[0][1]).toContain('阿里云百炼');
   expect(buttons[0].style).toBe('cancel');
   await act(async () => {
     await buttons[1].onPress?.();

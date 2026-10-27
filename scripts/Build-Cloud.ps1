@@ -3,6 +3,7 @@ param(
     [string]$DockerContext = 'desktop-linux',
     [string]$OutputDirectory = 'artifacts/deploy/linux-x64',
     [string]$BuildProxy = '',
+    [ValidateRange(1, 16)][int]$CargoBuildJobs = 1,
     [switch]$ApiOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -25,11 +26,16 @@ New-Item -ItemType Directory -Path $buildContext -Force | Out-Null
 foreach ($relative in @('Cargo.toml','Cargo.lock')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot $relative) -Destination (Join-Path $buildContext $relative)
 }
-foreach ($crate in @('api','attachments','connectors','domain','worker')) {
+foreach ($crate in @('api','attachments','connectors','domain','worker','settings')) {
     $crateRoot = Join-Path $buildContext "crates/$crate"
     New-Item -ItemType Directory -Path $crateRoot -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $projectRoot "crates/$crate/Cargo.toml") -Destination (Join-Path $crateRoot 'Cargo.toml')
     Copy-Item -LiteralPath (Join-Path $projectRoot "crates/$crate/src") -Destination (Join-Path $crateRoot 'src') -Recurse
+}
+$adminContext = Join-Path $buildContext 'apps/admin'
+New-Item -ItemType Directory -Path $adminContext -Force | Out-Null
+foreach ($relative in @('package.json','pnpm-lock.yaml','tsconfig.json','vite.config.ts','index.html','src')) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot "apps/admin/$relative") -Destination (Join-Path $adminContext $relative) -Recurse
 }
 Copy-Item -LiteralPath (Join-Path $projectRoot 'migrations') -Destination (Join-Path $buildContext 'migrations') -Recurse
 $agentContext = Join-Path $buildContext 'services/agent'
@@ -39,12 +45,15 @@ foreach ($relative in @('package.json','pnpm-lock.yaml','tsconfig.json','src')) 
 }
 New-Item -ItemType Directory -Path (Join-Path $buildContext 'infra') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $projectRoot 'infra/deploy') -Destination (Join-Path $buildContext 'infra/deploy') -Recurse
+New-Item -ItemType Directory -Path (Join-Path $buildContext 'infra/selfhost') -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $projectRoot 'infra/selfhost/restore.py') -Destination (Join-Path $buildContext 'infra/selfhost/restore.py')
 Copy-Item -LiteralPath (Join-Path $projectRoot 'infra/deploy/backend.Dockerfile.dockerignore') -Destination (Join-Path $buildContext '.dockerignore')
 $dockerFile = Join-Path $buildContext 'infra/deploy/backend.Dockerfile'
 $archiveName = if ($ApiOnly) { 'tomorrow-api-linux-x64.tar' } else { 'tomorrow-backend-linux-x64.tar' }
 $buildTarget = if ($ApiOnly) { 'api-package' } else { 'package' }
 $archivePath = Join-Path $outputPath $archiveName
 $buildArguments = @('--context', $DockerContext, 'build', '--platform', 'linux/amd64', '--file', $dockerFile, '--target', $buildTarget, '--output', "type=tar,dest=$archivePath")
+$buildArguments += @('--build-arg', "CARGO_BUILD_JOBS=$CargoBuildJobs")
 if ($ApiOnly) { $buildArguments += @('--build-arg', 'BUILD_API_ONLY=1') }
 if ($BuildProxy) {
     $proxyUri = [uri]$BuildProxy
@@ -58,7 +67,7 @@ $buildArguments += $buildContext
 if ($LASTEXITCODE -ne 0) { throw 'Linux package build failed.' }
 $members = & tar -tf $archivePath
 if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the exported Linux tar package.' }
-$expectedFiles = if ($ApiOnly) { @('bin/tomorrow-api') } else { @('bin/tomorrow-api','bin/tomorrow-worker','bin/node','services/agent/dist/server.js') }
+$expectedFiles = if ($ApiOnly) { @('bin/tomorrow-api') } else { @('bin/tomorrow-api','bin/tomorrow-worker','bin/node','bin/tada-config','bin/tada-admin-recover','services/agent/dist/server.js','admin/index.html','tools/restore.py') }
 foreach ($relative in $expectedFiles) {
     if ($members -notcontains $relative) { throw "Build did not export $relative" }
 }

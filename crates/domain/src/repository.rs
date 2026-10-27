@@ -172,7 +172,7 @@ impl Repository {
     }
     pub async fn claim_task(&self, lease_seconds: i64) -> Result<Option<ClaimedTask>, DomainError> {
         let time = now();
-        let rows=sqlx::query("SELECT * FROM tasks WHERE ((status='queued' AND next_attempt_at<=$1) OR (status='running' AND claimed_until<$1)) AND (requires_approval=0 OR approved_at IS NOT NULL) ORDER BY created_at LIMIT 10").bind(time).fetch_all(&self.pool).await?;
+        let rows=sqlx::query("SELECT * FROM tasks WHERE ((status='queued' AND next_attempt_at<=$1) OR (status='running' AND claimed_until<$1)) AND (requires_approval=0 OR approved_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=tasks.user_id AND c.disabled<>0) ORDER BY created_at LIMIT 10").bind(time).fetch_all(&self.pool).await?;
         for row in rows {
             let id: String = row.get("id");
             let attempts: i64 = row.get("attempts");
@@ -181,7 +181,7 @@ impl Repository {
                 sqlx::query("UPDATE tasks SET status='failed',error='任务执行多次中断，请重新发起',updated_at=$1 WHERE id=$2 AND attempts=$3 AND status='running' AND claimed_until<$1").bind(time).bind(&id).bind(attempts).execute(&self.pool).await?;
                 continue;
             }
-            let updated=sqlx::query("UPDATE tasks SET status='running',progress=15,attempts=attempts+1,claimed_until=$1,updated_at=$2,error=NULL WHERE id=$3 AND attempts=$4 AND ((status='queued' AND next_attempt_at<=$2) OR (status='running' AND claimed_until<$2)) AND (requires_approval=0 OR approved_at IS NOT NULL)")
+            let updated=sqlx::query("UPDATE tasks SET status='running',progress=15,attempts=attempts+1,claimed_until=$1,updated_at=$2,error=NULL WHERE id=$3 AND attempts=$4 AND ((status='queued' AND next_attempt_at<=$2) OR (status='running' AND claimed_until<$2)) AND (requires_approval=0 OR approved_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=tasks.user_id AND c.disabled<>0)")
                 .bind(time+lease_seconds.clamp(10,3600)).bind(time).bind(&id).bind(attempts).execute(&self.pool).await?.rows_affected();
             if updated > 0 {
                 return Ok(Some(ClaimedTask {
@@ -198,7 +198,7 @@ impl Repository {
         claim: &ClaimedTask,
         lease_seconds: i64,
     ) -> Result<bool, DomainError> {
-        Ok(sqlx::query("UPDATE tasks SET claimed_until=$1 WHERE id=$2 AND user_id=$3 AND status='running' AND attempts=$4 AND claimed_until>=$5").bind(now()+lease_seconds.clamp(10,3600)).bind(&claim.task.id).bind(&claim.user_id).bind(claim.attempt).bind(now()).execute(&self.pool).await?.rows_affected()>0)
+        Ok(sqlx::query("UPDATE tasks SET claimed_until=$1 WHERE id=$2 AND user_id=$3 AND status='running' AND attempts=$4 AND claimed_until>=$5 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=tasks.user_id AND c.disabled<>0)").bind(now()+lease_seconds.clamp(10,3600)).bind(&claim.task.id).bind(&claim.user_id).bind(claim.attempt).bind(now()).execute(&self.pool).await?.rows_affected()>0)
     }
     pub async fn complete_task(
         &self,
@@ -337,7 +337,7 @@ impl Repository {
     }
     pub async fn tick_schedules(&self) -> Result<usize, DomainError> {
         let time = now();
-        let rows=sqlx::query("SELECT * FROM schedules WHERE enabled=1 AND next_run_at<=$1 ORDER BY next_run_at LIMIT 100").bind(time).fetch_all(&self.pool).await?;
+        let rows=sqlx::query("SELECT * FROM schedules WHERE enabled=1 AND next_run_at<=$1 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=schedules.user_id AND c.disabled<>0) ORDER BY next_run_at LIMIT 100").bind(time).fetch_all(&self.pool).await?;
         let mut count = 0;
         for row in rows {
             let schedule = schedule_from(&row)?;
@@ -356,7 +356,7 @@ impl Repository {
                 )?
             };
             let mut transaction = self.pool.begin().await?;
-            let changed=sqlx::query("UPDATE schedules SET next_run_at=$1,last_run_at=$2,enabled=$3,updated_at=$2 WHERE id=$4 AND user_id=$5 AND enabled=1 AND next_run_at=$6")
+            let changed=sqlx::query("UPDATE schedules SET next_run_at=$1,last_run_at=$2,enabled=$3,updated_at=$2 WHERE id=$4 AND user_id=$5 AND enabled=1 AND next_run_at=$6 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=schedules.user_id AND c.disabled<>0)")
                 .bind(next).bind(time).bind(if schedule.frequency=="once"{0_i64}else{1}).bind(&schedule.id).bind(&user_id).bind(due).execute(&mut *transaction).await?.rows_affected();
             if changed == 0 {
                 transaction.rollback().await?;
@@ -592,6 +592,10 @@ impl Repository {
         ))
         .execute(&pool)
         .await?;
+        // Authentication checks this table even in non-admin processes such as
+        // attachment and connector services; it must exist before any login.
+        sqlx::query("CREATE TABLE IF NOT EXISTS admin_user_controls(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,disabled BIGINT NOT NULL DEFAULT 0,updated_at BIGINT NOT NULL)")
+            .execute(&pool).await?;
         Ok(Self { pool })
     }
 
@@ -640,7 +644,7 @@ impl Repository {
     }
 
     pub async fn credentials(&self, email: &str) -> Result<Option<(User, String)>, DomainError> {
-        let row = sqlx::query("SELECT * FROM users WHERE email=$1")
+        let row = sqlx::query("SELECT * FROM users WHERE email=$1 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=users.id AND c.disabled<>0)")
             .bind(email.trim().to_lowercase())
             .fetch_optional(&self.pool)
             .await?;
@@ -656,22 +660,47 @@ impl Repository {
     }
     pub async fn create_session(&self, user_id: &str) -> Result<String, DomainError> {
         let token = auth::generate_token();
-        sqlx::query(
-            "INSERT INTO sessions (token_hash,user_id,expires_at,created_at) VALUES ($1,$2,$3,$4)",
+        let mut transaction = self.pool.begin().await?;
+        crate::phone_password::lock_password_state(&mut transaction).await?;
+        let inserted=sqlx::query(
+            "INSERT INTO sessions (token_hash,user_id,expires_at,created_at) SELECT $1,u.id,$3,$4 FROM users u WHERE u.id=$2 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=u.id AND c.disabled<>0)",
         )
         .bind(auth::hash_token(&token))
         .bind(user_id)
         .bind(now() + 30 * 86400)
         .bind(now())
-        .execute(&self.pool)
-        .await?;
+        .execute(&mut *transaction)
+        .await?.rows_affected();
+        if inserted != 1 {
+            return Err(DomainError::Unauthorized);
+        }
+        transaction.commit().await?;
+        Ok(token)
+    }
+    /// Finalize an email password verification only while that exact credential
+    /// is still current. A concurrent administrator reset cannot mint a session
+    /// from a hash that was verified before the reset.
+    pub async fn create_session_for_password(
+        &self,
+        user_id: &str,
+        verified_hash: &str,
+    ) -> Result<String, DomainError> {
+        let token = auth::generate_token();
+        let mut transaction = self.pool.begin().await?;
+        crate::phone_password::lock_password_state(&mut transaction).await?;
+        let inserted=sqlx::query("INSERT INTO sessions(token_hash,user_id,expires_at,created_at) SELECT $1,u.id,$2,$3 FROM users u WHERE u.id=$4 AND u.password_hash=$5 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=u.id AND c.disabled<>0)")
+            .bind(auth::hash_token(&token)).bind(now()+30*86400).bind(now()).bind(user_id).bind(verified_hash).execute(&mut *transaction).await?.rows_affected();
+        if inserted != 1 {
+            return Err(DomainError::Unauthorized);
+        }
+        transaction.commit().await?;
         Ok(token)
     }
     pub async fn authenticate(&self, token: &str) -> Result<String, DomainError> {
         if token.len() < 32 || token.len() > 256 {
             return Err(DomainError::Unauthorized);
         }
-        let row = sqlx::query("SELECT user_id FROM sessions WHERE token_hash=$1 AND expires_at>$2")
+        let row = sqlx::query("SELECT user_id FROM sessions WHERE token_hash=$1 AND expires_at>$2 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=sessions.user_id AND c.disabled<>0)")
             .bind(auth::hash_token(token))
             .bind(now())
             .fetch_optional(&self.pool)
@@ -901,4 +930,126 @@ pub fn next_weekly_execution(
         candidate = next_execution("daily", time, timezone, candidate, false)?;
     }
     Err(DomainError::Internal("无法计算周计划日期".into()))
+}
+
+#[cfg(test)]
+mod administration_auth_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn password_session_uses_current_hash_and_disabled_accounts_fail_closed() {
+        let repository = Repository::connect("sqlite::memory:").await.unwrap();
+        let old_hash = auth::hash_password("original email password").unwrap();
+        let user = repository
+            .create_user("guard@example.test", &old_hash, "Guard", "Asia/Shanghai")
+            .await
+            .unwrap();
+        let old_session = repository
+            .create_session_for_password(&user.id, &old_hash)
+            .await
+            .unwrap();
+        let mut transaction = repository.pool.begin().await.unwrap();
+        crate::phone_password::lock_password_state(&mut transaction)
+            .await
+            .unwrap();
+        let new_hash = auth::hash_password("replacement email password").unwrap();
+        sqlx::query("UPDATE users SET password_hash=$1 WHERE id=$2")
+            .bind(&new_hash)
+            .bind(&user.id)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sessions WHERE user_id=$1")
+            .bind(&user.id)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        assert!(matches!(
+            repository
+                .create_session_for_password(&user.id, &old_hash)
+                .await,
+            Err(DomainError::Unauthorized)
+        ));
+        assert!(matches!(
+            repository.authenticate(&old_session).await,
+            Err(DomainError::Unauthorized)
+        ));
+        let new_session = repository
+            .create_session_for_password(&user.id, &new_hash)
+            .await
+            .unwrap();
+        let task_input = || CreateTask {
+            instruction: "Background fixture".into(),
+            title: None,
+            kind: None,
+            approval_required: None,
+            client_request_id: None,
+        };
+        repository
+            .create_task(&user.id, task_input())
+            .await
+            .unwrap();
+        let claim = repository.claim_task(60).await.unwrap().unwrap();
+        repository
+            .create_task(&user.id, task_input())
+            .await
+            .unwrap();
+        let schedule = repository
+            .create_schedule(
+                &user.id,
+                CreateSchedule {
+                    title: "Fixture".into(),
+                    instruction: "Fixture".into(),
+                    frequency: "daily".into(),
+                    time: "09:00".into(),
+                    timezone: "Asia/Shanghai".into(),
+                    enabled: Some(true),
+                },
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE schedules SET next_run_at=$1 WHERE id=$2")
+            .bind(now() - 60)
+            .bind(schedule.id)
+            .execute(&repository.pool)
+            .await
+            .unwrap();
+        let run = repository
+            .begin_agent_run(&user.id, "disabled-fixture", "fixture", None, None)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO admin_user_controls(user_id,disabled,updated_at) VALUES($1,1,$2)")
+            .bind(&user.id)
+            .bind(now())
+            .execute(&repository.pool)
+            .await
+            .unwrap();
+        assert!(repository
+            .credentials("guard@example.test")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            repository
+                .create_session_for_password(&user.id, &new_hash)
+                .await,
+            Err(DomainError::Unauthorized)
+        ));
+        assert!(matches!(
+            repository.create_session(&user.id).await,
+            Err(DomainError::Unauthorized)
+        ));
+        assert!(matches!(
+            repository.authenticate(&new_session).await,
+            Err(DomainError::Unauthorized)
+        ));
+        assert!(repository.claim_task(60).await.unwrap().is_none());
+        assert!(!repository.renew_task(&claim, 60).await.unwrap());
+        assert_eq!(repository.tick_schedules().await.unwrap(), 0);
+        assert!(matches!(
+            repository.agent_authority(&run.id, &run.token).await,
+            Err(DomainError::Forbidden)
+        ));
+    }
 }

@@ -16,6 +16,8 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { ApiClient, normalizeServerUrl } from './src/api/client';
+import { inspectInstance } from './src/api/instance';
+import { connectionFromLink } from './src/domain/instance';
 import { AppProvider, MainTab, Route } from './src/app/context';
 import { useForegroundNotifications } from './src/app/notifications';
 import type { AuthSession } from './src/domain/types';
@@ -32,6 +34,7 @@ import { ChatScreen, ConversationsScreen } from './src/screens/Chat';
 import { UploadsScreen } from './src/screens/Uploads';
 import { IntegrationsScreen } from './src/features/integrations/IntegrationsScreen';
 import { appInputs } from './src/platform/appInputs';
+import { photoIndex } from './src/platform/photoIndex';
 import {
   ArtifactsScreen,
   MemoryEditor,
@@ -59,6 +62,7 @@ function Application() {
   const [revision, setRevision] = useState(0);
   const [pendingInputs, setPendingInputs] = useState(0);
   const inputCleanup = useRef<Promise<void>>(Promise.resolve());
+  const activeConnection = useRef(defaultServerUrl);
   const route = routes[routes.length - 1];
   const clearInputs = useCallback(() => {
     const next = inputCleanup.current.catch(() => {}).then(() => appInputs.clear());
@@ -86,12 +90,14 @@ function Application() {
       try {
         prefs.serverUrl = normalizeServerUrl(prefs.serverUrl);
       } catch {
-        prefs.serverUrl = defaultServerUrl;
+        prefs.connectionError = prefs.connectionError ?? '保存的服务地址无效，请重新选择服务器。';
+        prefs.serverUrl = '';
       }
       if (!alive) {
         return;
       }
       setPreferences(prefs);
+      activeConnection.current = prefs.serverUrl;
       const stored = await platform.readSession().catch(async () => {
         await platform.removeSession().catch(() => {});
         return null;
@@ -104,9 +110,12 @@ function Application() {
         try {
           const saved = JSON.parse(stored) as AuthSession & {
             serverUrl: string;
+            instanceId?: string;
           };
           if (
             saved.serverUrl === prefs.serverUrl &&
+            !prefs.connectionError &&
+            saved.instanceId && saved.instanceId === prefs.instance?.id &&
             saved.token &&
             saved.user
           ) {
@@ -121,9 +130,17 @@ function Application() {
       }
       // With no authenticated owner, an old native inbox must not be inherited
       // by the next account after a failed cleanup or a process restart.
-      if (!restored) { await clearInputs(); }
+      if (!restored) {
+        await photoIndex.suspend();
+        await clearInputs();
+        await platform.removeSession();
+      }
     })()
-      .catch(() => {})
+      .catch(() => {
+        activeConnection.current = '';
+        setPreferences({ serverUrl: '', onboarded: true, serverUrlCustomized: true,
+          connectionError: '暂时无法读取本机设置，请重新选择服务器。' });
+      })
       .finally(() => {
         if (alive) {
           setBooting(false);
@@ -135,6 +152,7 @@ function Application() {
   }, [clearInputs]);
 
   const unauthorized = useCallback(() => {
+    void photoIndex.suspend().catch(() => {});
     void clearInputs();
     activeToken.current = undefined;
     setSession(null);
@@ -144,13 +162,24 @@ function Application() {
   }, [clearInputs]);
   const api = useMemo(() => {
     const token = session?.token;
-    return new ApiClient(preferences.serverUrl, token, () => {
+    let verified: Promise<void> | undefined;
+    return new ApiClient(preferences.connectionError ? '' : preferences.serverUrl, token, () => {
       // A delayed response from the previous account must not log out the new one.
       if (activeToken.current === token) {
         unauthorized();
       }
+    }, fetch, () => {
+      if (!verified) {
+        verified = inspectInstance(preferences.serverUrl, {
+          allowInsecureLan: preferences.allowInsecureLan,
+          expectedId: preferences.instance?.id,
+        }).then(() => {}).catch(error => { verified = undefined; throw error; });
+      }
+      return verified;
     });
-  }, [preferences.serverUrl, session?.token, unauthorized]);
+  }, [preferences.serverUrl, preferences.instance?.id, preferences.connectionError,
+      preferences.allowInsecureLan, session?.token, unauthorized]);
+  useEffect(() => () => api.dispose(), [api]);
   useForegroundNotifications(api, session?.user.id);
   const navigate = useCallback(
     (next: Route) => setRoutes(old => [...old, next]),
@@ -160,6 +189,22 @@ function Application() {
     () => setRoutes(old => (old.length > 1 ? old.slice(0, -1) : old)),
     [],
   );
+  useEffect(() => {
+    if (booting) return;
+    let alive = true;
+    const acceptLink = (link: string) => {
+      try {
+        const pendingConnection = connectionFromLink(link);
+        if (!alive) return;
+        // A scanned link opens a review form; it never switches or signs in.
+        setPreferences(current => ({ ...current, pendingConnection }));
+        setRoutes([{ name: 'main' }, { name: 'settings' }]);
+      } catch { /* Ignore unrelated or malformed external intents. */ }
+    };
+    void platform.initialConnectionLink().then(link => { if (link) acceptLink(link); }).catch(() => {});
+    const unsubscribe = platform.onConnectionLink(acceptLink);
+    return () => { alive = false; unsubscribe(); };
+  }, [booting]);
   useEffect(() => {
     const listener = BackHandler.addEventListener('hardwareBackPress', () => {
       if (routes.length > 1) {
@@ -175,29 +220,46 @@ function Application() {
     return () => listener.remove();
   }, [routes.length, tab, session, back]);
   const savePreferences = async (next: Preferences) => {
-    await platform.savePreferences(next);
-    if (next.serverUrl !== preferences.serverUrl) {
+    const changed = next.serverUrl !== preferences.serverUrl || next.instance?.id !== preferences.instance?.id;
+    if (changed) {
+      // Cancel old uploads immediately, then revoke local background consent.
+      api.dispose();
+      activeConnection.current = '';
+      await photoIndex.suspend();
       await clearInputs();
       activeToken.current = undefined;
       await platform.removeSession();
       setSession(null);
       setRoutes([{ name: 'main' }]);
     }
+    const { pendingConnection: _pending, ...saved } = next;
+    await platform.savePreferences(saved);
+    activeConnection.current = next.serverUrl;
     setPreferences(next);
   };
   const signIn = async (next: AuthSession) => {
+    const target = preferences.serverUrl;
+    const checked = await inspectInstance(target, {
+      allowInsecureLan: preferences.allowInsecureLan, expectedId: preferences.instance?.id,
+    });
+    if (activeConnection.current !== target) throw new Error('服务连接已变化，请重新登录。');
     // An expired account's local notification queue must be cleared before the
     // next account can use a new session, including a previously failed cleanup.
     await inputCleanup.current.catch(() => clearInputs());
+    if (activeConnection.current !== target) throw new Error('服务连接已变化，请重新登录。');
     activeToken.current = next.token;
     try {
       await platform.writeSession(
-        JSON.stringify({ ...next, serverUrl: preferences.serverUrl }),
+        JSON.stringify({ ...next, serverUrl: target, instanceId: checked.instance.id }),
       );
     } catch (error) {
       activeToken.current = undefined;
       throw error;
     }
+    if (activeConnection.current !== target) throw new Error('服务连接已变化，请重新登录。');
+    const updatedPreferences = { ...preferences, instance: checked.instance };
+    await platform.savePreferences(updatedPreferences);
+    setPreferences(updatedPreferences);
     setSession(next);
     setExpired(false);
     setAuthNotice('');
@@ -205,6 +267,7 @@ function Application() {
     setRoutes([{ name: 'main' }]);
   };
   const signOut = async () => {
+    await photoIndex.suspend();
     await clearInputs();
     try {
       await api.logout();
@@ -304,7 +367,7 @@ function Application() {
   ];
   return (
     <AppProvider
-      key={`${preferences.serverUrl}:${session?.user.id ?? 'signed-out'}`}
+      key={`${preferences.serverUrl}:${preferences.instance?.id ?? 'unverified'}:${session?.user.id ?? 'signed-out'}`}
       value={{
         api,
         user: session?.user ?? null,
@@ -320,7 +383,7 @@ function Application() {
           }
           const updated = { ...session, user };
           await platform.writeSession(
-            JSON.stringify({ ...updated, serverUrl: preferences.serverUrl }),
+            JSON.stringify({ ...updated, serverUrl: preferences.serverUrl, instanceId: preferences.instance?.id }),
           );
           if (activeToken.current === session.token) {
             setSession(updated);

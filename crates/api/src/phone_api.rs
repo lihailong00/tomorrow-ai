@@ -50,6 +50,8 @@ pub async fn request_code(
     State(state): State<Arc<AppState>>,
     Json(input): Json<CodeInput>,
 ) -> Result<Json<PhoneCodeChallenge>> {
+    super::ensure_login_method(&state, "PHONE_PASSWORD_ENABLED").await?;
+    if matches!(input.purpose, PhonePurpose::Register) { super::ensure_registration_open(&state).await?; }
     Ok(Json(
         state
             .phone_auth
@@ -63,6 +65,8 @@ pub async fn register(
     State(state): State<Arc<AppState>>,
     Json(input): Json<PhoneRegisterInput>,
 ) -> Result<Json<AuthSession>> {
+    super::ensure_login_method(&state, "PHONE_PASSWORD_ENABLED").await?;
+    super::ensure_registration_open(&state).await?;
     state.phone_auth.ensure_available()?;
     validate_code_input(&input.challenge_id, &input.code)?;
     auth::validate_password(&input.password)?;
@@ -97,6 +101,7 @@ pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(input): Json<PhoneLoginInput>,
 ) -> Result<Json<AuthSession>> {
+    super::ensure_login_method(&state, "PHONE_PASSWORD_ENABLED").await?;
     Ok(Json(
         phone_password::login(&state.repository, &input.phone, input.password).await?,
     ))
@@ -107,6 +112,7 @@ pub async fn reset_password(
     State(state): State<Arc<AppState>>,
     Json(input): Json<PhonePasswordResetInput>,
 ) -> Result<Json<PhonePasswordResetResult>> {
+    super::ensure_login_method(&state, "PHONE_PASSWORD_ENABLED").await?;
     state.phone_auth.ensure_available()?;
     validate_code_input(&input.challenge_id, &input.code)?;
     auth::validate_password(&input.new_password)?;

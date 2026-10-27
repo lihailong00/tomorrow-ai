@@ -38,6 +38,10 @@ impl Default for Endpoints {
 
 impl Config {
     pub(crate) fn from_env() -> Result<Self> {
+        Self::from_lookup(|key| env::var(key).ok())
+    }
+    pub(crate) fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let required = |name: &str| get(name).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()).ok_or_else(ConnectorError::unavailable);
         let redirect_uri = required("GOOGLE_REDIRECT_URI")?;
         let url = Url::parse(&redirect_uri).map_err(|_| ConnectorError::unavailable())?;
         let loopback = matches!(

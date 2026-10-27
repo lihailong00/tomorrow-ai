@@ -36,6 +36,15 @@ describe('cloud service defaults', () => {
     );
     expect(NativeModules.TomorrowPlatform.secureRemove).not.toHaveBeenCalled();
   });
+  it.each(['{broken-json', 'null', '{}'])(
+    'keeps a damaged preference disconnected instead of falling back to the official host: %s', async saved => {
+      (AsyncStorage.getItem as jest.Mock).mockResolvedValue(saved);
+      const result = await platform.loadPreferences();
+      expect(result.serverUrl).toBe('');
+      expect(result.connectionError).toBeTruthy();
+      expect(AsyncStorage.setItem).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['http://10.0.2.2:8080', 'http://10.0.2.2:8080/v1/'])(
     'migrates the old default %s after removing its local session',
