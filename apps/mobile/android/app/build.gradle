@@ -81,6 +81,15 @@ android {
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
 
+    // Optional short staging path for Windows worktrees with long source paths.
+    if (project.hasProperty("tadaNativeBuildDir")) {
+        externalNativeBuild {
+            cmake {
+                buildStagingDirectory file(project.property("tadaNativeBuildDir"))
+            }
+        }
+    }
+
     namespace "com.tomorrowai"
     defaultConfig {
         applicationId "com.tomorrowai"

@@ -2,7 +2,7 @@
 
 版本：v0.5（Android 首发，Rust 业务后端 + TypeScript / Pi 执行服务）
 调研日期：2026 年 10 月 26 日  
-拟建产品：妥啦（Tada）（暂名）  
+拟建产品：妥啦（Tada）  
 本期平台：仅 Android 手机 App；为后续 iPhone / iOS、原生 HarmonyOS 迁移预留架构  
 已确定后端：Rust 业务后端 + TypeScript / Pi Agent 执行服务；手机端继续采用共享客户端与平台适配架构
 关联文档：[技术路线与实施计划](./02-tomorrow-ai-技术路线与实施计划.md)

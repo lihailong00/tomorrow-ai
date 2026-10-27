@@ -4,6 +4,7 @@ param(
   [string]$JavaHome,
   [string]$AndroidHome,
   [string]$ProxyUrl,
+  [string]$NativeBuildDirectory,
   [string]$Architectures = 'arm64-v8a,x86_64',
   [switch]$DetailedLogs,
   [switch]$SkipInstall
@@ -111,6 +112,10 @@ try {
   $sdkProperty = 'sdk.dir=' + $AndroidHome.Replace('\','/') + [Environment]::NewLine
   [System.IO.File]::WriteAllText((Join-Path $mobilePath 'android/local.properties'), $sdkProperty, [System.Text.UTF8Encoding]::new($false))
   $gradleArgs = @(':app:assembleDebug','-PofflineBundle=true',('-PreactNativeArchitectures=' + $Architectures),'--console=plain','--max-workers=4')
+  if ($NativeBuildDirectory) {
+    $nativePath = [IO.Path]::GetFullPath($NativeBuildDirectory).Replace('\','/')
+    $gradleArgs += "-PtadaNativeBuildDir=$nativePath"
+  }
   if ($DetailedLogs) { $gradleArgs += '--info' }
   if (-not $ProxyUrl) { $ProxyUrl = $env:HTTPS_PROXY }
   if (-not $ProxyUrl) { $ProxyUrl = $env:HTTP_PROXY }
