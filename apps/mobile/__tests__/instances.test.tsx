@@ -25,6 +25,31 @@ const response = (data: unknown, extra = {}) => ({
 } as Response);
 
 describe('server identity and transport', () => {
+  it('accepts the deployed structured dataflow without weakening identity validation', async () => {
+    const deployed = { ...manifest, dataflow: {
+      conversation: { processor: 'configured_provider', destination: 'api.deepseek.com' },
+      voice: { processor: 'configured_provider', destination: 'dashscope.aliyuncs.com' },
+      images: { processor: 'disabled', destination: null },
+      files: { processor: 'this_server', destination: null },
+      official_server_fallback: false,
+    } };
+    const result = await inspectInstance('https://own.test', { expectedId: manifest.id,
+      fetcher: jest.fn().mockResolvedValue(response(deployed)) });
+    expect(result.instance.dataflow).toEqual({ conversation: 'api.deepseek.com', voice: 'dashscope.aliyuncs.com',
+      images: '未启用', files: '当前服务器' });
+    await expect(inspectInstance('https://own.test', { expectedId: 'another-instance',
+      fetcher: jest.fn().mockResolvedValue(response(deployed)) })).rejects.toThrow('身份已变化');
+  });
+  it('rejects malformed structured dataflow instead of hiding unknown destinations', async () => {
+    for (const entry of [{ processor: 'unknown', destination: null },
+      { processor: 'configured_provider', destination: null },
+      { processor: 'configured_provider', destination: 'https://user:secret@example.test' },
+      { processor: 'disabled', destination: 'somewhere.test' }]) {
+      await expect(inspectInstance('https://own.test', { fetcher: jest.fn().mockResolvedValue(response({
+        ...manifest, dataflow: { ...manifest.dataflow, conversation: entry },
+      })) })).rejects.toThrow('不兼容');
+    }
+  });
   it('checks a manifest anonymously without following redirects', async () => {
     const fetcher = jest.fn().mockResolvedValue(response(manifest));
     const result = await inspectInstance('https://OWN.test/v1/', { expectedId: 'own-instance', fetcher });

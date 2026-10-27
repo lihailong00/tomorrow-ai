@@ -11,8 +11,23 @@ export interface InstanceManifest {
   configuration_revision?: number;
 }
 
+/** Normalize structured server metadata and previously saved display strings. */
+function dataflowDescription(value: unknown): string | undefined {
+  if (typeof value === 'string') return value.length <= 1000 ? value : undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const entry = value as { processor?: unknown; destination?: unknown };
+  if (entry.processor === 'disabled' && entry.destination === null) return '未启用';
+  if (entry.processor === 'this_server' && entry.destination === null) return '当前服务器';
+  if (entry.processor === 'configured_provider' && typeof entry.destination === 'string' &&
+      entry.destination.length <= 253 && /^[a-zA-Z0-9.:[\]_-]+$/.test(entry.destination)) return entry.destination;
+  return undefined;
+}
+
 export function readInstanceManifest(value: unknown): InstanceManifest {
   const item = value as InstanceManifest | null;
+  const keys = ['conversation', 'voice', 'images', 'files'] as const;
+  const dataflow = item?.dataflow && typeof item.dataflow === 'object' && !Array.isArray(item.dataflow) ?
+    Object.fromEntries(keys.map(key => [key, dataflowDescription(item.dataflow[key])])) : undefined;
   if (!item || typeof item !== 'object' || item.api_version !== 1 ||
       typeof item.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(item.id) ||
       typeof item.name !== 'string' || !item.name.trim() || item.name.length > 120 ||
@@ -20,14 +35,11 @@ export function readInstanceManifest(value: unknown): InstanceManifest {
       !['open', 'invite_only', 'closed'].includes(item.registration_policy) ||
       !Array.isArray(item.auth_methods) || !item.auth_methods.length ||
       item.auth_methods.some(method => !['phone_password', 'email_password'].includes(method)) ||
-      typeof item.public_url !== 'string' || !item.dataflow ||
-      ['conversation', 'voice', 'images', 'files'].some(key => {
-        const value = item.dataflow[key as keyof InstanceManifest['dataflow']];
-        return typeof value !== 'string' || value.length > 1000;
-      })) {
+      typeof item.public_url !== 'string' || !dataflow ||
+      keys.some(key => dataflow[key] === undefined)) {
     throw new Error('此服务器版本不兼容，或尚未完成初始化。请联系服务器管理员。');
   }
-  return item;
+  return { ...item, dataflow: dataflow as InstanceManifest['dataflow'] };
 }
 
 /** A phone may deliberately use HTTP on a private LAN; public connections require TLS. */
