@@ -257,7 +257,8 @@ test('deep Back waits for the real RN prefix and native arrival rather than expi
   await app.tick();
   const settled = scroll.mock.calls.length;
   await app.measure('message-502', prefix + 30, 270);
-  expect(scroll).toHaveBeenCalledTimes(settled);
+  expect(scroll.mock.calls.length).toBeGreaterThan(settled);
+  expect(scroll).toHaveBeenLastCalledWith({ offset: prefix + 57, animated: false });
 });
 
 test('deep Back keeps the installed RN initial window when an old 851px native scroll arrives after the 5270px prefix layout', async () => {
@@ -324,6 +325,106 @@ test('a real gesture releases a deep bootstrap immediately and an obsolete retry
   expect(freshScroll).not.toHaveBeenCalled();
 });
 
+test.each(['native-scroll-first', 'content-size-first'])(
+  '%s preserves a settled Back anchor through later real RN spacer refinement and still yields to no-drag accessibility scrolling',
+  async order => {
+    const messages = Array.from({ length: 40 }, (_, index) => message(index + 43));
+    const app = await setup(messages, { id: 'message-48', offset: 175 });
+    const nativePane = () => app.tree.root.findAllByType(ScrollView)
+      .find(node => node.props.testID === 'chat-message-list')!;
+    const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+    const heightFor = (item: Message) => {
+      const index = Number(item.id.slice(8));
+      return index === 50 ? 800 : index % 2 ? 69 : 190;
+    };
+    const snapshotNative = () => {
+      const children = React.Children.toArray(nativePane().props.children) as React.ReactElement<any>[];
+      const cells: { id: string; y: number; height: number }[] = [];
+      let y = 0;
+      for (const child of children) {
+        if (child.props.item) {
+          const item = child.props.item as Message;
+          const height = heightFor(item);
+          cells.push({ id: item.id, y, height });
+          y += height;
+        } else if (child.key?.toString().includes('$header')) y += 24;
+        else if (child.key?.toString().includes('$footer')) y += 48;
+        else y += Number(child.props.style?.height ?? 0);
+      }
+      return { cells, height: Math.max(640, y) };
+    };
+    const commitNative = async (snapshot: ReturnType<typeof snapshotNative>) => {
+      await act(async () => {
+        for (const cell of snapshot.cells)
+          app.cell(cell.id).props.onLayout(layoutEvent(cell.y, cell.height));
+        app.virtual()._onContentSizeChange(360, snapshot.height);
+      });
+    };
+    await app.dimensions(640);
+    await commitNative(snapshotNative());
+    const initial = snapshotNative();
+    await commitNative(initial);
+    const arrival = (scroll.mock.calls.at(-1)![0] as { offset: number }).offset;
+    await act(async () => nativePane().props.onScroll(scrollEvent(arrival, initial.height)));
+    await app.tick(1200);
+    expect(app.virtual().state.pendingScrollUpdateCount).toBe(0);
+    const original = initial.cells.find(cell => cell.id === 'message-48')!;
+    const refined = snapshotNative();
+    const moved = refined.cells.find(cell => cell.id === 'message-48')!;
+    expect(moved.y).not.toBe(original.y);
+    expect(refined.height).not.toBe(initial.height);
+    const beforeRefinement = scroll.mock.calls.length;
+    if (order === 'content-size-first')
+      await act(async () => app.virtual()._onContentSizeChange(360, refined.height));
+    // The late native batch changes geometry after the earlier target retired.
+    // This is not a user AX move despite the absence of any begin-drag event.
+    await act(async () => nativePane().props.onScroll(scrollEvent(arrival - 200, refined.height)));
+    await commitNative(refined);
+    expect(scroll.mock.calls.length).toBeGreaterThan(beforeRefinement);
+    const corrected = Math.min(moved.y + 175, refined.height - 640);
+    expect(scroll).toHaveBeenLastCalledWith({ offset: corrected, animated: false });
+    expect(app.viewport.anchor).toEqual({ id: 'message-48', offset: 175 });
+    await act(async () => nativePane().props.onScroll(scrollEvent(arrival, initial.height)));
+    expect(app.viewport.anchor).toEqual({ id: 'message-48', offset: 175 });
+    await act(async () => nativePane().props.onScroll(scrollEvent(corrected, refined.height)));
+    await app.tick(100);
+    const beforeNoOpGeometry = scroll.mock.calls.length;
+    await app.dimensions(refined.height + 20);
+    await app.tick(100);
+    expect(scroll).toHaveBeenCalledTimes(beforeNoOpGeometry);
+    const beforeUser = scroll.mock.calls.length;
+    // An isolated old-height packet after settlement must not start a same-Y
+    // restore: native Android need not emit another arrival for an unchanged Y.
+    await act(async () => nativePane().props.onScroll(scrollEvent(corrected, initial.height)));
+    await app.tick(100);
+    expect(scroll).toHaveBeenCalledTimes(beforeUser);
+    // The unchanged row emits no new onLayout or onScroll acknowledgment.
+    // The first packet after the confirmed no-op extent is the real AX move;
+    // no same-Y acknowledgment is required to make it take ownership directly.
+    await act(async () => nativePane().props.onScroll(scrollEvent(corrected - 100, refined.height + 20)));
+    expect(app.viewport.y).toBe(corrected - 100);
+    await app.tick(40);
+    await app.measure('message-48', moved.y + 10, moved.height);
+    expect(scroll).toHaveBeenCalledTimes(beforeUser);
+    expect(app.rows().length).toBeLessThan(40);
+  },
+);
+
+test('a stable-geometry accessibility scroll needs no begin-drag or deferred layout acknowledgment', async () => {
+  const app = await setup([message(0)], { id: 'message-0', offset: 27 });
+  await app.dimensions(3000);
+  await app.measure('message-0', 24, 900);
+  const nativePane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  await act(async () => nativePane().props.onScroll(scrollEvent(51, 3000)));
+  await app.tick(100);
+  const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  await act(async () => nativePane().props.onScroll(scrollEvent(151, 3000)));
+  expect(app.viewport.y).toBe(151);
+  await app.measure('message-0', 34, 900);
+  expect(scroll).not.toHaveBeenCalled();
+});
+
 test('same-row append growth preserves already-read text after dragging, while momentum remains in control', async () => {
   const original = {
     ...message(0),
@@ -371,7 +472,7 @@ test('a taller return viewport accepts native end clamping only after the true o
   await app.scroll(1992, false, 2632);
   await app.tick();
   const settled = scroll.mock.calls.length;
-  await app.measure('message-0', 2525, 64);
+  await app.measure('message-0', 2520, 64);
   expect(scroll).toHaveBeenCalledTimes(settled);
 });
 
@@ -438,7 +539,7 @@ test('a negative retained inset stays reachable when a reflow makes the viewport
   await app.tick(100);
   expect(app.virtual().state.pendingScrollUpdateCount).toBe(0);
   const settled = scroll.mock.calls.length;
-  await app.measure('message-502', 2525, 255);
+  await app.measure('message-502', 2520, 255);
   expect(scroll).toHaveBeenCalledTimes(settled);
   expect(messageAnchorInset(-20, 255, 500)).toBe(-20);
   expect(messageAnchorInset(27, 255, 500)).toBe(27);
@@ -678,7 +779,10 @@ test('an empty final history response removes the control immediately and accept
     app.list().props.ListFooterComponent.props.onLayout(layoutEvent(792, 0));
     app.virtual()._onContentSizeChange(360, 792);
   });
-  await app.scroll(152, false, 792);
+  const nativePane = app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  await act(async () => nativePane.props.onScroll(scrollEvent(152, 792)));
+  await app.tick(100);
   expect(app.viewport.y).toBe(152);
   expect(app.viewport.anchor).toEqual({ id: 'message-13', offset: 0 });
 });

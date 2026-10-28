@@ -192,6 +192,15 @@ function MessageWindow({
     commandOffset: null as number | null,
     retryFrame: null as number | null,
   });
+  const settledRestoration = useRef<{
+    anchor: MessageAnchor;
+    frame: { y: number; height: number };
+    y: number;
+    contentHeight: number;
+    viewportHeight: number;
+    awaitingFrame: boolean;
+  } | null>(null);
+  const userScrollFrame = useRef<number | null>(null);
   const [geometry, setGeometry] = useState(0);
   const oldestKey = messages.length ? messageRowKey(messages.at(-1)!) : null;
   const firstKey = messages.length ? messageRowKey(messages[0]) : null;
@@ -255,6 +264,50 @@ function MessageWindow({
       current.current.viewport.layoutKey === layoutKey,
     [layoutKey, isCurrent],
   );
+  const restoreAfterGeometry = useCallback((nativePacket = false, confirmedGeometry = false, confirmedFrame = false) => {
+    const settled = settledRestoration.current;
+    if (
+      !valid() || !settled || target.current ||
+      followTail.current || interacting.current
+    ) return false;
+    const frame = frames.current.get(settled.anchor.id);
+    if (!frame) return false;
+    const requested = Math.max(0, frame.y + messageAnchorInset(
+        settled.anchor.offset, frame.height, metrics.current.viewportHeight,
+      ));
+    const offset = Math.min(
+      requested,
+      Math.max(0, metrics.current.contentHeight - metrics.current.viewportHeight),
+    );
+    // A size change elsewhere may leave this row exactly where it already was.
+    // Do not wait for an event from a no-op scroll. A real current native packet
+    // can itself prove arrival when its geometry marker changes.
+    if (!nativePacket && observed.current !== null && Math.abs(observed.current - offset) <= 2) {
+      const oldest = frames.current.get(messageRowKey(current.current.messages.at(-1)!));
+      if (
+        confirmedGeometry && metrics.current.contentHeight + 1 >= frame.y + frame.height &&
+        (requested <= offset || (oldest && metrics.current.contentHeight + 1 >=
+          oldest.y + oldest.height + metrics.current.tailHeight))
+      ) settledRestoration.current = {
+        anchor: { ...settled.anchor }, frame: { ...frame }, y: observed.current,
+        contentHeight: metrics.current.contentHeight,
+        viewportHeight: metrics.current.viewportHeight,
+        awaitingFrame: !confirmedFrame && (
+          settled.awaitingFrame || settled.contentHeight !== metrics.current.contentHeight ||
+          settled.viewportHeight !== metrics.current.viewportHeight
+        ),
+      };
+      return false;
+    }
+    if (userScrollFrame.current !== null) cancelAnimationFrame(userScrollFrame.current);
+    userScrollFrame.current = null;
+    current.current.viewport.anchor = { ...settled.anchor };
+    target.current = { anchor: { ...settled.anchor } };
+    observed.current = null;
+    bootstrap.current.pending = true;
+    bootstrap.current.commandOffset = null;
+    return true;
+  }, [valid]);
   const verifyArrival = useCallback(() => {
     cancelSettle();
     const destination = target.current;
@@ -325,12 +378,19 @@ function MessageWindow({
         const desired = Math.min(requested, maxOffset);
         if (Math.abs(observed.current - desired) > 2) return;
         target.current = null;
-        current.current.viewport.anchor =
-          messageAnchorAt(
-            observed.current,
-            frames.current,
-            dimensions.viewportHeight,
-          ) ?? current.current.viewport.anchor;
+        const visible = messageAnchorAt(
+          observed.current, frames.current, dimensions.viewportHeight,
+        ) ?? current.current.viewport.anchor;
+        current.current.viewport.anchor = visible;
+        const visibleFrame = visible && frames.current.get(visible.id);
+        settledRestoration.current = 'anchor' in destination && visible && visibleFrame
+          ? {
+              anchor: { ...visible }, frame: { ...visibleFrame },
+              y: observed.current, contentHeight: dimensions.contentHeight,
+              viewportHeight: dimensions.viewportHeight,
+              awaitingFrame: false,
+            }
+          : null;
       });
     });
   }, [cancelSettle, initialIndex, valid]);
@@ -437,6 +497,8 @@ function MessageWindow({
         cancelAnimationFrame(endDragFrame.current);
       if (bootstrap.current.retryFrame !== null)
         cancelAnimationFrame(bootstrap.current.retryFrame);
+      if (userScrollFrame.current !== null)
+        cancelAnimationFrame(userScrollFrame.current);
     };
   }, [cancelSettle, viewport, valid]);
   const measurements = useMemo(
@@ -447,6 +509,18 @@ function MessageWindow({
         const key = messageRowKey(message);
         const previous = frames.current.get(key);
         const cached = current.current.viewport.heights.get(key);
+        frames.current.set(key, { y, height });
+        const settled = settledRestoration.current;
+        if (settled?.anchor.id === key) {
+          if (
+            userScrollFrame.current !== null &&
+            settled.frame.y === y && settled.frame.height === height
+          ) {
+            cancelAnimationFrame(userScrollFrame.current);
+            userScrollFrame.current = null;
+            settledRestoration.current = null;
+          } else restoreAfterGeometry(false, true, true);
+        }
         const anchor = current.current.viewport.anchor;
         // In an inverted cell, appended text moves its visual top while native
         // MVCP sees the same row.y. Keep previously read text in place only for
@@ -470,7 +544,6 @@ function MessageWindow({
           target.current = { anchor: adjusted };
           observed.current = null;
         }
-        frames.current.set(key, { y, height });
         if (
           unmeasuredOlderTail.current === key &&
           current.current.hasOlder !== false
@@ -492,7 +565,7 @@ function MessageWindow({
         frames.current.delete(id);
       },
     }),
-    [restore, valid, releaseHistory],
+    [restore, valid, releaseHistory, restoreAfterGeometry],
   );
   useEffect(() => {
     if (followTail.current && !interacting.current)
@@ -548,6 +621,9 @@ function MessageWindow({
         ) ?? viewport.anchor;
   };
   const takeUserControl = () => {
+    if (userScrollFrame.current !== null) cancelAnimationFrame(userScrollFrame.current);
+    userScrollFrame.current = null;
+    settledRestoration.current = null;
     bootstrap.current.pending = false;
     interacting.current = true;
     followTail.current = false;
@@ -562,11 +638,46 @@ function MessageWindow({
         {...scrollProps}
         onScroll={event => {
           if (!valid()) return;
+          const settled = settledRestoration.current;
+          if (settled && !target.current) {
+            const { contentOffset, contentSize } = event.nativeEvent;
+            // A packet can describe either an older native batch or a newer
+            // batch whose layout callback is still queued. It cannot establish
+            // new geometry by itself, or an unchanged scrollTo could leave us
+            // waiting for an arrival event that Android never needs to emit.
+            if (Math.abs(contentSize.height - metrics.current.contentHeight) > 1)
+              return;
+            const frame = frames.current.get(settled.anchor.id);
+            const geometryChanged =
+              Math.abs(contentSize.height - settled.contentHeight) > 1 ||
+              Math.abs(metrics.current.contentHeight - settled.contentHeight) > 1 ||
+              metrics.current.viewportHeight !== settled.viewportHeight ||
+              (frame && (frame.y !== settled.frame.y || frame.height !== settled.frame.height));
+            if (geometryChanged) {
+              if (restoreAfterGeometry(true)) restore();
+            } else if (Math.abs(contentOffset.y - settled.y) > 2) {
+              // Accessibility scrolls need not emit begin-drag. A move against
+              // unchanged geometry is new user control, not late list reflow.
+              if (!settled.awaitingFrame) settledRestoration.current = null;
+              else {
+                // Size and saved-row layout notifications from one native batch
+                // may straddle this packet. Forward the real scroll immediately;
+                // coalesce only ownership until that frame's layouts arrive.
+                if (userScrollFrame.current === null)
+                  userScrollFrame.current = requestAnimationFrame(() => {
+                    userScrollFrame.current = null;
+                    if (valid() && settledRestoration.current === settled && !target.current)
+                      settledRestoration.current = null;
+                  });
+              }
+            }
+          }
           if (bootstrap.current.pending) {
             const { contentOffset, contentSize } = event.nativeEvent;
             const commandOffset = bootstrap.current.commandOffset;
-            const anchorFrame = initialAnchor
-              ? frames.current.get(initialAnchor.id)
+            const destination = target.current;
+            const anchorFrame = destination && 'anchor' in destination
+              ? frames.current.get(destination.anchor.id)
               : null;
             if (
               commandOffset === null ||
@@ -597,7 +708,7 @@ function MessageWindow({
         }}
       />
     ),
-    [initialAnchor, restore, valid],
+    [restore, restoreAfterGeometry, valid],
   );
   return (
     <Measurements.Provider value={measurements}>
@@ -628,6 +739,7 @@ function MessageWindow({
         onLayout={event => {
           if (!valid()) return;
           metrics.current.viewportHeight = event.nativeEvent.layout.height;
+          restoreAfterGeometry(false, true);
           restore();
         }}
         onScrollBeginDrag={() => {
@@ -693,6 +805,7 @@ function MessageWindow({
         onContentSizeChange={(_width, height) => {
           if (!valid()) return;
           metrics.current.contentHeight = height;
+          restoreAfterGeometry(false, true);
           if (followTail.current && !interacting.current)
             target.current = { latest: true };
           restore();
