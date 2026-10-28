@@ -93,6 +93,13 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
   override fun getName() = "TomorrowPlatform"
   private fun onUi(action: () -> Unit) { UiThreadUtil.runOnUiThread { action() } }
 
+  @ReactMethod fun getSystemFontScale(promise: Promise) = onUi {
+    // DeviceInfo caches its fontScale until host resume. A live configuration
+    // change can already have resized EditText without refreshing JS Dimensions.
+    val scale = (context.currentActivity?.resources ?: context.resources).configuration.fontScale
+    promise.resolve(if (scale.isFinite() && scale > 0) scale.toDouble() else null)
+  }
+
   private fun encryptionKey(): SecretKey {
     val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
     (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }

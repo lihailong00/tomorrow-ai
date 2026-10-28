@@ -34,6 +34,7 @@ import { createChatStreamController, type ChatProgress, type ChatStreamControlle
 type Attachment = { file: LocalFile; upload?: Upload; transcript?: string };
 type VoiceInput = { key: string; file: LocalFile; upload?: Upload; text?: string };
 type VoiceRequest = { cancel: () => void; release: () => void };
+const INPUT_LINE_ALLOWANCE = 23;
 type ChatSnapshot = {
   id?: string;
   draft: string;
@@ -142,6 +143,33 @@ export function ChatScreen({
   const composerScroll = useRef<ScrollView>(null);
   const composerTop = useRef(0);
   const inputFocused = useRef(false);
+  const [nativeFontScale, setNativeFontScale] = useState<number | null>(null);
+  const inputScaleOwner = useMemo(() => ({ active: true, running: false, pending: false }), [api, state]);
+  const currentInputScaleOwner = useRef(inputScaleOwner);
+  currentInputScaleOwner.current = inputScaleOwner;
+  const refreshInputFontScale = useCallback(() => {
+    if (!inputScaleOwner.active || currentInputScaleOwner.current !== inputScaleOwner ||
+      !platform.getSystemFontScale) return;
+    inputScaleOwner.pending = true;
+    if (inputScaleOwner.running) return;
+    inputScaleOwner.running = true;
+    void (async () => {
+      do {
+        inputScaleOwner.pending = false;
+        const value = await platform.getSystemFontScale().catch(() => null);
+        if (!inputScaleOwner.active || currentInputScaleOwner.current !== inputScaleOwner) return;
+        const scale = typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+        setNativeFontScale(previous => previous === scale ? previous : scale);
+      } while (inputScaleOwner.pending);
+    })().finally(() => { inputScaleOwner.running = false; });
+  }, [inputScaleOwner]);
+  useEffect(() => {
+    inputScaleOwner.active = true;
+    return () => { inputScaleOwner.active = false; };
+  }, [inputScaleOwner]);
+  useEffect(() => {
+    refreshInputFontScale();
+  }, [refreshInputFontScale, windowHeight, availableHeight, fontScale]);
   // Rotation and keyboard reflow can move a field that already has focus.
   const revealFocusedInput = () => {
     if (inputFocused.current) {
@@ -461,11 +489,12 @@ export function ChatScreen({
     !attachmentReady;
   const supportMaxHeight = Math.max(64, Math.min(130, availableHeight * 0.28));
   // Keep one scaled line visible even when the keyboard reduces the viewport.
-  // Font scaling stays native; only the input's layout allowance changes.
+  // Live Android font changes can precede DeviceInfo's next host-resume event.
+  // Read the actual scale for layout while leaving glyph metrics to EditText.
   const inputMinHeight = Math.max(
     chat.input.minHeight,
     Math.ceil(
-      chat.input.lineHeight * fontScale +
+      INPUT_LINE_ALLOWANCE * (nativeFontScale ?? fontScale) +
         chat.input.paddingTop +
         chat.input.paddingBottom,
     ),
@@ -764,8 +793,10 @@ export function ChatScreen({
             placeholderTextColor={colors.muted}
             value={draft}
             onChangeText={setDraft}
+            onContentSizeChange={refreshInputFontScale}
             onFocus={() => {
               inputFocused.current = true;
+              refreshInputFontScale();
               revealFocusedInput();
             }}
             onBlur={() => {
@@ -1108,7 +1139,9 @@ const chat = StyleSheet.create({
   },
   input: {
     fontSize: 14,
-    lineHeight: 23,
+    // A fixed lineHeight leaves a stale Android CustomLineHeightSpan after a
+    // live fontScale change. Native font metrics keep complete glyphs visible.
+    includeFontPadding: true,
     minHeight: 51,
     maxHeight: 145,
     paddingHorizontal: 10,

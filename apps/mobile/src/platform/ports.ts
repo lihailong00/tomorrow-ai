@@ -29,6 +29,7 @@ interface NativePort {
   pickDocument(): Promise<LocalFile | null>;
   startRecording(): Promise<void>;
   stopRecording(): Promise<LocalFile | null>;
+  getSystemFontScale(): Promise<number | null>;
   requestNotifications(): Promise<boolean>;
   notificationPermissionStatus(): Promise<NotificationPermissionStatus>;
   openNotificationSettings(): Promise<void>;
@@ -73,6 +74,16 @@ export const platform = {
   ),
   hasDocumentPicker: Boolean(native?.pickDocument),
   hasRecorder: Boolean(native?.startRecording && native?.stopRecording),
+  async getSystemFontScale(): Promise<number | null> {
+    if (!native?.getSystemFontScale) return null;
+    try {
+      const value = await native.getSystemFontScale();
+      return typeof value === 'number' && Number.isFinite(value) && value > 0
+        ? value : null;
+    } catch {
+      return null;
+    }
+  },
   async loadPreferences(): Promise<Preferences> {
     const value = await AsyncStorage.getItem(PREFS_KEY);
     let saved: Partial<Preferences> = {};

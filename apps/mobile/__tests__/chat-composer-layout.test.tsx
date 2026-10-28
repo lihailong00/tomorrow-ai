@@ -10,9 +10,11 @@ import {
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { AppContextValue, AppProvider } from '../src/app/context';
 import { ChatScreen } from '../src/screens/Chat';
+import { platform } from '../src/platform/ports';
 
 jest.mock('../src/platform/ports', () => ({
   platform: {
+    getSystemFontScale: jest.fn().mockResolvedValue(null),
     pickDocument: jest.fn().mockResolvedValue({
       uri: 'file:///note.txt',
       name: 'note.txt',
@@ -31,6 +33,9 @@ beforeAll(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 });
 const mountedTrees = new Set<ReactTestRenderer>();
+beforeEach(() => {
+  (platform.getSystemFontScale as jest.Mock).mockReset().mockResolvedValue(null);
+});
 afterEach(async () => {
   await act(async () => {
     mountedTrees.forEach(tree => tree.unmount());
@@ -100,6 +105,13 @@ async function setup(fontScale = 1) {
         .find(node => node.props.testID === 'chat-composer-content')!,
     messagePane: () => tree.root.findAllByType(ScrollView)[0],
     inputStyle: () => StyleSheet.flatten(input().props.style),
+    async changeOwner() {
+      await act(async () => tree.update(
+        <AppProvider value={{ api: { ...api }, invalidate: jest.fn(), formatDate: () => '' } as unknown as AppContextValue}>
+          <ChatScreen />
+        </AppProvider>,
+      ));
+    },
     async layout(height: number) {
       await act(async () => {
         tree.root
@@ -143,7 +155,8 @@ test.each([
     expect(app.inputStyle().maxHeight).toBeGreaterThanOrEqual(minimum);
     expect(app.input().props.value).toBe('Agjpqy TEST');
     expect(app.inputStyle().fontSize).toBe(14);
-    expect(app.inputStyle().lineHeight).toBe(23);
+    expect(app.inputStyle().lineHeight).toBeUndefined();
+    expect(app.inputStyle().includeFontPadding).toBe(true);
     for (const label of ['选择附件', '开始录音', '发送消息']) {
       const button = app.control(label);
       expect(button.props.disabled).toBe(false);
@@ -310,5 +323,90 @@ test('live viewport changes reveal the focused input without taking scroll contr
     app.composer().props.onLayout();
   });
   expect(scrollTo).not.toHaveBeenCalled();
+  await app.close();
+});
+
+test('live native font changes resize the existing six-line input even while JS dimensions stay stale', async () => {
+  const readScale = platform.getSystemFontScale as jest.Mock;
+  readScale.mockResolvedValue(1);
+  const app = await setup(1);
+  await app.dimensions(568, 320, 1);
+  await app.layout(37);
+  const draft = 'Agjpqy TEST\nA12 2 Agjpqy\nA12 3 Agjpqy\nA12 4 Agjpqy\nA12 5 Agjpqy\nA12 6 Agjpqy';
+  await app.type(draft);
+  const originalInput = app.input().instance;
+  expect(app.inputStyle().minHeight).toBe(51);
+
+  // Android has applied a live font-only configuration change, without host
+  // resume or a corresponding DeviceInfo Dimensions update.
+  readScale.mockResolvedValue(2);
+  await act(async () => app.input().props.onContentSizeChange({
+    nativeEvent: { contentSize: { width: 350, height: 230 } },
+  }));
+  expect(Dimensions.get('window').fontScale).toBe(1);
+  expect(app.inputStyle().minHeight).toBe(68);
+  expect(app.inputStyle().maxHeight).toBe(68);
+  expect(app.inputStyle().lineHeight).toBeUndefined();
+  expect(app.inputStyle().includeFontPadding).toBe(true);
+  expect(app.input().instance).toBe(originalInput);
+  expect(app.input().props).toMatchObject({ value: draft, editable: true, multiline: true, scrollEnabled: true });
+
+  readScale.mockResolvedValue(1);
+  await act(async () => app.input().props.onContentSizeChange({
+    nativeEvent: { contentSize: { width: 350, height: 125 } },
+  }));
+  expect(app.inputStyle().minHeight).toBe(51);
+  expect(app.input().props.value).toBe(draft);
+  for (const label of ['选择附件', '开始录音', '发送消息']) {
+    expect(app.control(label).props.disabled).toBe(false);
+    expect(app.composer().findAll(node => node.props.accessibilityLabel === label).length).toBeGreaterThan(0);
+  }
+  await app.close();
+});
+
+test('native font reads coalesce focus and content reflow bursts instead of feeding a layout loop', async () => {
+  let complete!: (value: number) => void;
+  const readScale = platform.getSystemFontScale as jest.Mock;
+  readScale.mockImplementationOnce(() => new Promise<number>(resolve => { complete = resolve; }));
+  readScale.mockResolvedValue(2);
+  const app = await setup(1);
+  await act(async () => {
+    app.input().props.onFocus();
+    app.input().props.onContentSizeChange();
+    app.input().props.onContentSizeChange();
+    app.input().props.onFocus();
+  });
+  expect(readScale).toHaveBeenCalledTimes(1);
+  await act(async () => complete(2));
+  expect(readScale).toHaveBeenCalledTimes(2);
+  expect(app.inputStyle().minHeight).toBe(68);
+  await act(async () => {});
+  expect(readScale).toHaveBeenCalledTimes(2);
+  await app.close();
+});
+
+test('a delayed native font result cannot resize the next account or route owner', async () => {
+  let completeOld!: (value: number) => void;
+  const readScale = platform.getSystemFontScale as jest.Mock;
+  readScale.mockImplementationOnce(() => new Promise<number>(resolve => { completeOld = resolve; }));
+  readScale.mockResolvedValue(1);
+  const app = await setup(1);
+  await app.layout(37);
+  await app.changeOwner();
+  await app.type('New owner draft');
+  await act(async () => completeOld(2));
+  expect(app.inputStyle().minHeight).toBe(51);
+  expect(app.input().props.value).toBe('New owner draft');
+  await app.close();
+});
+
+test('font-read failure falls back to the current platform dimensions without changing the draft', async () => {
+  (platform.getSystemFontScale as jest.Mock).mockRejectedValue(new Error('native unavailable'));
+  const app = await setup(2);
+  await app.layout(37);
+  await app.type('Keep this draft');
+  await act(async () => app.input().props.onFocus());
+  expect(app.inputStyle().minHeight).toBe(68);
+  expect(app.input().props.value).toBe('Keep this draft');
   await app.close();
 });
