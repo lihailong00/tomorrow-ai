@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
+import { Alert, Pressable, ScrollView, View } from 'react-native';
+import { Text } from '../ui/Text';
 import { ApiError } from '../api/client';
 import { useAction, useApp } from '../app/context';
 import { defaultServerUrl, platform } from '../platform/ports';

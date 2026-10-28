@@ -12,9 +12,9 @@ import {
   Pressable,
   StatusBar,
   StyleSheet,
-  Text,
   View,
 } from 'react-native';
+import { Text } from './src/ui/Text';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { ApiClient, normalizeServerUrl } from './src/api/client';
 import { createInstanceIdentityGuard, inspectInstance } from './src/api/instance';

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Switch, Text, View } from 'react-native';
+import { Switch, View } from 'react-native';
+import { Text } from '../../ui/Text';
 import { inspectInstance } from '../../api/instance';
 import { useAction, useApp } from '../../app/context';
 import { connectionFromLink, InstanceManifest, instanceServerUrl } from '../../domain/instance';

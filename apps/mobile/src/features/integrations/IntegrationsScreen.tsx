@@ -7,9 +7,9 @@ import {
   ScrollView,
   StyleSheet,
   Switch,
-  Text,
   View,
 } from 'react-native';
+import { Text } from '../../ui/Text';
 import { errorMessage } from '../../api/client';
 import type { ApiClient } from '../../api/client';
 import { useAction, useApp } from '../../app/context';

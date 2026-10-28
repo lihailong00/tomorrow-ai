@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { Alert, RefreshControl, ScrollView, Text, View } from 'react-native';
+import { Alert, RefreshControl, ScrollView, View } from 'react-native';
+import { Text } from '../ui/Text';
 import { useAction, useApp } from '../app/context';
 import { Upload } from '../domain/types';
 import {

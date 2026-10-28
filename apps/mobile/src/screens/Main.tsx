@@ -5,9 +5,9 @@ import {
   RefreshControl,
   ScrollView,
   StyleSheet,
-  Text,
   View,
 } from 'react-native';
+import { Text } from '../ui/Text';
 import { useAction, useApp, useResource } from '../app/context';
 import {
   chineseDayLabel,

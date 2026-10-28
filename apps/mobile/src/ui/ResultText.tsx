@@ -1,5 +1,6 @@
 import React from 'react';
-import { Text, View } from 'react-native';
+import { View } from 'react-native';
+import { Text } from './Text';
 import { colors, styles as s } from './theme';
 
 /** Safe native rendering: model output never becomes executable HTML or a WebView. */

@@ -11,9 +11,9 @@ import {
   Pressable,
   StyleSheet,
   Switch,
-  Text,
   View,
 } from 'react-native';
+import { Text } from '../../ui/Text';
 import { ApiError, errorMessage } from '../../api/client';
 import { useAction, useApp } from '../../app/context';
 import { LocalFile, platform } from '../../platform/ports';

@@ -1,5 +1,6 @@
 package com.tomorrowai
 
+import android.content.res.Configuration
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
@@ -10,6 +11,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
+import com.facebook.react.bridge.LifecycleEventListener
 import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
 import com.facebook.react.defaults.DefaultReactActivityDelegate
 
@@ -17,9 +19,12 @@ class MainActivity : ReactActivity() {
 
   private var keyboardHost: View? = null
   private var keyboardLayoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null
+  private var fontLayoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null
+  private var lastFontScale = Float.NaN
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    lastFontScale = resources.configuration.fontScale
     // Keep resize enabled: older Android versions need it to report IME changes.
     // Some vendor windows do not resize despite this flag, so also observe their
     // actual visible frame instead of relying on IME insets alone.
@@ -35,6 +40,36 @@ class MainActivity : ReactActivity() {
       updateKeyboardPadding(content, initialBottom, ViewCompat.getRootWindowInsets(content))
     }.also { content.viewTreeObserver.addOnGlobalLayoutListener(it) }
     ViewCompat.requestApplyInsets(content)
+  }
+
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    val scale = newConfig.fontScale
+    if (!scale.isFinite() || scale <= 0 || scale == lastFontScale) return
+    lastFontScale = scale
+    val content = keyboardHost ?: return
+    if (fontLayoutListener == null) {
+      fontLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+        fontLayoutListener?.let { listener ->
+          if (content.viewTreeObserver.isAlive) {
+            content.viewTreeObserver.removeOnGlobalLayoutListener(listener)
+          }
+        }
+        fontLayoutListener = null
+        // super refreshed RN's native display metrics. Let the Fabric surface
+        // consume them during layout before publishing the scale to JS.
+        // DeviceInfo normally refreshes its cached scale only on host resume;
+        // this Activity deliberately handles font changes without recreation.
+        val context = (application as MainApplication).reactHost.currentReactContext
+        if (context?.hasActiveReactInstance() == true) {
+          (context.getNativeModule("DeviceInfo") as? LifecycleEventListener)?.onHostResume()
+        }
+      }.also { content.viewTreeObserver.addOnGlobalLayoutListener(it) }
+    }
+    // Request the RN surface itself, not just its parent FrameLayout, so its
+    // onMeasure updates Fabric's font-size multiplier even with unchanged bounds.
+    reactDelegate?.reactRootView?.requestLayout()
+    content.requestLayout()
   }
 
   private fun updateKeyboardPadding(
@@ -76,6 +111,11 @@ class MainActivity : ReactActivity() {
 
   override fun onDestroy() {
     keyboardHost?.let { content ->
+      fontLayoutListener?.let { listener ->
+        if (content.viewTreeObserver.isAlive) {
+          content.viewTreeObserver.removeOnGlobalLayoutListener(listener)
+        }
+      }
       keyboardLayoutListener?.let { listener ->
         if (content.viewTreeObserver.isAlive) {
           content.viewTreeObserver.removeOnGlobalLayoutListener(listener)
@@ -84,6 +124,7 @@ class MainActivity : ReactActivity() {
       ViewCompat.setOnApplyWindowInsetsListener(content, null)
     }
     keyboardLayoutListener = null
+    fontLayoutListener = null
     keyboardHost = null
     super.onDestroy()
   }

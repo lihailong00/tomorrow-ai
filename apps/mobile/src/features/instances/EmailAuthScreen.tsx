@@ -1,5 +1,6 @@
 import React, { useRef, useState } from 'react';
-import { ScrollView, Text, View } from 'react-native';
+import { ScrollView, View } from 'react-native';
+import { Text } from '../../ui/Text';
 import { useAction, useApp } from '../../app/context';
 import { validatePassword } from '../../domain/password';
 import { Button, ErrorNotice, Field, Notice, Section } from '../../ui/components';

@@ -5,11 +5,11 @@ import {
   RefreshControl,
   ScrollView,
   StyleSheet,
-  Text,
   TextInput,
   useWindowDimensions,
   View,
 } from 'react-native';
+import { Text } from '../ui/Text';
 import { errorMessage, newRequestId } from '../api/client';
 import { useAction, useApp, useResource } from '../app/context';
 import type { RetainedRouteScope } from '../app/navigation';

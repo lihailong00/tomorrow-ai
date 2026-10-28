@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Text, View } from 'react-native';
+import { Alert, View } from 'react-native';
+import { Text } from '../../ui/Text';
 import { ActionScope, useAction, useApp } from '../../app/context';
 import { ApiClient, ApiError, errorMessage } from '../../api/client';
 import { inspectInstance } from '../../api/instance';

@@ -5,9 +5,9 @@ import {
   RefreshControl,
   ScrollView,
   Switch,
-  Text,
   View,
 } from 'react-native';
+import { Text } from '../ui/Text';
 import { newRequestId } from '../api/client';
 import { useAction, useApp, useResource } from '../app/context';
 import {
