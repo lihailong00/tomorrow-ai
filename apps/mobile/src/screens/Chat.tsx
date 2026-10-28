@@ -160,7 +160,6 @@ export function ChatScreen({
   }));
   const refreshHistory = () => state.history.refresh(api, initialConversationId, applyHistory, canApplyHistory);
   const loadOlder = () => state.history.older(api, id, items => {
-    state.history.viewport.anchor = { y: state.history.viewport.y, height: state.history.viewport.height };
     scrollToLatest.current = false;
     applyHistory(items);
   }, canApplyHistory);
@@ -417,26 +416,23 @@ export function ChatScreen({
         style={chat.messagePane}
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={chat.messages}
+        // Child 0 is always the header. Native anchoring follows the same message
+        // View through every layout pass, including text and keyboard reflow.
+        maintainVisibleContentPosition={{ minIndexForVisible: 1 }}
         onScroll={event => { state.history.viewport.y = event.nativeEvent.contentOffset.y; }}
         scrollEventThrottle={16}
-        onContentSizeChange={(_width, height) => {
+        onContentSizeChange={() => {
           const viewport = state.history.viewport;
-          if (messages.length > 0 && viewport.anchor) {
-            const y = Math.max(0, viewport.anchor.y + height - viewport.anchor.height);
-            scroll.current?.scrollTo({ y, animated: false });
-            viewport.y = y;
-            viewport.anchor = null;
-            restoreViewport.current = false;
-          } else if (messages.length > 0 && restoreViewport.current) {
+          if (messages.length > 0 && restoreViewport.current) {
             scroll.current?.scrollTo({ y: viewport.y, animated: false });
             restoreViewport.current = false;
           } else if (messages.length > 0 && scrollToLatest.current) {
             scroll.current?.scrollToEnd({ animated: true });
             scrollToLatest.current = false;
           }
-          viewport.height = height;
         }}
       >
+        <View key="history-header" testID="chat-history-header" collapsable={false}>
         <ErrorNotice message={history.error} retry={refreshHistory} />
         {history.nextOffset !== null && <Button variant="ghost" disabled={history.loading}
           onPress={loadOlder}>{history.loading ? '正在加载…' : '加载更早消息'}</Button>}
@@ -480,9 +476,10 @@ export function ChatScreen({
             <ModeNotice runtime={capabilities.value.runtime} />
           </View>
         )}
+        </View>
         {messages.map(message =>
           message.role === 'user' ? (
-            <View key={message.id} style={chat.userBubble}>
+            <View key={message.id} testID={`chat-message-${message.id}`} collapsable={false} style={chat.userBubble}>
               <Text selectable style={[s.body, { color: colors.ink }]}>
                 {message.content}
               </Text>
@@ -494,7 +491,7 @@ export function ChatScreen({
               ))}
             </View>
           ) : (
-            <View key={message.id} style={chat.assistantMessage}>
+            <View key={message.id} testID={`chat-message-${message.id}`} collapsable={false} style={chat.assistantMessage}>
               <View style={chat.messageIdentity}>
                 <AssistantOrb size={22} />
                 <Text style={chat.assistantName}>妥啦</Text>

@@ -85,8 +85,8 @@ export function createMessageHistory() {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
-    // Saved viewport is restored on return; prepend anchoring is handled by the view.
-    viewport: { y: 0, height: 0, anchor: null as { y: number; height: number } | null },
+    // Native ScrollView owns prepend anchoring; retain only its reported offset for Back.
+    viewport: { y: 0 },
     ensure: (api: ApiClient, id: string | undefined, apply: (items: Message[]) => void, canApply: () => boolean) =>
       snapshot.initialized ? Promise.resolve() : load(api, id, apply, canApply, false),
     refresh: (api: ApiClient, id: string | undefined, apply: (items: Message[]) => void, canApply: () => boolean) =>

@@ -21,10 +21,10 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-async function setup() {
+async function setup(initial = [message('recent', 100)]) {
   const late = deferred<{ items: Message[]; next_offset: null }>();
   const api = {
-    messages: jest.fn().mockResolvedValueOnce({ items: [message('recent', 100)], next_offset: 40, next_before: 'recent' }).mockReturnValueOnce(late.promise),
+    messages: jest.fn().mockResolvedValueOnce({ items: initial, next_offset: initial.length ? 40 : null, next_before: initial.length ? 'recent' : null }).mockReturnValueOnce(late.promise),
     capabilities: jest.fn().mockResolvedValue({ items: [], runtime: { model_mode: 'local' } }),
     chat: jest.fn().mockResolvedValue({ conversation_id: 'chat', user_message: message('new turn', 200), message: { ...message('new reply', 201), role: 'assistant' } }),
   };
@@ -74,19 +74,47 @@ test('loads the oldest sentinel, preserves a new reply and draft, and keeps all 
   await app.close();
 });
 
-test('older page prepend preserves the viewport instead of requesting the conversation bottom', async () => {
+test('native anchoring skips the fixed header and keeps the same message View through prepend and repeated layouts', async () => {
   const app = await setup();
   const pane = () => app.tree.root.findAllByType(ScrollView)[0];
+  const children = () => React.Children.toArray(pane().props.children) as React.ReactElement<any>[];
+  expect(pane().props.maintainVisibleContentPosition).toEqual({ minIndexForVisible: 1 });
+  expect(children()[0].props).toMatchObject({ testID: 'chat-history-header', collapsable: false });
+  expect(children()[1].props).toMatchObject({ testID: 'chat-message-recent', collapsable: false });
+  const retainedKey = children()[1].key;
   await act(async () => pane().props.onContentSizeChange(360, 1000));
   await act(async () => pane().props.onScroll({ nativeEvent: { contentOffset: { y: 120 } } }));
   await app.older();
   await act(async () => app.late.resolve({ items: [message('earliest sentinel', 1)], next_offset: null }));
-  await act(async () => pane().props.onContentSizeChange(360, 1600));
-  expect(app.entry().history.viewport.y).toBe(720);
+  expect(children()[0].props.testID).toBe('chat-history-header');
+  expect(children()[1].props.testID).toBe('chat-message-earliest sentinel');
+  expect(children()[2].key).toBe(retainedKey);
+  expect(children()[2].props).toMatchObject({ testID: 'chat-message-recent', collapsable: false });
+  // Layout can settle over several frames. JS must not add a second height-delta
+  // correction to the offset that native anchoring reports via onScroll.
+  for (const height of [1600, 1840, 1800]) {
+    await act(async () => pane().props.onContentSizeChange(360, height));
+    expect(app.entry().history.viewport.y).toBe(120);
+  }
+  await act(async () => pane().props.onScroll({ nativeEvent: { contentOffset: { y: 720 } } }));
   await app.history();
   await app.back();
-  await act(async () => pane().props.onContentSizeChange(360, 1600));
+  await act(async () => pane().props.onContentSizeChange(360, 1800));
   expect(app.entry().history.viewport.y).toBe(720);
+  await app.close();
+});
+
+test('the header keeps native child index zero when an empty conversation receives its first turn', async () => {
+  const app = await setup([]);
+  const children = () => React.Children.toArray(app.tree.root.findAllByType(ScrollView)[0].props.children) as React.ReactElement<any>[];
+  const headerKey = children()[0].key;
+  expect(children()[0].props.testID).toBe('chat-history-header');
+  expect(children().filter(child => child.props.testID?.startsWith('chat-message-'))).toHaveLength(0);
+  await app.input('first turn');
+  await app.send();
+  expect(children()[0].key).toBe(headerKey);
+  expect(children()[1].props).toMatchObject({ testID: 'chat-message-new turn', collapsable: false });
+  expect(children()[2].props).toMatchObject({ testID: 'chat-message-new reply', collapsable: false });
   await app.close();
 });
 
