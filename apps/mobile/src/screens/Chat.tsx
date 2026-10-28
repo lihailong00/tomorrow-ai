@@ -184,7 +184,7 @@ export function ChatScreen({
       attachmentAbort.current?.abort();
       // An authorized conversion belongs to the retained route, not this mount.
       if (!state.scope?.isRetained()) state.voiceRequest?.cancel();
-      if (!state.scope?.isRetained()) state.history.dispose();
+      state.history.dispose();
       if (recordingRef.current) {
         platform.stopRecording().catch(() => {});
       }

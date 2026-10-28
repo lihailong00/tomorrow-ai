@@ -4,7 +4,7 @@ import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { AppContextValue, AppProvider } from '../src/app/context';
 import { useRouteStack } from '../src/app/navigation';
 import { ChatScreen, createChatEntryState } from '../src/screens/Chat';
-import { Button } from '../src/ui/components';
+import { Button, ErrorNotice } from '../src/ui/components';
 import type { Message } from '../src/domain/types';
 
 jest.mock('../src/platform/ports', () => ({ platform: {} }));
@@ -21,10 +21,13 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-async function setup(initial = [message('recent', 100)]) {
+async function setup(initial = [message('recent', 100)], options?: {
+  firstPage?: Promise<{ items: Message[]; next_offset: number | null; next_before?: string | null }>;
+  strict?: boolean;
+}) {
   const late = deferred<{ items: Message[]; next_offset: null }>();
   const api = {
-    messages: jest.fn().mockResolvedValueOnce({ items: initial, next_offset: initial.length ? 40 : null, next_before: initial.length ? 'recent' : null }).mockReturnValueOnce(late.promise),
+    messages: jest.fn().mockReturnValueOnce(options?.firstPage ?? Promise.resolve({ items: initial, next_offset: initial.length ? 40 : null, next_before: initial.length ? 'recent' : null })).mockReturnValueOnce(late.promise),
     capabilities: jest.fn().mockResolvedValue({ items: [], runtime: { model_mode: 'local' } }),
     chat: jest.fn().mockResolvedValue({ conversation_id: 'chat', user_message: message('new turn', 200), message: { ...message('new reply', 201), role: 'assistant' } }),
   };
@@ -40,18 +43,22 @@ async function setup(initial = [message('recent', 100)]) {
       </React.Fragment>
     </AppProvider>;
   }
+  const render = (client: typeof api) => options?.strict
+    ? <React.StrictMode><Harness client={client} /></React.StrictMode>
+    : <Harness client={client} />;
   let tree!: ReactTestRenderer;
-  await act(async () => { tree = create(<Harness client={api} />); });
+  await act(async () => { tree = create(render(api)); });
   await act(async () => navigation.navigate({ name: 'chat', conversationId: 'chat' }));
   return {
     api, late, tree, entry: () => entry,
     text: () => tree.root.findAllByType(Text).map(node => node.props.children).join('\n'),
     input: async (value: string) => { await act(async () => tree.root.findByType(TextInput).props.onChangeText(value)); },
     older: async () => { await act(async () => { void tree.root.findAllByType(Button).find(node => node.props.children === '加载更早消息')!.props.onPress(); }); },
+    refresh: async () => { await act(async () => { void tree.root.findAllByType(ErrorNotice)[0].props.retry(); }); },
     send: async () => { await act(async () => { await tree.root.findAll(node => node.props.accessibilityLabel === '发送消息' && typeof node.props.onPress === 'function')[0].props.onPress(); }); },
     history: async () => { await act(async () => navigation.navigate({ name: 'conversations' })); },
     back: async () => { await act(async () => navigation.back()); },
-    owner: async () => { await act(async () => tree.update(<Harness client={{ ...api, messages: jest.fn().mockResolvedValue({ items: [message('other owner', 1)] }) }} />)); },
+    owner: async () => { await act(async () => tree.update(render({ ...api, messages: jest.fn().mockResolvedValue({ items: [message('other owner', 1)] }) }))); },
     close: async () => { await act(async () => tree.unmount()); },
   };
 }
@@ -126,5 +133,69 @@ test('a late older page cannot enter a new account after ownership changes', asy
   await act(async () => app.late.resolve({ items: [message('foreign late sentinel', 1)], next_offset: null }));
   expect(old.getSnapshot().messages.map(item => item.id)).toEqual(['recent']);
   expect(app.text()).not.toContain('foreign late sentinel');
+  await app.close();
+});
+
+test('leaving while older is pending preserves the reading position and cursor until a visible retry', async () => {
+  const app = await setup();
+  const pane = () => app.tree.root.findAllByType(ScrollView)[0];
+  await act(async () => pane().props.onContentSizeChange(360, 1000));
+  await act(async () => pane().props.onScroll({ nativeEvent: { contentOffset: { y: 120 } } }));
+  await app.input('retained draft');
+  await app.older();
+  await app.history();
+  expect(app.entry().history.getSnapshot()).toMatchObject({ initialized: true, loading: false, nextOffset: 40, nextBefore: 'recent' });
+  await act(async () => app.late.resolve({ items: [message('earliest sentinel', 1)], next_offset: null }));
+  expect(app.entry().getSnapshot().messages.map(item => item.id)).toEqual(['recent']);
+  await app.back();
+  await act(async () => pane().props.onContentSizeChange(360, 1000));
+  expect(app.entry().history.viewport.y).toBe(120);
+  expect(app.api.messages).toHaveBeenCalledTimes(2);
+  expect(app.tree.root.findByType(TextInput).props.value).toBe('retained draft');
+  app.api.messages.mockResolvedValueOnce({ items: [message('earliest sentinel', 1)], next_offset: null });
+  await app.older();
+  expect(app.api.messages).toHaveBeenLastCalledWith('chat', { before: 'recent', limit: 40 });
+  expect(app.entry().getSnapshot().messages.map(item => item.id)).toEqual(['earliest sentinel', 'recent']);
+  await app.close();
+});
+
+test('an initial read completed while hidden is discarded and Back starts a fresh initial page', async () => {
+  const first = deferred<{ items: Message[]; next_offset: null }>();
+  const app = await setup([], { firstPage: first.promise });
+  await app.history();
+  await act(async () => first.resolve({ items: [message('hidden stale initial', 1)], next_offset: null }));
+  expect(app.entry().history.getSnapshot()).toMatchObject({ initialized: false, loading: false });
+  expect(app.entry().getSnapshot().messages).toEqual([]);
+  await act(async () => app.late.resolve({ items: [message('current initial', 100)], next_offset: null }));
+  await app.back();
+  expect(app.api.messages).toHaveBeenCalledTimes(2);
+  expect(app.api.messages).toHaveBeenLastCalledWith('chat', { offset: 0, limit: 40 });
+  expect(app.entry().getSnapshot().messages.map(item => item.id)).toEqual(['current initial']);
+  await app.close();
+});
+
+test('a refresh completed while hidden preserves loaded pages and supports an explicit retry', async () => {
+  const app = await setup();
+  await app.refresh();
+  await app.history();
+  await act(async () => app.late.resolve({ items: [message('fresh latest', 200)], next_offset: null }));
+  expect(app.entry().getSnapshot().messages.map(item => item.id)).toEqual(['recent']);
+  await app.back();
+  app.api.messages.mockResolvedValueOnce({ items: [message('fresh latest', 200)], next_offset: null });
+  await app.refresh();
+  expect(app.entry().getSnapshot().messages.map(item => item.id)).toEqual(['recent', 'fresh latest']);
+  expect(app.entry().history.getSnapshot()).toMatchObject({ nextOffset: 40, nextBefore: 'recent', loading: false });
+  await app.close();
+});
+
+test('StrictMode cleanup invalidates its first history read without suppressing the replayed read', async () => {
+  const first = deferred<{ items: Message[]; next_offset: null }>();
+  const app = await setup([], { firstPage: first.promise, strict: true });
+  expect(app.api.messages).toHaveBeenCalledTimes(2);
+  await act(async () => first.resolve({ items: [message('obsolete effect', 1)], next_offset: null }));
+  expect(app.entry().getSnapshot().messages).toEqual([]);
+  await act(async () => app.late.resolve({ items: [message('current effect', 100)], next_offset: null }));
+  expect(app.entry().getSnapshot().messages.map(item => item.id)).toEqual(['current effect']);
+  expect(app.entry().history.getSnapshot()).toMatchObject({ initialized: true, loading: false });
   await app.close();
 });
