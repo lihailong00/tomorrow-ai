@@ -27,10 +27,15 @@ export const messageRowKey = (message: Message) =>
 export function messageAnchorAt(
   y: number,
   frames: ReadonlyMap<string, { y: number; height: number }>,
+  viewportHeight = Infinity,
 ): MessageAnchor | null {
   let first: { id: string; y: number; height: number } | undefined;
   for (const [id, frame] of frames) {
-    if (frame.y + frame.height > y && (!first || frame.y < first.y))
+    if (
+      frame.y + frame.height > y &&
+      frame.y < y + viewportHeight &&
+      (!first || frame.y < first.y)
+    )
       first = { id, ...frame };
   }
   return first ? { id: first.id, offset: y - first.y } : null;

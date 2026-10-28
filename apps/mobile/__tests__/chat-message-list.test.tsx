@@ -1,14 +1,33 @@
 import React from 'react';
-import { Dimensions, FlatList, ScrollView, Text, View } from 'react-native';
+import {
+  Dimensions,
+  FlatList,
+  ScrollView,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import type { Message } from '../src/domain/types';
 import { ChatMessageList } from '../src/screens/ChatMessageList';
+import { AppContextValue, AppProvider } from '../src/app/context';
+import { useRouteStack } from '../src/app/navigation';
+import { ChatScreen, createChatEntryState } from '../src/screens/Chat';
+
+import { Button } from '../src/ui/components';
 import {
   createMessageViewport,
   messageAnchorAt,
   messageInitialIndex,
   messageRowKey,
 } from '../src/screens/messageListLayout';
+
+jest.mock('../src/platform/ports', () => ({ platform: {} }));
+jest.mock('../src/ui/visuals', () => ({
+  AssistantOrb: () => null,
+  Icon: () => null,
+}));
+jest.mock('../src/screens/Main', () => ({ ModeNotice: () => null }));
 
 beforeAll(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -50,6 +69,7 @@ const scrollEvent = (y: number, height = 121000) => ({
 async function setup(
   initial = allMessages(),
   anchor: { id: string; offset: number } | null = null,
+  history?: { hasOlder: boolean; header: React.ReactElement },
 ) {
   const viewport = createMessageViewport();
   viewport.anchor = anchor;
@@ -62,7 +82,10 @@ async function setup(
   const renderItem = jest.fn(({ item }: { item: Message }) => (
     <Row item={item} testID={`row-${messageRowKey(item)}`} />
   ));
-  const header = <Text testID="history-heading">Load older messages</Text>;
+  let header = history?.header ?? (
+    <Text testID="history-heading">Load older messages</Text>
+  );
+  let hasOlder = history?.hasOlder;
   let messages = initial;
   let latestVersion = 0;
   const render = (footer = '') => (
@@ -70,6 +93,7 @@ async function setup(
       messages={messages}
       viewport={viewport}
       latestVersion={latestVersion}
+      hasOlder={hasOlder}
       renderItem={renderItem}
       header={header}
       footer={<Text>{footer}</Text>}
@@ -113,6 +137,9 @@ async function setup(
       await act(async () => {
         virtual()._onLayout(layoutEvent(0, 640));
         list().props.ListHeaderComponent.props.onLayout(layoutEvent(0, 24));
+        list().props.ListFooterComponent.props.onLayout?.(
+          layoutEvent(contentHeight - 48, 48),
+        );
         virtual()._onContentSizeChange(360, contentHeight);
       });
     },
@@ -129,6 +156,16 @@ async function setup(
       messages = next;
       latestVersion = version;
       await act(async () => tree.update(render(footer)));
+    },
+    async history(
+      next: Message[],
+      more: boolean,
+      nextHeader: React.ReactElement,
+    ) {
+      messages = next;
+      hasOlder = more;
+      header = nextHeader;
+      await act(async () => tree.update(render()));
     },
     async tick(ms = 40) {
       await act(async () => {
@@ -294,6 +331,30 @@ test('an anchor reply that appended text while hidden translates its retained ol
   expect(app.viewport.anchor).toEqual({ id: 'message-0', offset: 676 });
 });
 
+test('end-drag without begin keeps user control through layout arriving before its deferred frame', async () => {
+  const original = {
+    ...message(0),
+    role: 'assistant' as const,
+    content: 'Read text',
+  };
+  const app = await setup([original], { id: 'message-0', offset: 200 });
+  await app.dimensions(3000);
+  await app.measure('message-0', 24, 900);
+  await app.scroll(450, false, 3000);
+  await act(async () => app.list().props.onScrollEndDrag());
+  const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  const appended = {
+    ...original,
+    content: `${original.content} appended during gesture transition`,
+  };
+  await app.update([appended]);
+  await app.measure('message-0', 24, 1200);
+  expect(scroll).not.toHaveBeenCalled();
+  await app.tick();
+  expect(app.viewport.anchor).toEqual({ id: 'message-0', offset: 426 });
+  expect(app.viewport.followTail).toBe(false);
+});
+
 test('reflow remounts only the bounded window, rejects old callbacks, and clamps an inset inside a shrinking reply', async () => {
   const app = await setup(allMessages(), { id: 'message-502', offset: 500 });
   await app.dimensions();
@@ -375,6 +436,20 @@ test('late gesture callbacks from a reflowed window cannot disable the retained 
   expect(app.viewport.followTail).toBe(true);
 });
 
+test('an old window detach cannot overwrite a new own-send latest intent', async () => {
+  const messages = allMessages();
+  const app = await setup(messages, { id: 'message-502', offset: 27 });
+  await app.dimensions(180000);
+  await app.measure('message-502', 60240, 255);
+  await app.scroll(60267, false, 180000);
+  app.viewport.anchor = null;
+  app.viewport.followTail = true;
+  await app.update([...messages, message(1004)], '', 1);
+  expect(app.list().props.initialScrollIndex).toBe(0);
+  expect(app.viewport.anchor).toBeNull();
+  expect(app.viewport.followTail).toBe(true);
+});
+
 test('unrelated draft/voice/footer updates leave mounted memoized message rows untouched', async () => {
   const app = await setup();
   expect(app.rowRender).toHaveBeenCalledTimes(6);
@@ -400,9 +475,91 @@ test('stable optimistic keys survive canonical IDs and live object updates witho
   expect(app.cell('optimistic-key')).toBe(before);
 });
 
+async function finalPageFixture() {
+  const all = Array.from({ length: 16 }, (_, index) => message(index));
+  const older = jest.fn();
+  const history = (
+    <View testID="history-control">
+      <Button variant="ghost" onPress={older}>
+        加载更早消息
+      </Button>
+    </View>
+  );
+  const app = await setup(
+    all.slice(4),
+    { id: 'message-13', offset: 48 },
+    { hasOlder: true, header: history },
+  );
+  await app.dimensions(840);
+  await app.measure('message-13', 152, 64);
+  await app.scroll(200, false, 840);
+  await app.tick(400);
+  for (let index = 0; index < 12; index++)
+    await app.measure(`message-${15 - index}`, 24 + index * 64, 64);
+  await app.dimensions(840);
+  await app.scroll(200, false, 840);
+  await app.tick(100);
+  expect(app.viewport.anchor).toEqual({ id: 'message-13', offset: 48 });
+  return { app, all, older };
+}
+
+test('the final history control retires only after native added rows expand the range, preserving the visible anchor without a gap', async () => {
+  const { app, all, older } = await finalPageFixture();
+  const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  await app.history(all, false, <View testID="history-control" />);
+  await app.tick(100);
+  const pending = app.tree.root.findByType(Button);
+  expect(pending.props.disabled).toBe(true);
+  expect(pending.props.children).toBe('正在加载…');
+  await act(async () => pending.props.onPress());
+  expect(older).not.toHaveBeenCalled();
+  // Without the retained control, native range 840->792 would clamp200->152
+  // before unmeasured rows contribute any tail space: the observed48dp jump.
+  expect(Math.min(200, 792 - 640)).toBe(152);
+  await app.dimensions(840);
+  expect(app.tree.root.findAllByType(Button)).toHaveLength(1);
+  for (let index = 12; index < 16; index++)
+    await app.measure(`message-${15 - index}`, 24 + index * 64, 64);
+  // Row onLayout alone is insufficient; wait for actual native content growth.
+  expect(app.tree.root.findAllByType(Button)).toHaveLength(1);
+  await act(async () => app.virtual()._onContentSizeChange(360, 1096));
+  expect(app.tree.root.findAllByType(Button)).toHaveLength(0);
+  await act(async () => {
+    app.list().props.ListFooterComponent.props.onLayout(layoutEvent(1048, 0));
+    app.virtual()._onContentSizeChange(360, 1048);
+  });
+  await app.scroll(200, false, 1048);
+  await app.tick(100);
+  expect(scroll).toHaveBeenLastCalledWith({ offset: 200, animated: false });
+  expect(app.viewport.anchor).toEqual({ id: 'message-13', offset: 48 });
+  expect(app.list().props.ListFooterComponent.props.style).toBeUndefined();
+  expect(app.list().props.ListFooterComponent.props.children).toBeUndefined();
+});
+
+test('an empty final history response removes the control immediately and accepts the physically shorter native end', async () => {
+  const { app, all } = await finalPageFixture();
+  await app.history(all.slice(4), false, <View testID="history-control" />);
+  expect(app.tree.root.findAllByType(Button)).toHaveLength(0);
+  await act(async () => {
+    app.list().props.ListFooterComponent.props.onLayout(layoutEvent(792, 0));
+    app.virtual()._onContentSizeChange(360, 792);
+  });
+  await app.scroll(152, false, 792);
+  expect(app.viewport.y).toBe(152);
+  expect(app.viewport.anchor).toEqual({ id: 'message-13', offset: 0 });
+});
+
 test('all 26 older pages keep the installed RN render window nonempty and bounded with natural mixed heights', async () => {
   const all = allMessages();
-  const app = await setup(all.slice(-40));
+  const history = (
+    <View>
+      <Button onPress={() => {}}>加载更早消息</Button>
+    </View>
+  );
+  const app = await setup(all.slice(-40), null, {
+    hasOlder: true,
+    header: history,
+  });
   const heightFor = (item: Message) =>
     Number(item.id.slice(8)) % 10 === 0 ? 520 : 64;
   // Walk the ACTUAL rendered RN children, including RN's own current spacer
@@ -423,8 +580,13 @@ test('all 26 older pages keep the installed RN render window nonempty and bounde
           app.cell(messageRowKey(item)).props.onLayout(layoutEvent(y, height));
           y += height;
         } else if (child.key?.toString().includes('$header')) y += 24;
-        else if (child.key?.toString().includes('$footer')) y += 48;
-        else y += Number(child.props.style?.height ?? 0);
+        else if (child.key?.toString().includes('$footer')) {
+          const height = app.tree.root.findAllByType(Button).length ? 48 : 0;
+          app
+            .list()
+            .props.ListFooterComponent.props.onLayout?.(layoutEvent(y, height));
+          y += height;
+        } else y += Number(child.props.style?.height ?? 0);
       }
       app.virtual()._onContentSizeChange(360, Math.max(640, y));
     });
@@ -433,7 +595,7 @@ test('all 26 older pages keep the installed RN render window nonempty and bounde
   await app.dimensions(640);
   for (let page = 1; page <= 26; page++) {
     const loaded = all.slice(-Math.min(1004, page * 40));
-    await app.update(loaded);
+    await app.history(loaded, page < 26, page < 26 ? history : <View />);
     for (let pass = 0; pass < 12; pass++) {
       const content = await nativePass();
       await app.scroll(Math.max(0, content - 640), true, content);
@@ -455,6 +617,7 @@ test('all 26 older pages keep the installed RN render window nonempty and bounde
   }
   expect(app.list().props.data.at(-1).id).toBe('message-0');
   expect(app.list().props.getItemLayout).toBeUndefined();
+  expect(app.tree.root.findAllByType(Button)).toHaveLength(0);
 }, 30000);
 
 test('native-coordinate anchor helpers preserve tall-row offsets, exact boundaries, header gaps, and missing IDs', () => {
@@ -467,6 +630,9 @@ test('native-coordinate anchor helpers preserve tall-row offsets, exact boundari
   expect(messageAnchorAt(20, frames)).toEqual({ id: 'earlier', offset: -50 });
   expect(messageAnchorAt(473, frames)).toBeNull();
   expect(
+    messageAnchorAt(0, new Map([['offscreen', { y: 5000, height: 400 }]]), 640),
+  ).toBeNull();
+  expect(
     messageInitialIndex([message(3), message(2)], {
       id: 'message-2',
       offset: 8,
@@ -476,3 +642,205 @@ test('native-coordinate anchor helpers preserve tall-row offsets, exact boundari
     messageInitialIndex([message(3), message(2)], { id: 'missing', offset: 8 }),
   ).toBe(0);
 });
+
+const mixedMessage = (index: number): Message => ({
+  id: `mixed-${index}`,
+  role: index === 80 ? 'assistant' : 'user',
+  conversation_id: 'mixed',
+  content: index === 80 ? 'Tall mixed reply\n'.repeat(100) : `Mixed ${index}`,
+  created_at: new Date(index * 1000).toISOString(),
+});
+
+test.each([
+  'momentum-without-begin-drag',
+  'accessibility-scroll-without-gesture-events',
+])(
+  '%s snapshots the actual mixed-history viewport before pending older/History detach',
+  async mode => {
+    const initial = Array.from({ length: 40 }, (_, index) =>
+      mixedMessage(index + 43),
+    );
+    let complete!: (page: { items: Message[]; next_offset: null }) => void;
+    const late = new Promise<{ items: Message[]; next_offset: null }>(
+      resolve => {
+        complete = resolve;
+      },
+    );
+    const api = {
+      capabilities: jest
+        .fn()
+        .mockResolvedValue({ runtime: { model_mode: 'local' } }),
+      messages: jest
+        .fn()
+        .mockResolvedValueOnce({
+          items: initial,
+          next_offset: 40,
+          next_before: 'mixed-43',
+        })
+        .mockReturnValueOnce(late),
+    };
+    let navigation!: ReturnType<typeof useRouteStack>;
+    let entry!: ReturnType<typeof createChatEntryState>;
+    function Harness() {
+      navigation = useRouteStack(api);
+      const route = navigation.entry.route;
+      if (route.name === 'chat')
+        entry = navigation.getEntryState(scope => {
+          const state = createChatEntryState('mixed', undefined, scope);
+          state.update(old => ({ ...old, messages: initial }));
+          state.history.viewport.anchor = { id: 'mixed-80', offset: 300 };
+          return state;
+        });
+      return (
+        <AppProvider
+          value={
+            {
+              api,
+              invalidate: jest.fn(),
+              formatDate: () => '',
+            } as unknown as AppContextValue
+          }
+        >
+          <React.Fragment key={navigation.entry.key}>
+            {route.name === 'chat' ? (
+              <ChatScreen conversationId="mixed" entryState={entry} />
+            ) : (
+              <Text>History</Text>
+            )}
+          </React.Fragment>
+        </AppProvider>
+      );
+    }
+    let tree!: ReactTestRenderer;
+    await act(async () => {
+      tree = create(<Harness />);
+    });
+    trees.add(tree);
+    await act(async () =>
+      navigation.navigate({ name: 'chat', conversationId: 'mixed' }),
+    );
+    const list = () => tree.root.findByType(FlatList);
+    const virtual = () => (list().instance as any)._listRef;
+    const nativeCell = (id: string) => {
+      let node = tree.root
+        .findAllByType(View)
+        .find(view => view.props.testID === `chat-message-${id}`)!.parent!;
+      while (!(node.type === View && typeof node.props.onLayout === 'function'))
+        node = node.parent!;
+      return node;
+    };
+    await act(async () => {
+      tree.root
+        .findByType(TextInput)
+        .props.onChangeText('mixed retained draft');
+      virtual()._onLayout(layoutEvent(0, 640));
+      list().props.ListHeaderComponent.props.onLayout(layoutEvent(0, 24));
+      list().props.ListFooterComponent.props.onLayout(layoutEvent(0, 48));
+      virtual()._onContentSizeChange(360, 640);
+      if (mode === 'momentum-without-begin-drag')
+        list().props.onMomentumScrollBegin();
+    });
+    let actualFrames = new Map<string, { y: number; height: number }>();
+    let actualY = 0;
+    let contentHeight = 640;
+    // Feed actual installed-RN render-mask/spacer children through delayed native
+    // layout and scroll events. No fake fixed getItemLayout or begin-drag event.
+    for (let pass = 0; pass < 14; pass++) {
+      const pane = tree.root
+        .findAllByType(ScrollView)
+        .find(node => node.props.testID === 'chat-message-list')!;
+      const children = React.Children.toArray(
+        pane.props.children,
+      ) as React.ReactElement<any>[];
+      actualFrames = new Map();
+      let y = 0;
+      await act(async () => {
+        for (const child of children) {
+          if (child.props.item) {
+            const item = child.props.item as Message;
+            const height = item.id === 'mixed-80' ? 1600 : 64;
+            actualFrames.set(item.id, { y, height });
+            nativeCell(item.id).props.onLayout(layoutEvent(y, height));
+            y += height;
+          } else if (child.key?.toString().includes('$header')) y += 24;
+          else if (child.key?.toString().includes('$footer')) y += 48;
+          else y += Number(child.props.style?.height ?? 0);
+        }
+        contentHeight = Math.max(640, y);
+        actualY = Math.max(0, contentHeight - 640);
+        virtual()._onContentSizeChange(360, contentHeight);
+        virtual()._onScroll(scrollEvent(actualY, contentHeight));
+      });
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(60);
+      });
+    }
+    expect(
+      tree.root
+        .findAllByType(View)
+        .some(node => node.props.testID === 'chat-message-mixed-43'),
+    ).toBe(true);
+    const visible = messageAnchorAt(actualY, actualFrames, 640)!;
+    expect(visible).not.toBeNull();
+    expect(visible.id).not.toBe('mixed-80');
+    await act(async () => {
+      if (mode === 'momentum-without-begin-drag')
+        list().props.onMomentumScrollEnd();
+      void tree.root
+        .findAllByType(Button)
+        .find(node => node.props.children === '加载更早消息')!
+        .props.onPress();
+    });
+    expect(api.messages).toHaveBeenLastCalledWith('mixed', {
+      before: 'mixed-43',
+      limit: 40,
+    });
+    if (mode === 'momentum-without-begin-drag') {
+      const commands = jest.spyOn(list().instance, 'scrollToOffset');
+      const frame = actualFrames.get(visible.id)!;
+      // A late layout after the request starts must not resurrect the old80
+      // restore target merely because this window never received begin-drag.
+      await act(async () =>
+        nativeCell(visible.id).props.onLayout(
+          layoutEvent(frame.y, frame.height + 1),
+        ),
+      );
+      expect(commands).not.toHaveBeenCalled();
+    }
+    await act(async () => navigation.navigate({ name: 'conversations' }));
+    expect(entry.history.viewport.anchor).toEqual(visible);
+    expect(entry.history.viewport.followTail).toBe(false);
+    await act(async () => {
+      await jest.advanceTimersByTimeAsync(3000);
+      complete({ items: [mixedMessage(42)], next_offset: null });
+    });
+    expect(entry.getSnapshot().messages).toHaveLength(40);
+    await act(async () => navigation.back());
+    expect(tree.root.findByType(TextInput).props.value).toBe(
+      'mixed retained draft',
+    );
+    expect(list().props.initialScrollIndex).toBe(
+      initial
+        .slice()
+        .reverse()
+        .findIndex(item => item.id === visible.id),
+    );
+    expect(api.messages).toHaveBeenCalledTimes(2);
+    api.messages.mockResolvedValueOnce({
+      items: [mixedMessage(42)],
+      next_offset: null,
+    });
+    await act(async () => {
+      void tree.root
+        .findAllByType(Button)
+        .find(node => node.props.children === '加载更早消息')!
+        .props.onPress();
+    });
+    expect(api.messages).toHaveBeenLastCalledWith('mixed', {
+      before: 'mixed-43',
+      limit: 40,
+    });
+    expect(entry.getSnapshot().messages).toHaveLength(41);
+  },
+  30000,
+);

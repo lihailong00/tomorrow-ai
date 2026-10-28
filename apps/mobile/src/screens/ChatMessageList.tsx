@@ -63,12 +63,40 @@ type Props = {
   messages: Message[];
   viewport: MessageViewport;
   latestVersion: number;
+  hasOlder?: boolean;
   renderItem: ListRenderItem<Message>;
   header: React.ReactElement;
   footer: React.ReactElement;
   style: StyleProp<ViewStyle>;
   contentContainerStyle: StyleProp<ViewStyle>;
 };
+
+function pendingHistoryHeader(header: React.ReactElement) {
+  const element = header as React.ReactElement<{ children?: React.ReactNode }>;
+  return React.cloneElement(element, {
+    ...{
+      pointerEvents: 'none',
+      accessibilityElementsHidden: true,
+      importantForAccessibility: 'no-hide-descendants',
+    },
+    children: React.Children.map(element.props.children, child => {
+      if (
+        !React.isValidElement<{
+          onPress?: () => void;
+          disabled?: boolean;
+          children?: React.ReactNode;
+        }>(child) ||
+        typeof child.props.onPress !== 'function'
+      )
+        return child;
+      return React.cloneElement(child, {
+        disabled: true,
+        onPress: () => {},
+        children: '正在加载…',
+      });
+    }),
+  });
+}
 
 export const ChatMessageList = memo(function ChatMessageList(props: Props) {
   const { width, fontScale } = useWindowDimensions();
@@ -86,14 +114,22 @@ export const ChatMessageList = memo(function ChatMessageList(props: Props) {
     () => props.messages.slice().reverse(),
     [props.messages],
   );
+  const windowKey = `${owner.current.epoch}:${
+    props.messages.length ? 'messages' : 'empty'
+  }:${layoutKey}:${props.latestVersion}`;
+  const liveWindow = useRef(windowKey);
+  liveWindow.current = windowKey;
+  const isCurrent = useCallback(
+    () => liveWindow.current === windowKey,
+    [windowKey],
+  );
   return (
     <MessageWindow
-      key={`${owner.current.epoch}:${
-        props.messages.length ? 'messages' : 'empty'
-      }:${layoutKey}:${props.latestVersion}`}
+      key={windowKey}
       {...props}
       messages={ordered}
       layoutKey={layoutKey}
+      isCurrent={isCurrent}
     />
   );
 });
@@ -101,13 +137,15 @@ export const ChatMessageList = memo(function ChatMessageList(props: Props) {
 function MessageWindow({
   messages,
   viewport,
+  hasOlder,
   renderItem,
   header,
   footer,
   style,
   contentContainerStyle,
   layoutKey,
-}: Props & { layoutKey: string }) {
+  isCurrent,
+}: Props & { layoutKey: string; isCurrent: () => boolean }) {
   if (viewport.layoutKey !== layoutKey) {
     viewport.layoutKey = layoutKey;
     viewport.heights.clear();
@@ -126,8 +164,8 @@ function MessageWindow({
   ).current;
   const list = useRef<FlatList<Message>>(null);
   const frames = useRef(new Map<string, { y: number; height: number }>());
-  const current = useRef({ messages, viewport, layoutKey });
-  current.current = { messages, viewport, layoutKey };
+  const current = useRef({ messages, viewport, layoutKey, hasOlder });
+  current.current = { messages, viewport, layoutKey, hasOlder };
   const active = useRef(true);
   const interacting = useRef(false);
   const dragging = useRef(false);
@@ -142,17 +180,72 @@ function MessageWindow({
     viewportHeight: 0,
     headHeight: 0,
     headMeasured: false,
+    tailHeight: 0,
   });
   const observed = useRef<number | null>(null);
   const settleFrame = useRef<number | null>(null);
   const [geometry, setGeometry] = useState(0);
+  const oldestKey = messages.length ? messageRowKey(messages.at(-1)!) : null;
+  const firstKey = messages.length ? messageRowKey(messages[0]) : null;
+  const priorHistory = useRef({
+    header,
+    hasOlder,
+    oldestKey,
+    firstKey,
+    count: messages.length,
+  });
+  const unmeasuredOlderTail = useRef<string | null>(null);
+  const heldHistory = useRef<{
+    header: React.ReactElement;
+    oldestKey: string;
+    height: number;
+    y: number;
+    anchor: MessageAnchor | null;
+    interacted: boolean;
+  } | null>(null);
+  if (
+    messages.length > priorHistory.current.count &&
+    firstKey === priorHistory.current.firstKey &&
+    oldestKey !== priorHistory.current.oldestKey
+  )
+    unmeasuredOlderTail.current = oldestKey;
+  if (
+    priorHistory.current.hasOlder === true &&
+    hasOlder === false &&
+    oldestKey &&
+    unmeasuredOlderTail.current === oldestKey &&
+    metrics.current.tailHeight > 0 &&
+    !followTail.current
+  ) {
+    // Removing the control before new native tail cells exist temporarily
+    // shrinks Android's scroll range. Keep the real control disabled until the
+    // added body has committed; no permanent spacer or obsolete action remains.
+    heldHistory.current = {
+      header: pendingHistoryHeader(priorHistory.current.header),
+      oldestKey,
+      height: metrics.current.tailHeight,
+      y: observed.current ?? viewport.y,
+      anchor: viewport.anchor ? { ...viewport.anchor } : null,
+      interacted: interacting.current,
+    };
+  }
+  priorHistory.current = {
+    header,
+    hasOlder,
+    oldestKey,
+    firstKey,
+    count: messages.length,
+  };
   const cancelSettle = useCallback(() => {
     if (settleFrame.current !== null) cancelAnimationFrame(settleFrame.current);
     settleFrame.current = null;
   }, []);
   const valid = useCallback(
-    () => active.current && current.current.viewport.layoutKey === layoutKey,
-    [layoutKey],
+    () =>
+      active.current &&
+      isCurrent() &&
+      current.current.viewport.layoutKey === layoutKey,
+    [layoutKey, isCurrent],
   );
   const verifyArrival = useCallback(() => {
     cancelSettle();
@@ -216,8 +309,11 @@ function MessageWindow({
         if (Math.abs(observed.current - desired) > 2) return;
         target.current = null;
         current.current.viewport.anchor =
-          messageAnchorAt(observed.current, frames.current) ??
-          current.current.viewport.anchor;
+          messageAnchorAt(
+            observed.current,
+            frames.current,
+            dimensions.viewportHeight,
+          ) ?? current.current.viewport.anchor;
       });
     });
   }, [cancelSettle, initialIndex, valid]);
@@ -268,16 +364,59 @@ function MessageWindow({
     // native scroll event reports arrival at its current, measured destination.
     verifyArrival();
   }, [cancelSettle, initialIndex, valid, verifyArrival]);
+  const releaseHistory = useCallback(() => {
+    const held = heldHistory.current;
+    if (!valid() || !held) return;
+    const end = frames.current.get(held.oldestKey);
+    if (
+      !end ||
+      metrics.current.contentHeight + 1 < end.y + end.height + held.height
+    )
+      return;
+    heldHistory.current = null;
+    unmeasuredOlderTail.current = null;
+    if (
+      !held.interacted &&
+      held.anchor &&
+      !followTail.current &&
+      !interacting.current
+    ) {
+      target.current = { anchor: held.anchor };
+      observed.current = null;
+    }
+    // All added native rows now exist. Usually the old offset fits after the
+    // control disappears; genuinely shorter final content uses normal end clamp.
+    setGeometry(value => value + 1);
+  }, [valid]);
   useEffect(() => {
     active.current = true;
     viewport.followTail = followTail.current;
     return () => {
+      // History can detach during an accessibility scroll or delayed restore,
+      // even when no begin-drag reached this window. Preserve the last actual
+      // visible native row, not the pending destination from a prior viewport.
+      // A newer owner/reflow/send window must keep its own retained intent.
+      if (
+        valid() &&
+        observed.current !== null &&
+        metrics.current.viewportHeight > 0
+      ) {
+        const visible = messageAnchorAt(
+          observed.current,
+          frames.current,
+          metrics.current.viewportHeight,
+        );
+        if (visible) {
+          viewport.anchor = visible;
+          viewport.followTail = observed.current <= 2;
+        }
+      }
       active.current = false;
       cancelSettle();
       if (endDragFrame.current !== null)
         cancelAnimationFrame(endDragFrame.current);
     };
-  }, [cancelSettle, viewport]);
+  }, [cancelSettle, viewport, valid]);
   const measurements = useMemo(
     () => ({
       layout: (message: Message, event: LayoutChangeEvent) => {
@@ -310,6 +449,12 @@ function MessageWindow({
           observed.current = null;
         }
         frames.current.set(key, { y, height });
+        if (
+          unmeasuredOlderTail.current === key &&
+          current.current.hasOlder !== false
+        ) {
+          unmeasuredOlderTail.current = null;
+        }
         current.current.viewport.heights.set(key, { message, height });
         if (!previous || previous.y !== y || previous.height !== height) {
           // This render lets RN recalculate its own spacer after its first native
@@ -318,19 +463,21 @@ function MessageWindow({
         }
         if (followTail.current && !interacting.current)
           target.current = { latest: true };
+        releaseHistory();
         restore();
       },
       remove: (id: string) => {
         frames.current.delete(id);
       },
     }),
-    [restore, valid],
+    [restore, valid, releaseHistory],
   );
   useEffect(() => {
     if (followTail.current && !interacting.current)
       target.current = { latest: true };
     restore();
-  }, [geometry, messages, restore]);
+    releaseHistory();
+  }, [geometry, messages, restore, releaseHistory]);
   const headLayout = useCallback(
     (event: LayoutChangeEvent) => {
       if (!valid()) return;
@@ -346,13 +493,45 @@ function MessageWindow({
     [restore, valid, viewport],
   );
   const inverted = messages.length > 0;
+  const historyFooter = heldHistory.current?.header ?? header;
+  const footerElement = inverted
+    ? React.cloneElement(
+        historyFooter as React.ReactElement<{
+          onLayout?: (event: LayoutChangeEvent) => void;
+        }>,
+        {
+          onLayout: event => {
+            (
+              historyFooter.props as {
+                onLayout?: (event: LayoutChangeEvent) => void;
+              }
+            ).onLayout?.(event);
+            if (!valid()) return;
+            metrics.current.tailHeight = event.nativeEvent.layout.height;
+            releaseHistory();
+          },
+        },
+      )
+    : footer;
   const finishInteraction = () => {
     interacting.current = false;
     followTail.current = observed.current !== null && observed.current <= 2;
     viewport.followTail = followTail.current;
     if (observed.current !== null)
       viewport.anchor =
-        messageAnchorAt(observed.current, frames.current) ?? viewport.anchor;
+        messageAnchorAt(
+          observed.current,
+          frames.current,
+          metrics.current.viewportHeight,
+        ) ?? viewport.anchor;
+  };
+  const takeUserControl = () => {
+    interacting.current = true;
+    followTail.current = false;
+    viewport.followTail = false;
+    target.current = null;
+    if (heldHistory.current) heldHistory.current.interacted = true;
+    cancelSettle();
   };
   return (
     <Measurements.Provider value={measurements}>
@@ -370,7 +549,7 @@ function MessageWindow({
         ListHeaderComponent={
           <View onLayout={headLayout}>{inverted ? footer : header}</View>
         }
-        ListFooterComponent={inverted ? header : footer}
+        ListFooterComponent={footerElement}
         initialScrollIndex={messages.length ? initialIndex : undefined}
         contentOffset={{ x: 0, y: 0 }}
         onScrollToIndexFailed={restore}
@@ -392,13 +571,11 @@ function MessageWindow({
             cancelAnimationFrame(endDragFrame.current);
           endDragFrame.current = null;
           interacting.current = true;
-          followTail.current = false;
-          viewport.followTail = false;
-          target.current = null;
-          cancelSettle();
+          takeUserControl();
         }}
         onScrollEndDrag={() => {
           if (!valid()) return;
+          takeUserControl();
           dragging.current = false;
           // Momentum starts after end-drag; let the gesture retain control
           // through that transition and any concurrent streaming layouts.
@@ -412,11 +589,13 @@ function MessageWindow({
         }}
         onMomentumScrollBegin={() => {
           if (!valid()) return;
+          takeUserControl();
           momentum.current = true;
           interacting.current = true;
         }}
         onMomentumScrollEnd={() => {
           if (!valid()) return;
+          takeUserControl();
           momentum.current = false;
           if (endDragFrame.current !== null)
             cancelAnimationFrame(endDragFrame.current);
@@ -437,7 +616,11 @@ function MessageWindow({
             viewport.followTail = followTail.current;
           }
           viewport.anchor =
-            messageAnchorAt(y, frames.current) ?? viewport.anchor;
+            messageAnchorAt(
+              y,
+              frames.current,
+              metrics.current.viewportHeight,
+            ) ?? viewport.anchor;
         }}
         scrollEventThrottle={16}
         onContentSizeChange={(_width, height) => {
@@ -446,6 +629,7 @@ function MessageWindow({
           if (followTail.current && !interacting.current)
             target.current = { latest: true };
           restore();
+          releaseHistory();
         }}
       />
     </Measurements.Provider>

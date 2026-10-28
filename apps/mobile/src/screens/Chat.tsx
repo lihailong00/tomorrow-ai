@@ -528,6 +528,7 @@ export function ChatScreen({
       onLayout={event => setAvailableHeight(event.nativeEvent.layout.height)}
     >
       <ChatMessageList messages={messages} viewport={state.history.viewport}
+        hasOlder={history.nextOffset !== null}
         latestVersion={messageVersion} renderItem={renderMessage}
         header={messageHeader} footer={messageFooter}
         style={chat.messagePane} contentContainerStyle={chat.messages} />
