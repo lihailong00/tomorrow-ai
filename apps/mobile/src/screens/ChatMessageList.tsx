@@ -569,9 +569,17 @@ function MessageWindow({
           unmeasuredOlderTail.current = null;
         }
         current.current.viewport.heights.set(key, { message, height });
-        if (!previous || previous.y !== y || previous.height !== height) {
-          // This render lets RN recalculate its own spacer after its first native
-          // cell measurements, without falsely declaring estimated row lengths.
+        if (
+          !previous || (
+            bootstrap.current.initial && bootstrap.current.pending &&
+            (previous.y !== y || previous.height !== height)
+          )
+        ) {
+          // Render new native measurements so RN's capped trailing spacer can
+          // extend, and bootstrap the frozen initial region's measured prefix.
+          // After admission, RN owns updates to already measured cells. Forcing
+          // a parent render for each rounded y/height can repeatedly rebuild its
+          // average-based prefix and feed back into layout in an unchanged window.
           setGeometry(value => value + 1);
         }
         if (followTail.current && !interacting.current)

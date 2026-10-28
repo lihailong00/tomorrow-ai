@@ -374,6 +374,69 @@ test('a zero-range Back retries on later frames without any native packet, and o
   expect(app.rows().length).toBeLessThan(100);
 });
 
+test('admitted native rounded cell measurements do not force the FlatList parent to rebuild the same measured prefix forever', async () => {
+  const { app, scroll, nativePane, paneHeight } = await zeroRangeBack();
+  const flatRender = jest.spyOn(app.list().instance, 'render');
+  const anchor = 'message-641';
+  const low = { y: 36096.3828125, height: 130.2890625, content: 38221.33203125 };
+  const high = { y: 36100.19140625, height: 130.28515625, content: 38225.140625 };
+  const packet = (y: number, content: number) => {
+    const event = scrollEvent(y, content);
+    event.nativeEvent.layoutMeasurement.height = paneHeight;
+    return event;
+  };
+  // The deep initial mask is frozen by real RN pendingScrollUpdateCount=1.
+  // Its measured prefix must still receive the explicit bootstrap render.
+  await app.measure(anchor, low.y, low.height);
+  expect(flatRender).toHaveBeenCalled();
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(1);
+  await act(async () => app.virtual()._onContentSizeChange(360, low.content));
+  await act(async () => nativePane().props.onScroll(packet(low.y + 83.4296875, low.content)));
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(0);
+  flatRender.mockClear();
+  // Exact two-state native feedback from the D10 failure. RN receives every
+  // real metric through its own CellRenderer onLayout first, including the
+  // 1/256-DIP height difference. Neither metric is rounded or discarded here.
+  for (const state of [high, low, high, low]) {
+    await app.measure(anchor, state.y, state.height);
+    await act(async () => app.virtual()._onContentSizeChange(360, state.content));
+    expect(app.virtual()._listMetrics.getCellMetrics(362, app.virtual().props))
+      .toMatchObject({ offset: state.y, length: state.height });
+    expect(scroll).toHaveBeenLastCalledWith({
+      offset: state.y + 83.4296875, animated: false,
+    });
+  }
+  // RN may update its OWN render mask as fresh cells are measured, but native
+  // metrics must not cause a parent render that rebuilds the same average spacer.
+  expect(flatRender).not.toHaveBeenCalled();
+  await act(async () => nativePane().props.onScroll(packet(low.y + 83.4296875, low.content)));
+  await app.tick(1200);
+  expect(app.viewport.anchor).toEqual({ id: anchor, offset: 83.4296875 });
+  const settledCommands = scroll.mock.calls.length;
+  await app.measure(anchor, low.y, low.height);
+  await app.tick(100);
+  expect(scroll).toHaveBeenCalledTimes(settledCommands);
+  expect(app.rows().length).toBeGreaterThan(0);
+  expect(app.rows().length).toBeLessThan(100);
+  // A newly mounted row still needs its FIRST measured render to extend RN's
+  // highest-measured trailing spacer. Keep that pagination progress, then stop
+  // forcing parent renders for subsequent fractional changes of the same row.
+  flatRender.mockClear();
+  await app.measure('message-642', low.y - 69.333, 69.333);
+  expect(flatRender).toHaveBeenCalled();
+  expect(app.virtual()._listMetrics.getCellMetrics(361, app.virtual().props))
+    .toMatchObject({ offset: low.y - 69.333, length: 69.333 });
+  flatRender.mockClear();
+  await app.measure('message-642', low.y - 69.333 + 1 / 256, 69.333 + 1 / 256);
+  expect(flatRender).not.toHaveBeenCalled();
+  // A real later gesture still owns the viewport; no restored intent survives.
+  await app.scroll(low.y - 100, true, low.content);
+  await app.measure(anchor, high.y, high.height);
+  await app.tick(100);
+  expect(scroll).toHaveBeenCalledTimes(settledCommands);
+  expect(app.viewport.y).toBe(low.y - 100);
+}, 30000);
+
 test.each(['gesture', 'reflow', 'owner', 'unmount'])(
   'a packet-free bootstrap stops its queued frame retry on %s', async reason => {
     const { app, scroll } = await zeroRangeBack();
