@@ -75,7 +75,8 @@ type Props = {
 };
 
 type NativeScrollPacket = Parameters<NonNullable<ScrollViewProps['onScroll']>>[0];
-type DeferredScrollPacket = { event: NativeScrollPacket; forward: ScrollViewProps['onScroll'] };
+type DeferredScrollPacket = { event: NativeScrollPacket; forward: ScrollViewProps['onScroll'];
+  reason: 'geometry' | 'withheld-offset' };
 
 function snapshotScrollPacket(event: NativeScrollPacket): NativeScrollPacket {
   const native = event.nativeEvent;
@@ -511,6 +512,17 @@ function MessageWindow({
       offset,
       Math.max(0, dimensions.contentHeight - dimensions.viewportHeight),
     );
+    if ('anchor' in destination && (
+      bootstrap.current.commandOffset === null ||
+      Math.abs(commandOffset - bootstrap.current.commandOffset) > 2 ||
+      observed.current === null || Math.abs(observed.current - commandOffset) > 2
+    )) {
+      // A prior command may be acknowledged before the two-frame retirement.
+      // Later prefix measurements then require their own native acknowledgment.
+      // Keep an unchanged, already observed command as a valid no-op proof.
+      observed.current = null;
+      bootstrap.current.pending = true;
+    }
     bootstrap.current.commandOffset = commandOffset;
     list.current?.scrollToOffset({
       offset: commandOffset,
@@ -519,14 +531,16 @@ function MessageWindow({
     // Geometry being quiet alone is insufficient. Retire a target only after a
     // native scroll event reports arrival at its current, measured destination.
     verifyArrival();
-    if (bootstrap.current.initial && bootstrap.current.pending && bootstrap.current.retryFrame === null)
+    if (bootstrap.current.pending && (bootstrap.current.initial || 'anchor' in destination) &&
+      bootstrap.current.retryFrame === null)
       bootstrap.current.retryFrame = requestAnimationFrame(() => {
         bootstrap.current.retryFrame = null;
         // A command issued before Android commits its new scroll range can be
-        // clamped to the unchanged zero offset, producing no scroll event at all.
+        // clamped to an unchanged offset, producing no scroll event at all.
         // Drive the next real frame independently of packets; never synthesize
         // arrival or replay an offset from an earlier geometry batch.
-        if (valid() && bootstrap.current.initial && bootstrap.current.pending && target.current && !interacting.current)
+        if (valid() && bootstrap.current.pending && target.current &&
+          (bootstrap.current.initial || 'anchor' in target.current) && !interacting.current)
           restore();
       });
   }, [cancelSettle, initialIndex, valid, verifyArrival]);
@@ -716,7 +730,8 @@ function MessageWindow({
           metrics.current.viewportHeight,
         ) ?? viewport.anchor;
   };
-  const takeUserControl = () => {
+  const takeUserControl = (event?: NativeScrollPacket) => {
+    const withheld = deferredViewportPacket.current;
     deferredViewportPacket.current = null;
     cancelBootstrapRetry();
     if (userScrollFrame.current !== null) cancelAnimationFrame(userScrollFrame.current);
@@ -730,8 +745,18 @@ function MessageWindow({
     target.current = null;
     if (heldHistory.current) heldHistory.current.interacted = true;
     cancelSettle();
+    // An end-drag can be the first explicit user-control signal. The preceding
+    // real scroll was withheld as an unacknowledged command, but now belongs to
+    // that gesture. Prefer its current payload; never replay a geometry packet.
+    const packet = event ?? (withheld?.reason === 'withheld-offset' ? withheld.event : null);
+    if (withheld && packet && valid() && packetMatchesViewport(packet) &&
+      Number.isFinite(packet.nativeEvent.contentSize?.height) &&
+      Math.abs(packet.nativeEvent.contentSize.height - metrics.current.contentHeight) <= 1)
+      withheld.forward?.(packet);
   };
   const admitNativeScroll = useCallback((event: NativeScrollPacket, forward: ScrollViewProps['onScroll'], replay = false) => {
+    if (!replay && deferredViewportPacket.current?.reason === 'withheld-offset')
+      deferredViewportPacket.current = null;
     if (!valid()) { deferredViewportPacket.current = null; return false; }
     // Native scroll geometry can lead JS onLayout. Such a packet must neither
     // retire RN's initial mask nor become an AX gesture under the old viewport.
@@ -739,7 +764,7 @@ function MessageWindow({
       const bounds = event.nativeEvent.layoutMeasurement;
       if (!replay && bounds && Number.isFinite(bounds.width) && bounds.width > 0 &&
         Number.isFinite(bounds.height) && bounds.height > 0) {
-        deferredViewportPacket.current = { event: snapshotScrollPacket(event), forward };
+        deferredViewportPacket.current = { event: snapshotScrollPacket(event), forward, reason: 'geometry' };
       }
       return false;
     }
@@ -751,8 +776,14 @@ function MessageWindow({
       // batch whose layout callback is still queued. It cannot establish
       // new geometry by itself, or an unchanged scrollTo could leave us
       // waiting for an arrival event that Android never needs to emit.
-      if (Math.abs(contentSize.height - metrics.current.contentHeight) > 1)
+      if (Math.abs(contentSize.height - metrics.current.contentHeight) > 1) {
+        // The same real packet may precede its content callback. Preserve its
+        // pooled-event-safe proof for a later no-op command, in the one slot
+        // already used for native viewport changes.
+        if (!replay && Number.isFinite(contentSize.height) && contentSize.height >= 0)
+          deferredViewportPacket.current = { event: snapshotScrollPacket(event), forward, reason: 'geometry' };
         return false;
+      }
       const frame = frames.current.get(settled.anchor.id);
       const geometryChanged =
         Math.abs(contentSize.height - settled.contentHeight) > 1 ||
@@ -778,7 +809,7 @@ function MessageWindow({
         }
       }
     }
-    if (bootstrap.current.pending) {
+    if (bootstrap.current.pending || (target.current && 'anchor' in target.current)) {
       const { contentOffset, contentSize } = event.nativeEvent;
       const commandOffset = bootstrap.current.commandOffset;
       const destination = target.current;
@@ -796,6 +827,20 @@ function MessageWindow({
         Math.abs(contentSize.height - metrics.current.contentHeight) > 1 ||
         Math.abs(contentOffset.y - commandOffset) > 2
       ) {
+        if (!replay && Number.isFinite(contentSize.height) && contentSize.height >= 0 &&
+          Math.abs(contentSize.height - metrics.current.contentHeight) > 1)
+          deferredViewportPacket.current = { event: snapshotScrollPacket(event), forward, reason: 'geometry' };
+        if (commandOffset !== null &&
+          Math.abs(contentSize.height - metrics.current.contentHeight) <= 1 &&
+          Math.abs(contentOffset.y - commandOffset) > 2) {
+          // This current-geometry packet disproves the prior acknowledgment.
+          // Do not let its cached offset retire the still-active target.
+          observed.current = null;
+          bootstrap.current.pending = true;
+          if (!replay) deferredViewportPacket.current = {
+            event: snapshotScrollPacket(event), forward, reason: 'withheld-offset',
+          };
+        }
         // Android can deliver a scroll clamped to the first, prefix-free
         // layout after the real prefix was measured. Forwarding it lets
         // RN retire its pending initial scroll and unmount the saved row.
@@ -818,7 +863,7 @@ function MessageWindow({
   }, [cancelBootstrapRetry, deferredGeometryConfirmed, packetMatchesViewport, restore, restoreAfterGeometry, valid]);
   drainDeferredPacket.current = () => {
     const pending = deferredViewportPacket.current;
-    if (pending && valid() && deferredGeometryConfirmed()) {
+    if (pending?.reason === 'geometry' && valid() && deferredGeometryConfirmed()) {
       // Its native offset belongs to the newly confirmed viewport, so an old
       // cached offset cannot prove a no-op. Re-establish the retained target
       // before applying the ordinary frame/command admission checks.
@@ -866,7 +911,7 @@ function MessageWindow({
           restore();
           drainDeferredPacket.current();
         }}
-        onScrollBeginDrag={() => {
+        onScrollBeginDrag={event => {
           if (!valid()) return;
           dragging.current = true;
           momentum.current = false;
@@ -874,11 +919,11 @@ function MessageWindow({
             cancelAnimationFrame(endDragFrame.current);
           endDragFrame.current = null;
           interacting.current = true;
-          takeUserControl();
+          takeUserControl(event);
         }}
-        onScrollEndDrag={() => {
+        onScrollEndDrag={event => {
           if (!valid()) return;
-          takeUserControl();
+          takeUserControl(event);
           dragging.current = false;
           // Momentum starts after end-drag; let the gesture retain control
           // through that transition and any concurrent streaming layouts.
@@ -890,15 +935,15 @@ function MessageWindow({
               finishInteraction();
           });
         }}
-        onMomentumScrollBegin={() => {
+        onMomentumScrollBegin={event => {
           if (!valid()) return;
-          takeUserControl();
+          takeUserControl(event);
           momentum.current = true;
           interacting.current = true;
         }}
-        onMomentumScrollEnd={() => {
+        onMomentumScrollEnd={event => {
           if (!valid()) return;
-          takeUserControl();
+          takeUserControl(event);
           momentum.current = false;
           if (endDragFrame.current !== null)
             cancelAnimationFrame(endDragFrame.current);

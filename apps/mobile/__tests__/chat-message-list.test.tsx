@@ -583,6 +583,240 @@ async function zeroRangeBack() {
   return { app, scroll, nativePane, paneHeight };
 }
 
+async function lateAnchorAcknowledgment(refine = true) {
+  await act(async () => Dimensions.set({
+    window: { width: 320, height: 640, scale: 2.75, fontScale: 2 },
+  }));
+  const app = await setup(Array.from({ length: 82 }, (_, index) => message(index)),
+    { id: 'message-6', offset: 76.7265625 });
+  const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  const paneHeight = 241.09091186523438;
+  const nativePane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  const packet = (y: number, contentHeight: number) => {
+    const event = scrollEvent(y, contentHeight);
+    event.nativeEvent.layoutMeasurement = { width: 320, height: paneHeight };
+    event.nativeEvent.contentSize.width = 320;
+    return event;
+  };
+  await app.dimensions(34529.81640625);
+  const bounds = layoutEvent(0, paneHeight);
+  bounds.nativeEvent.layout.width = 320;
+  await act(async () => app.virtual()._onLayout(bounds));
+  await app.measure('message-6', 31974.181640625, 230.908203125);
+  await app.measure('message-5', 32204.7265625, 401.091796875);
+  await act(async () => nativePane().props.onScroll(packet(32050.908203125, 34529.81640625)));
+  await app.tick(80);
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: 76.7265625 });
+  // D3 g677..679: the first late prefix command receives a real acknowledgment.
+  await act(async () => app.virtual()._onContentSizeChange(320, 34562.1796875));
+  await app.measure('message-6', 32006.908203125, 230.91015625);
+  await app.measure('message-5', 32237.455078125, 401.08984375);
+  await act(async () => nativePane().props.onScroll(packet(32083.63671875, 34562.1796875)));
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(0);
+  if (!refine) return { app, scroll, nativePane, packet, destination: 32083.634765625, contentHeight: 34562.1796875 };
+  // Before the two-frame retirement, g680..681 changes the measured prefix again.
+  await act(async () => app.virtual()._onContentSizeChange(320, 34859.6328125));
+  await app.measure('message-6', 32304, 230.544921875);
+  const destination = 32380.7265625;
+  expect(scroll).toHaveBeenLastCalledWith({ offset: destination, animated: false });
+  return { app, scroll, nativePane, packet, destination, contentHeight: 34859.6328125 };
+}
+
+test.each(['no-event', 'wrong-current-offset'] as const)(
+  'a late retained command recovers after an earlier acknowledgment when Android delivers %s', async mode => {
+    const { app, scroll, nativePane, packet, destination, contentHeight } = await lateAnchorAcknowledgment();
+    const commands = scroll.mock.calls.length;
+    if (mode === 'wrong-current-offset') {
+      const admittedOffset = app.virtual()._scrollMetrics.offset;
+      // D3 cached packet7: the native offset overshoots the new command by297 DIP.
+      await act(async () => nativePane().props.onScroll(packet(32677.818359375, contentHeight)));
+      expect(app.virtual()._scrollMetrics.offset).toBe(admittedOffset);
+    }
+    // A pre-commit/no-op command can produce no further layout or scroll callback.
+    await app.tick(160);
+    expect(scroll.mock.calls.length).toBeGreaterThan(commands);
+    expect(scroll).toHaveBeenLastCalledWith({ offset: destination, animated: false });
+    expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: 76.7265625 });
+    expect(jest.getTimerCount()).toBeLessThanOrEqual(5);
+    await act(async () => nativePane().props.onScroll(packet(destination, contentHeight)));
+    await app.tick(100);
+    const arrived = scroll.mock.calls.length;
+    await app.tick(1000);
+    expect(scroll).toHaveBeenCalledTimes(arrived);
+    expect(app.viewport.y).toBe(destination);
+    expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: 76.7265625 });
+  },
+);
+
+test('an unchanged acknowledged retained command retires without a second packet and yields to later no-drag scrolling', async () => {
+  const { app, scroll, nativePane, packet, destination, contentHeight } = await lateAnchorAcknowledgment(false);
+  // Both notifications are genuine no-ops while the target awaits its two-frame verification.
+  await app.measure('message-6', 32006.908203125, 230.91015625);
+  await act(async () => app.virtual()._onContentSizeChange(320, contentHeight));
+  const commands = scroll.mock.calls.length;
+  await app.tick(160);
+  expect(scroll).toHaveBeenCalledTimes(commands);
+  await app.tick(1000);
+  expect(scroll).toHaveBeenCalledTimes(commands);
+  const userY = destination - 100;
+  await act(async () => nativePane().props.onScroll(packet(userY, contentHeight)));
+  expect(app.viewport.y).toBe(userY);
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: userY - 32006.908203125 });
+});
+
+test.each(['gesture', 'reflow', 'owner', 'unmount'] as const)(
+  'a late unacknowledged retained command cancels its single frame retry on %s', async reason => {
+    const { app, scroll } = await lateAnchorAcknowledgment();
+    await app.tick(40);
+    if (reason === 'gesture')
+      await act(async () => app.list().props.onScrollBeginDrag());
+    else if (reason === 'reflow')
+      await act(async () => Dimensions.set({
+        window: { width: 640, height: 640, scale: 2.75, fontScale: 2 },
+      }));
+    else if (reason === 'owner')
+      await act(async () => app.tree.update(<ChatMessageList
+        messages={Array.from({ length: 82 }, (_, index) => message(index))}
+        viewport={createMessageViewport()} latestVersion={0}
+        renderItem={app.list().props.renderItem} header={<View />} footer={<View />}
+        style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1 }}
+      />));
+    else {
+      await act(async () => app.tree.unmount());
+      trees.delete(app.tree);
+    }
+    const stopped = scroll.mock.calls.length;
+    await app.tick(160);
+    expect(scroll).toHaveBeenCalledTimes(stopped);
+  },
+);
+
+async function futureContentClamp() {
+  const app = await setup([message(0)], { id: 'message-0', offset: 436 });
+  const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  await app.dimensions(1100);
+  await act(async () => app.list().props.ListFooterComponent.props.onLayout(layoutEvent(924, 176)));
+  await app.measure('message-0', 24, 900);
+  await app.scroll(460, false, 1100);
+  await app.tick(80);
+  expect(app.viewport.anchor).toEqual({ id: 'message-0', offset: 436 });
+  const nativePane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  await act(async () => app.list().props.ListFooterComponent.props.onLayout(layoutEvent(924, 0)));
+  // Android has already clamped to the shorter actual range before JS receives C.
+  await act(async () => nativePane().props.onScroll(scrollEvent(284, 924)));
+  expect(app.virtual()._scrollMetrics.offset).toBe(460);
+  return { app, scroll, nativePane };
+}
+
+test('a future-content native clamp is acknowledged after its content callback without a second scroll packet', async () => {
+  const { app, scroll } = await futureContentClamp();
+  await act(async () => app.virtual()._onContentSizeChange(360, 924));
+  expect(scroll).toHaveBeenLastCalledWith({ offset: 284, animated: false });
+  expect(app.virtual()._scrollMetrics.offset).toBe(284);
+  // The imperative command is now a native no-op. No second packet can be assumed.
+  await app.tick(160);
+  const arrived = scroll.mock.calls.length;
+  await app.tick(1000);
+  expect(scroll).toHaveBeenCalledTimes(arrived);
+  expect(app.viewport.anchor).toEqual({ id: 'message-0', offset: 260 });
+});
+
+test('an in-flight retained target re-admits a future-content packet only after its matching frame arrives', async () => {
+  const { app, scroll, nativePane, packet, destination, contentHeight } = await lateAnchorAcknowledgment();
+  const future = packet(destination + 100, contentHeight + 100);
+  await act(async () => nativePane().props.onScroll(future));
+  (future as any).nativeEvent = null;
+  await act(async () => app.virtual()._onContentSizeChange(320, contentHeight + 100));
+  expect(app.virtual()._scrollMetrics.offset).toBe(32083.63671875);
+  await app.measure('message-6', 32404, 230.544921875);
+  expect(app.virtual()._scrollMetrics.offset).toBe(destination + 100);
+  await app.tick(160);
+  const arrived = scroll.mock.calls.length;
+  await app.tick(1000);
+  expect(scroll).toHaveBeenCalledTimes(arrived);
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: 76.7265625 });
+});
+
+test('a withheld wrong offset cannot acknowledge a later coincident command without a new real packet', async () => {
+  const { app, scroll, nativePane, packet, destination, contentHeight } = await lateAnchorAcknowledgment();
+  const admitted = app.virtual()._scrollMetrics.offset;
+  await act(async () => nativePane().props.onScroll(packet(destination + 50, contentHeight)));
+  await app.measure('message-6', 32354, 230.544921875);
+  expect(scroll).toHaveBeenLastCalledWith({ offset: destination + 50, animated: false });
+  expect(app.virtual()._scrollMetrics.offset).toBe(admitted);
+  await app.tick(80);
+  expect(app.virtual()._scrollMetrics.offset).toBe(admitted);
+  await act(async () => nativePane().props.onScroll(packet(destination + 50, contentHeight)));
+  await app.tick(100);
+  const arrived = scroll.mock.calls.length;
+  await app.tick(160);
+  expect(scroll).toHaveBeenCalledTimes(arrived);
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: 76.7265625 });
+});
+
+test('an authoritative end-drag payload wins over the older withheld offset and is consumed once', async () => {
+  const app = await setup([message(0)], { id: 'message-0', offset: 200 });
+  await app.dimensions(3000);
+  await app.measure('message-0', 24, 900);
+  const nativePane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  await act(async () => nativePane().props.onScroll(scrollEvent(450, 3000)));
+  expect(app.virtual()._scrollMetrics.offset).not.toBe(450);
+  await act(async () => app.list().props.onScrollEndDrag(scrollEvent(550, 3000)));
+  expect(app.virtual()._scrollMetrics.offset).toBe(550);
+  const metrics = app.virtual()._scrollMetrics;
+  await act(async () => app.list().props.onScrollEndDrag());
+  expect(app.virtual()._scrollMetrics).toBe(metrics);
+  const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  await app.tick(160);
+  expect(scroll).not.toHaveBeenCalled();
+  expect(app.viewport.anchor).toEqual({ id: 'message-0', offset: 526 });
+});
+
+test('a newer foreign-viewport packet revokes an older withheld offset before a no-payload gesture', async () => {
+  const app = await setup([message(0)], { id: 'message-0', offset: 200 });
+  await app.dimensions(3000);
+  await app.measure('message-0', 24, 900);
+  const nativePane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  await act(async () => nativePane().props.onScroll(scrollEvent(450, 3000)));
+  const foreign = scrollEvent(500, 3000);
+  foreign.nativeEvent.layoutMeasurement.width = 720;
+  await act(async () => nativePane().props.onScroll(foreign));
+  const metrics = app.virtual()._scrollMetrics;
+  await act(async () => app.list().props.onScrollEndDrag());
+  expect(app.virtual()._scrollMetrics).toBe(metrics);
+  await app.tick(80);
+  expect(app.viewport.anchor).toEqual({ id: 'message-0', offset: 200 });
+});
+
+test.each(['gesture', 'newer-packet', 'unmount'] as const)(
+  'a retained future-content proof is revoked by %s', async reason => {
+    const { app, scroll, nativePane } = await futureContentClamp();
+    const contentChanged = app.virtual()._onContentSizeChange;
+    if (reason === 'unmount') {
+      await act(async () => app.tree.unmount());
+      trees.delete(app.tree);
+      const stopped = scroll.mock.calls.length;
+      await act(async () => contentChanged(360, 924));
+      await app.tick(160);
+      expect(scroll).toHaveBeenCalledTimes(stopped);
+      return;
+    }
+    if (reason === 'gesture') await act(async () => app.list().props.onScrollBeginDrag());
+    await act(async () => nativePane().props.onScroll(scrollEvent(460, 1100)));
+    await act(async () => contentChanged(360, 924));
+    expect(app.virtual()._scrollMetrics.offset).toBe(460);
+    if (reason === 'newer-packet') {
+      await act(async () => nativePane().props.onScroll(scrollEvent(284, 924)));
+      await app.tick(160);
+      expect(app.viewport.anchor).toEqual({ id: 'message-0', offset: 260 });
+    }
+  },
+);
+
 test('a zero-range Back retries on later frames without any native packet, and only real arrival opens the bounded RN window', async () => {
   const { app, scroll, nativePane, paneHeight } = await zeroRangeBack();
   expect(app.list().props.initialScrollIndex).toBe(362);
