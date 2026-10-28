@@ -5,6 +5,9 @@ export type MessageViewport = {
   y: number;
   followTail: boolean;
   anchor: MessageAnchor | null;
+  // A measured inverted append translates already-read text. Retain that
+  // reading intent across History until native arrival or user interruption.
+  pendingAppendAnchor?: MessageAnchor | null;
   layoutKey: string;
   headerHeight: number;
   heights: Map<string, { message: Message; height: number }>;
@@ -15,6 +18,7 @@ export function createMessageViewport(): MessageViewport {
     y: 0,
     followTail: false,
     anchor: null,
+    pendingAppendAnchor: null,
     layoutKey: '',
     headerHeight: 0,
     heights: new Map(),

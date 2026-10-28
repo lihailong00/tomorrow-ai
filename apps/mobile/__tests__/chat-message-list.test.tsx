@@ -6,7 +6,7 @@ import type { Message } from '../src/domain/types';
 import type { FlashList as EngineDouble } from '../test/flashListMock';
 import { ChatMessageList } from '../src/screens/ChatMessageList';
 import { createMessageViewport, messageAnchorAt, messageAnchorInset,
-  messageInitialIndex, messageRowKey } from '../src/screens/messageListLayout';
+  messageInitialIndex, messageRowKey, MessageViewport } from '../src/screens/messageListLayout';
 
 jest.mock('@shopify/flash-list', () => require('../test/flashListMock'));
 beforeAll(() => { (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; });
@@ -26,10 +26,11 @@ const layoutEvent = (width = 360, height = 640) => ({
   nativeEvent: { layout: { x: 0, y: 0, width, height } },
 });
 
-async function setup(initial = allMessages(), anchor: { id: string; offset: number } | null = null) {
+async function setup(initial = allMessages(), anchor: { id: string; offset: number } | null = null,
+  savedViewport?: MessageViewport) {
   let messages = initial;
-  let viewport = createMessageViewport();
-  viewport.anchor = anchor;
+  let viewport = savedViewport ?? createMessageViewport();
+  if (!savedViewport) viewport.anchor = anchor;
   let latestVersion = 0;
   let header = <Text testID="history">Load older</Text>;
   let footer = <Text testID="tail">Tail spacing</Text>;
@@ -95,6 +96,117 @@ async function setup(initial = allMessages(), anchor: { id: string; offset: numb
       await act(async () => tree.update(render())); return old; },
   };
 }
+
+async function pendingAppend() {
+  const old = { ...message(1), role: 'assistant' as const, content: 'Original' };
+  const data = [message(0), old];
+  const app = await setup(data);
+  await app.bounds(); app.measure(old.id, 0, 900); app.measure('message-0', 900, 900);
+  await app.native(400, true); await app.end(400);
+  const grown = [data[0], { ...old, content: 'Original plus a real streamed fragment' }];
+  await app.update(grown);
+  app.measure(old.id, 0, 1200); app.measure('message-0', 1200, 900); await app.commit();
+  expect(app.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 700, animated: false });
+  return { app, grown };
+}
+
+test('append growth retains translated reading intent through History before acknowledgment and a second detach', async () => {
+  const { app, grown } = await pendingAppend();
+  const viewport = app.viewport;
+  await act(async () => app.tree.unmount());
+  expect(viewport.anchor).toEqual({ id: 'message-1', offset: 676 });
+  expect(viewport.pendingAppendAnchor).toEqual(viewport.anchor);
+  const returned = await setup(grown, null, viewport);
+  expect(returned.list().props.initialScrollIndexParams).toEqual({ viewOffset: 676 });
+  await returned.bounds(); returned.measure('message-1', 0, 1200); await returned.commit();
+  expect(returned.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 700, animated: false });
+  await act(async () => returned.tree.unmount());
+  expect(viewport.anchor).toEqual({ id: 'message-1', offset: 676 });
+  expect(viewport.pendingAppendAnchor).toEqual(viewport.anchor);
+});
+
+test.each([400, 1400])('wrong current-geometry native Y%i cannot replace pending append intent on History detach', async y => {
+  const { app } = await pendingAppend();
+  await app.native(y);
+  const viewport = app.viewport;
+  await act(async () => app.tree.unmount());
+  expect(viewport.anchor).toEqual({ id: 'message-1', offset: 676 });
+  expect(viewport.pendingAppendAnchor).toEqual(viewport.anchor);
+});
+
+test('a genuine gesture cancels pending append protection and History saves the actual different row', async () => {
+  const { app } = await pendingAppend();
+  await app.native(1400, true); await app.end(1400);
+  const viewport = app.viewport;
+  expect(viewport.pendingAppendAnchor).toBeNull();
+  await act(async () => app.tree.unmount());
+  expect(viewport.anchor).toEqual({ id: 'message-0', offset: 176 });
+});
+
+test('real matching measured acknowledgment clears append protection and later AX movement saves actual intent', async () => {
+  const { app } = await pendingAppend();
+  await app.native(700);
+  expect(app.viewport.pendingAppendAnchor).toBeNull();
+  expect(app.viewport.anchor).toEqual({ id: 'message-1', offset: 676 });
+  await app.native(1400);
+  const viewport = app.viewport;
+  await act(async () => app.tree.unmount());
+  expect(viewport.anchor).toEqual({ id: 'message-0', offset: 176 });
+});
+
+test('own send replaces pending append protection with latest intent before History detach', async () => {
+  const { app, grown } = await pendingAppend();
+  await app.update(grown, 1);
+  const viewport = app.viewport;
+  expect(viewport.pendingAppendAnchor).toBeNull();
+  expect(viewport.followTail).toBe(true);
+  await act(async () => app.tree.unmount());
+  expect(viewport.anchor).toBeNull();
+});
+
+test('removing a pending append row clears its protection and lets actual remaining rows become the anchor', async () => {
+  const { app, grown } = await pendingAppend();
+  await app.update([grown[0]]);
+  expect(app.viewport.pendingAppendAnchor).toBeNull();
+  app.measure('message-0', 0, 900); await app.native(200);
+  expect(app.viewport.anchor).toEqual({ id: 'message-0', offset: 176 });
+});
+
+test('geometry during pending append remeasures its target without retiring protection on a wrong packet', async () => {
+  const { app } = await pendingAppend();
+  await act(async () => dimensions(640, 640, 2));
+  expect(app.viewport.pendingAppendAnchor).toEqual({ id: 'message-1', offset: 676 });
+  await app.bounds(640); app.measure('message-1', 1000, 1400); app.measure('message-0', 2400, 900);
+  await app.commit(); await app.native(2600);
+  const viewport = app.viewport;
+  await act(async () => app.tree.unmount());
+  expect(viewport.anchor).toEqual({ id: 'message-1', offset: 676 });
+  expect(viewport.pendingAppendAnchor).toEqual(viewport.anchor);
+});
+
+test('a legal measured end clamp acknowledges and clears pending append protection', async () => {
+  const { app } = await pendingAppend();
+  await app.bounds(360, 2000, 2150);
+  expect(app.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 150, animated: false });
+  await app.native(150);
+  expect(app.viewport.pendingAppendAnchor).toBeNull();
+  expect(app.viewport.anchor).toEqual({ id: 'message-1', offset: 126 });
+});
+
+test('an old account callback cannot retire its pending append or replace the new account intent', async () => {
+  const { app } = await pendingAppend();
+  const callbacks = app.list().props;
+  const previous = await app.owner();
+  await act(async () => {
+    callbacks.onScrollBeginDrag();
+    callbacks.onScroll({ nativeEvent: { contentOffset: { y: 700 } } });
+    callbacks.onMomentumScrollEnd();
+  });
+  expect(previous.pendingAppendAnchor).toEqual({ id: 'message-1', offset: 676 });
+  expect(previous.anchor).toEqual(previous.pendingAppendAnchor);
+  expect(app.viewport.pendingAppendAnchor).toBeNull();
+  expect(app.viewport.anchor).toBeNull();
+});
 
 test.each([0, 502, 1003])('History Back delegates deep index %i and signed inset to FlashList', async index => {
   const messages = allMessages();

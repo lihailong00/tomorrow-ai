@@ -63,7 +63,10 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
   const active = useRef(true);
   const retained = viewport.anchor && messages.some(item =>
     messageRowKey(item) === viewport.anchor!.id) ? viewport.anchor : null;
-  if (!retained) viewport.anchor = null;
+  if (!retained) {
+    viewport.anchor = null;
+    viewport.pendingAppendAnchor = null;
+  }
   const initial = useRef(retained && !viewport.followTail ? { ...retained } : null).current;
   const initialIndex = useRef(messageInitialIndex(messages, initial)).current;
   const target = useRef<Destination | null>(initial ? { anchor: initial } : { latest: true });
@@ -75,6 +78,13 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
   const observed = useRef<number | null>(null);
   const observedAnchor = useRef<MessageAnchor | null>(null);
   const command = useRef<number | null>(null);
+  const retainedDestination = target.current;
+  if (retainedDestination && 'anchor' in retainedDestination && !messages.some(item =>
+    messageRowKey(item) === retainedDestination.anchor.id)) {
+    target.current = null;
+    command.current = null;
+    viewport.pendingAppendAnchor = null;
+  }
   const current = useRef({ messages, layoutKey, latestVersion });
   const previous = current.current;
   current.current = { messages, layoutKey, latestVersion };
@@ -95,6 +105,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     interacting.current = false;
     viewport.followTail = true;
     viewport.anchor = null;
+    viewport.pendingAppendAnchor = null;
     target.current = { latest: true };
     command.current = null;
     observed.current = null;
@@ -193,8 +204,11 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
         item.content.startsWith(cached.message.content)) {
         const adjusted = { id: anchor.id, offset: anchor.offset + row.height - cached.height };
         viewport.anchor = adjusted;
+        viewport.pendingAppendAnchor = adjusted;
         target.current = { anchor: adjusted };
         command.current = null;
+        observed.current = null;
+        observedAnchor.current = null;
       }
       rememberHeight(viewport, item, row.height);
     }
@@ -225,6 +239,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
         ? measuredAnchor(y, destination.anchor.id) : measuredAnchor(y);
       if ('anchor' in destination && anchor?.id !== destination.anchor.id) return;
       target.current = null;
+      viewport.pendingAppendAnchor = null;
       command.current = null;
       capture(y, anchor?.id);
     } else capture(y, preferred);
@@ -233,6 +248,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
   const takeControl = useCallback((event?: ScrollPacket) => {
     if (!valid()) return;
     target.current = null;
+    viewport.pendingAppendAnchor = null;
     command.current = null;
     interacting.current = true;
     // A gesture without a packet still cancels pending tail/restore work.
@@ -257,7 +273,11 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
       // History can detach while an initial target is still settling. Prefer
       // the last actual visible measured row, while newer send/geometry intent
       // clears that observation and a replacement owner fences this cleanup.
-      if (isCurrent() && observed.current !== null && observedAnchor.current) {
+      // An append's translated reading intent survives History, including a
+      // wrong-offset packet showing another row while its command is pending.
+      // Only matching measured arrival or explicit user control retires it.
+      if (isCurrent() && !viewport.pendingAppendAnchor &&
+        observed.current !== null && observedAnchor.current) {
         viewport.y = observed.current;
         viewport.followTail = followTail.current = observed.current <= 2;
         viewport.anchor = { ...observedAnchor.current };
