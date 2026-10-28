@@ -150,7 +150,9 @@ async function setup(
     async scroll(y: number, drag = true, contentHeight = 121000) {
       await act(async () => {
         if (drag) list().props.onScrollBeginDrag(scrollEvent(y, contentHeight));
-        virtual()._onScroll(scrollEvent(y, contentHeight));
+        tree.root.findAllByType(ScrollView)
+          .find(node => node.props.testID === 'chat-message-list')!
+          .props.onScroll(scrollEvent(y, contentHeight));
       });
     },
     async update(next = messages, footer = '', version = latestVersion) {
@@ -305,6 +307,98 @@ test('deep Back keeps the installed RN initial window when an old 851px native s
   await act(async () => nativePane().props.onScroll(scrollEvent(4500, 5270.095)));
   expect(app.viewport.y).toBe(4500);
 });
+
+async function zeroRangeBack() {
+  const app = await setup(allMessages(), { id: 'message-641', offset: 83.4296875 }, {
+    hasOlder: false, header: <View />,
+  });
+  const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  const paneHeight = 651.4285888671875;
+  await app.dimensions(paneHeight);
+  await act(async () => {
+    app.virtual()._onLayout(layoutEvent(0, paneHeight));
+    app.list().props.ListFooterComponent.props.onLayout(layoutEvent(0, 0));
+  });
+  let y = 24;
+  for (let index = 0; index < 6; index++) {
+    const height = index % 2 ? 69.333 : 130.285;
+    await app.measure(`message-${641 - index}`, y, height);
+    y += height;
+  }
+  expect(scroll).not.toHaveBeenCalled();
+  await app.dimensions(36730.66796875);
+  await act(async () => {
+    app.virtual()._onLayout(layoutEvent(0, paneHeight));
+    app.list().props.ListFooterComponent.props.onLayout(layoutEvent(0, 0));
+  });
+  y = 36132.19140625;
+  for (let index = 0; index < 6; index++) {
+    const height = index % 2 ? 69.333 : 130.285;
+    await app.measure(`message-${641 - index}`, y, height);
+    y += height;
+  }
+  const nativePane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  return { app, scroll, nativePane, paneHeight };
+}
+
+test('a zero-range Back retries on later frames without any native packet, and only real arrival opens the bounded RN window', async () => {
+  const { app, scroll, nativePane, paneHeight } = await zeroRangeBack();
+  expect(app.list().props.initialScrollIndex).toBe(362);
+  expect(scroll).toHaveBeenLastCalledWith({ offset: 36730.66796875 - paneHeight, animated: false });
+  const firstCommands = scroll.mock.calls.length;
+  // Exact native failure: a pre-commit command can have no scroll event at all.
+  // Suppress every packet through several actual retry frames.
+  await app.tick(160);
+  expect(scroll.mock.calls.length).toBeGreaterThan(firstCommands);
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(1);
+  expect(app.virtual().state.cellsAroundViewport).toEqual({ first: 362, last: 367 });
+  expect(app.rows()).toHaveLength(6);
+  expect(jest.getTimerCount()).toBeLessThanOrEqual(5);
+  // Each retry recomputes the current native measurements, not the old command.
+  await app.dimensions(40000);
+  await act(async () => app.virtual()._onLayout(layoutEvent(0, paneHeight)));
+  await app.measure('message-641', 36140, 130.285);
+  await app.tick(40);
+  const destination = 36140 + 83.4296875;
+  expect(scroll).toHaveBeenLastCalledWith({ offset: destination, animated: false });
+  const event = scrollEvent(destination, 40000);
+  event.nativeEvent.layoutMeasurement.height = paneHeight;
+  await act(async () => nativePane().props.onScroll(event));
+  await app.tick(100);
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(0);
+  expect(app.viewport.anchor).toEqual({ id: 'message-641', offset: 83.4296875 });
+  const arrived = scroll.mock.calls.length;
+  await app.tick(100);
+  expect(scroll).toHaveBeenCalledTimes(arrived);
+  expect(app.rows().length).toBeLessThan(100);
+});
+
+test.each(['gesture', 'reflow', 'owner', 'unmount'])(
+  'a packet-free bootstrap stops its queued frame retry on %s', async reason => {
+    const { app, scroll } = await zeroRangeBack();
+    await app.tick(40);
+    if (reason === 'gesture')
+      await act(async () => app.list().props.onScrollBeginDrag());
+    else if (reason === 'reflow')
+      await act(async () => Dimensions.set({
+        window: { width: 720, height: 640, scale: 2.75, fontScale: 1 },
+      }));
+    else if (reason === 'owner')
+      await act(async () => app.tree.update(<ChatMessageList
+        messages={allMessages()} viewport={createMessageViewport()} latestVersion={0}
+        renderItem={app.list().props.renderItem} header={<View />} footer={<View />}
+        style={{ flex: 1 }} contentContainerStyle={{ flexGrow: 1 }}
+      />));
+    else {
+      await act(async () => app.tree.unmount());
+      trees.delete(app.tree);
+    }
+    const stopped = scroll.mock.calls.length;
+    await app.tick(160);
+    expect(scroll).toHaveBeenCalledTimes(stopped);
+  },
+);
 
 test('a real gesture releases a deep bootstrap immediately and an obsolete retry cannot scroll its replacement', async () => {
   const app = await setup(allMessages(), { id: 'message-502', offset: 27 });

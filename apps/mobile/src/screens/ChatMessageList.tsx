@@ -189,6 +189,7 @@ function MessageWindow({
   const settleFrame = useRef<number | null>(null);
   const bootstrap = useRef({
     pending: initialIndex > 0,
+    initial: initialIndex > 0,
     commandOffset: null as number | null,
     retryFrame: null as number | null,
   });
@@ -256,6 +257,11 @@ function MessageWindow({
   const cancelSettle = useCallback(() => {
     if (settleFrame.current !== null) cancelAnimationFrame(settleFrame.current);
     settleFrame.current = null;
+  }, []);
+  const cancelBootstrapRetry = useCallback(() => {
+    if (bootstrap.current.retryFrame !== null)
+      cancelAnimationFrame(bootstrap.current.retryFrame);
+    bootstrap.current.retryFrame = null;
   }, []);
   const valid = useCallback(
     () =>
@@ -378,6 +384,9 @@ function MessageWindow({
         const desired = Math.min(requested, maxOffset);
         if (Math.abs(observed.current - desired) > 2) return;
         target.current = null;
+        bootstrap.current.pending = false;
+        bootstrap.current.initial = false;
+        cancelBootstrapRetry();
         const visible = messageAnchorAt(
           observed.current, frames.current, dimensions.viewportHeight,
         ) ?? current.current.viewport.anchor;
@@ -393,7 +402,7 @@ function MessageWindow({
           : null;
       });
     });
-  }, [cancelSettle, initialIndex, valid]);
+  }, [cancelBootstrapRetry, cancelSettle, initialIndex, valid]);
   const restore = useCallback(() => {
     cancelSettle();
     if (
@@ -443,6 +452,16 @@ function MessageWindow({
     // Geometry being quiet alone is insufficient. Retire a target only after a
     // native scroll event reports arrival at its current, measured destination.
     verifyArrival();
+    if (bootstrap.current.initial && bootstrap.current.pending && bootstrap.current.retryFrame === null)
+      bootstrap.current.retryFrame = requestAnimationFrame(() => {
+        bootstrap.current.retryFrame = null;
+        // A command issued before Android commits its new scroll range can be
+        // clamped to the unchanged zero offset, producing no scroll event at all.
+        // Drive the next real frame independently of packets; never synthesize
+        // arrival or replay an offset from an earlier geometry batch.
+        if (valid() && bootstrap.current.initial && bootstrap.current.pending && target.current && !interacting.current)
+          restore();
+      });
   }, [cancelSettle, initialIndex, valid, verifyArrival]);
   const releaseHistory = useCallback(() => {
     const held = heldHistory.current;
@@ -495,12 +514,11 @@ function MessageWindow({
       cancelSettle();
       if (endDragFrame.current !== null)
         cancelAnimationFrame(endDragFrame.current);
-      if (bootstrap.current.retryFrame !== null)
-        cancelAnimationFrame(bootstrap.current.retryFrame);
+      cancelBootstrapRetry();
       if (userScrollFrame.current !== null)
         cancelAnimationFrame(userScrollFrame.current);
     };
-  }, [cancelSettle, viewport, valid]);
+  }, [cancelBootstrapRetry, cancelSettle, viewport, valid]);
   const measurements = useMemo(
     () => ({
       layout: (message: Message, event: LayoutChangeEvent) => {
@@ -621,10 +639,12 @@ function MessageWindow({
         ) ?? viewport.anchor;
   };
   const takeUserControl = () => {
+    cancelBootstrapRetry();
     if (userScrollFrame.current !== null) cancelAnimationFrame(userScrollFrame.current);
     userScrollFrame.current = null;
     settledRestoration.current = null;
     bootstrap.current.pending = false;
+    bootstrap.current.initial = false;
     interacting.current = true;
     followTail.current = false;
     viewport.followTail = false;
@@ -703,12 +723,14 @@ function MessageWindow({
               return;
             }
             bootstrap.current.pending = false;
+            bootstrap.current.initial = false;
+            cancelBootstrapRetry();
           }
           scrollProps.onScroll?.(event);
         }}
       />
     ),
-    [restore, restoreAfterGeometry, valid],
+    [cancelBootstrapRetry, restore, restoreAfterGeometry, valid],
   );
   return (
     <Measurements.Provider value={measurements}>
