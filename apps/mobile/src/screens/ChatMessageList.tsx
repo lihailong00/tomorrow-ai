@@ -224,7 +224,12 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     if (bounds && (Math.abs(bounds.width - metrics.current.width) > 1 ||
       Math.abs(bounds.height - metrics.current.height) > 1)) return;
     const contentHeight = event.nativeEvent.contentSize?.height;
-    if (Number.isFinite(contentHeight) && Math.abs(contentHeight - metrics.current.contentHeight) > 1)
+    // FlashList's progressive total size and RN's content-size callback are
+    // independent of a real user's measured visible row. A lagging callback
+    // must not freeze reading capture at an older message. Size agreement is
+    // still required to acknowledge our own pending programmatic destination.
+    if (target.current && Number.isFinite(contentHeight) &&
+      Math.abs(contentHeight - metrics.current.contentHeight) > 1)
       return;
     const preferred = observed.current !== null && Math.abs(observed.current - y) <= 2
       ? viewport.anchor?.id : undefined;

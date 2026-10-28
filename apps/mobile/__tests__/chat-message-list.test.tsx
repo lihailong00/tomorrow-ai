@@ -277,6 +277,71 @@ test('History detach during pending restoration captures the actually visible me
   expect(viewport.followTail).toBe(false);
 });
 
+test.each([
+  ['scroll', false], ['end-drag', false], ['momentum-end', true], ['AX', true],
+] as const)('%s saves measured636 for History when scroll content size precedes its callback (late callback=%s)', async (kind, lateCallback) => {
+  const data = allMessages();
+  const app = await setup(data);
+  await app.bounds();
+  app.measure('message-347', 60000, 900);
+  await app.native(60200, true); await app.end(60200);
+  expect(app.viewport.anchor).toEqual({ id: 'message-347', offset: 176 });
+  const index = app.measure('message-636', 30000, 900);
+  // FlashList has processed this actual offset before its public callback.
+  // Progressive total-size notification is independent of that callback.
+  app.engine().visible = { startIndex: index, endIndex: index };
+  app.engine().nativeOffset = 30200;
+  const packet = { nativeEvent: {
+    contentOffset: { x: 0, y: 30200 }, contentSize: { width: 360, height: 121733 },
+    layoutMeasurement: { width: 360, height: 640 }, zoomScale: 1,
+  }, timeStamp: Date.now() };
+  await act(async () => {
+    if (kind === 'scroll') app.list().props.onScroll(packet);
+    if (kind === 'end-drag') app.list().props.onScrollEndDrag(packet);
+    if (kind === 'momentum-end') app.list().props.onMomentumScrollEnd(packet);
+    if (kind === 'AX') app.list().props.onScroll(packet);
+    if (lateCallback) app.list().props.onContentSizeChange(360, 121733);
+  });
+  const viewport = app.viewport;
+  await act(async () => app.tree.unmount());
+  const returned = await setup(data, null, viewport);
+  expect(returned.list().props.initialScrollIndex).toBe(1003 - 636);
+  expect(viewport.anchor).toEqual({ id: 'message-636', offset: 176 });
+  expect(returned.list().props.initialScrollIndexParams).toEqual({ viewOffset: 176 });
+  expect(viewport.followTail).toBe(false);
+});
+
+test('a pending programmatic append target still needs a matching content-size native acknowledgment', async () => {
+  const { app } = await pendingAppend();
+  const engine = app.engine();
+  engine.visible = { startIndex: 0, endIndex: 0 };
+  engine.nativeOffset = 700;
+  await act(async () => app.list().props.onScroll({ nativeEvent: {
+    contentOffset: { x: 0, y: 700 }, contentSize: { width: 360, height: 121733 },
+    layoutMeasurement: { width: 360, height: 640 }, zoomScale: 1,
+  } }));
+  expect(app.viewport.pendingAppendAnchor).toEqual({ id: 'message-1', offset: 676 });
+  // A size notification or the engine's projected offset is not a new native
+  // arrival packet. Only the later matching real callback clears protection.
+  await app.bounds(360, 640, 121733);
+  expect(app.viewport.pendingAppendAnchor).toEqual({ id: 'message-1', offset: 676 });
+  await app.native(700);
+  expect(app.viewport.pendingAppendAnchor).toBeNull();
+});
+
+test.each(['unmeasured', 'foreign-viewport'] as const)('ordinary capture still rejects %s row evidence while content size changes', async reason => {
+  const app = await setup();
+  await app.bounds(); app.measure('message-347', 60000, 900);
+  await app.native(60200, true); await app.end(60200);
+  const index = app.measure('message-636', 30000, 900, reason !== 'unmeasured');
+  app.engine().visible = { startIndex: index, endIndex: index };
+  await act(async () => app.list().props.onScroll({ nativeEvent: {
+    contentOffset: { x: 0, y: 30200 }, contentSize: { width: 360, height: 121733 },
+    layoutMeasurement: { width: 360, height: reason === 'foreign-viewport' ? 360 : 640 }, zoomScale: 1,
+  } }));
+  expect(app.viewport.anchor).toEqual({ id: 'message-347', offset: 176 });
+});
+
 test('latest follows actual streamed height changes until the user reads older text', async () => {
   const data = [message(0), { ...message(1), role: 'assistant' as const, content: 'First' }];
   const app = await setup(data);
