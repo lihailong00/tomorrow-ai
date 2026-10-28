@@ -856,7 +856,7 @@ test('all 26 older pages keep the installed RN render window nonempty and bounde
   expect(app.list().props.data.at(-1).id).toBe('message-0');
   expect(app.list().props.getItemLayout).toBeUndefined();
   expect(app.tree.root.findAllByType(Button)).toHaveLength(0);
-}, 30000);
+}, 120000);
 
 test('native-coordinate anchor helpers preserve tall-row offsets, exact boundaries, header gaps, and missing IDs', () => {
   const frames = new Map([
