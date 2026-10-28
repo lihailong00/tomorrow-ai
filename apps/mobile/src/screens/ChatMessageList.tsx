@@ -74,6 +74,27 @@ type Props = {
   contentContainerStyle: StyleProp<ViewStyle>;
 };
 
+type NativeScrollPacket = Parameters<NonNullable<ScrollViewProps['onScroll']>>[0];
+type DeferredScrollPacket = { event: NativeScrollPacket; forward: ScrollViewProps['onScroll'] };
+
+function snapshotScrollPacket(event: NativeScrollPacket): NativeScrollPacket {
+  const native = event.nativeEvent;
+  // Fabric pools its synthetic event after dispatch. Retain only copies of the
+  // actual numeric scroll data consumed by VirtualizedList, never that event.
+  return {
+    timeStamp: event.timeStamp,
+    nativeEvent: {
+      contentOffset: { ...native.contentOffset },
+      contentSize: { ...native.contentSize },
+      layoutMeasurement: { ...native.layoutMeasurement },
+      contentInset: { ...native.contentInset },
+      zoomScale: native.zoomScale,
+      velocity: native.velocity && { ...native.velocity },
+      targetContentOffset: native.targetContentOffset && { ...native.targetContentOffset },
+    },
+  } as NativeScrollPacket;
+}
+
 function pendingHistoryHeader(header: React.ReactElement) {
   const element = header as React.ReactElement<{ children?: React.ReactNode }>;
   return React.cloneElement(element, {
@@ -180,6 +201,7 @@ function MessageWindow({
   );
   const metrics = useRef({
     contentHeight: 0,
+    viewportWidth: 0,
     viewportHeight: 0,
     headHeight: 0,
     headMeasured: false,
@@ -202,6 +224,22 @@ function MessageWindow({
     awaitingFrame: boolean;
   } | null>(null);
   const userScrollFrame = useRef<number | null>(null);
+  const deferredViewportPacket = useRef<DeferredScrollPacket | null>(null);
+  const drainDeferredPacket = useRef<() => void>(() => {});
+  const packetMatchesViewport = useCallback((event: NativeScrollPacket) => {
+    const bounds = event.nativeEvent.layoutMeasurement;
+    return bounds && Number.isFinite(bounds.width) && bounds.width > 0 &&
+      Number.isFinite(bounds.height) && bounds.height > 0 &&
+      Math.abs(bounds.width - metrics.current.viewportWidth) <= 1 &&
+      Math.abs(bounds.height - metrics.current.viewportHeight) <= 1;
+  }, []);
+  const deferredGeometryConfirmed = useCallback(() => {
+    const pending = deferredViewportPacket.current;
+    const contentHeight = pending?.event.nativeEvent.contentSize.height;
+    return Boolean(pending && packetMatchesViewport(pending.event) &&
+      typeof contentHeight === 'number' && Number.isFinite(contentHeight) &&
+      Math.abs(contentHeight - metrics.current.contentHeight) <= 1);
+  }, [packetMatchesViewport]);
   const [geometry, setGeometry] = useState(0);
   const oldestKey = messages.length ? messageRowKey(messages.at(-1)!) : null;
   const firstKey = messages.length ? messageRowKey(messages[0]) : null;
@@ -540,6 +578,7 @@ function MessageWindow({
         }
       }
       active.current = false;
+      deferredViewportPacket.current = null;
       cancelSettle();
       if (endDragFrame.current !== null)
         cancelAnimationFrame(endDragFrame.current);
@@ -615,6 +654,7 @@ function MessageWindow({
           target.current = { latest: true };
         releaseHistory();
         restore();
+        drainDeferredPacket.current();
       },
       remove: (id: string) => {
         frames.current.delete(id);
@@ -639,6 +679,7 @@ function MessageWindow({
         setGeometry(value => value + 1);
       }
       restore();
+      drainDeferredPacket.current();
     },
     [restore, valid, viewport],
   );
@@ -676,6 +717,7 @@ function MessageWindow({
         ) ?? viewport.anchor;
   };
   const takeUserControl = () => {
+    deferredViewportPacket.current = null;
     cancelBootstrapRetry();
     if (userScrollFrame.current !== null) cancelAnimationFrame(userScrollFrame.current);
     userScrollFrame.current = null;
@@ -689,85 +731,106 @@ function MessageWindow({
     if (heldHistory.current) heldHistory.current.interacted = true;
     cancelSettle();
   };
+  const admitNativeScroll = useCallback((event: NativeScrollPacket, forward: ScrollViewProps['onScroll'], replay = false) => {
+    if (!valid()) { deferredViewportPacket.current = null; return false; }
+    // Native scroll geometry can lead JS onLayout. Such a packet must neither
+    // retire RN's initial mask nor become an AX gesture under the old viewport.
+    if (!packetMatchesViewport(event)) {
+      const bounds = event.nativeEvent.layoutMeasurement;
+      if (!replay && bounds && Number.isFinite(bounds.width) && bounds.width > 0 &&
+        Number.isFinite(bounds.height) && bounds.height > 0) {
+        deferredViewportPacket.current = { event: snapshotScrollPacket(event), forward };
+      }
+      return false;
+    }
+    if (replay && !deferredGeometryConfirmed()) return false;
+    const settled = settledRestoration.current;
+    if (settled && !target.current) {
+      const { contentOffset, contentSize } = event.nativeEvent;
+      // A packet can describe either an older native batch or a newer
+      // batch whose layout callback is still queued. It cannot establish
+      // new geometry by itself, or an unchanged scrollTo could leave us
+      // waiting for an arrival event that Android never needs to emit.
+      if (Math.abs(contentSize.height - metrics.current.contentHeight) > 1)
+        return false;
+      const frame = frames.current.get(settled.anchor.id);
+      const geometryChanged =
+        Math.abs(contentSize.height - settled.contentHeight) > 1 ||
+        Math.abs(metrics.current.contentHeight - settled.contentHeight) > 1 ||
+        metrics.current.viewportHeight !== settled.viewportHeight ||
+        (frame && (frame.y !== settled.frame.y || frame.height !== settled.frame.height));
+      if (geometryChanged) {
+        if (restoreAfterGeometry(true)) restore();
+      } else if (Math.abs(contentOffset.y - settled.y) > 2) {
+        // Accessibility scrolls need not emit begin-drag. A move against
+        // unchanged geometry is new user control, not late list reflow.
+        if (!settled.awaitingFrame) settledRestoration.current = null;
+        else {
+          // Size and saved-row layout notifications from one native batch
+          // may straddle this packet. Forward the real scroll immediately;
+          // coalesce only ownership until that frame's layouts arrive.
+          if (userScrollFrame.current === null)
+            userScrollFrame.current = requestAnimationFrame(() => {
+              userScrollFrame.current = null;
+              if (valid() && settledRestoration.current === settled && !target.current)
+                settledRestoration.current = null;
+            });
+        }
+      }
+    }
+    if (bootstrap.current.pending) {
+      const { contentOffset, contentSize } = event.nativeEvent;
+      const commandOffset = bootstrap.current.commandOffset;
+      const destination = target.current;
+      const anchorFrame = destination && 'anchor' in destination
+        ? frames.current.get(destination.anchor.id)
+        : null;
+      if (
+        commandOffset === null ||
+        !anchorFrame ||
+        metrics.current.contentHeight + 1 <
+          anchorFrame.y + anchorFrame.height ||
+        anchorFrame.y + anchorFrame.height <= contentOffset.y ||
+        anchorFrame.y >=
+          contentOffset.y + metrics.current.viewportHeight ||
+        Math.abs(contentSize.height - metrics.current.contentHeight) > 1 ||
+        Math.abs(contentOffset.y - commandOffset) > 2
+      ) {
+        // Android can deliver a scroll clamped to the first, prefix-free
+        // layout after the real prefix was measured. Forwarding it lets
+        // RN retire its pending initial scroll and unmount the saved row.
+        // Keep that bounded initial region until a current native command
+        // arrives; retry after the stale packet's native commit settles.
+        if (bootstrap.current.retryFrame === null)
+          bootstrap.current.retryFrame = requestAnimationFrame(() => {
+            bootstrap.current.retryFrame = null;
+            restore();
+          });
+        return false;
+      }
+      bootstrap.current.pending = false;
+      bootstrap.current.initial = false;
+      cancelBootstrapRetry();
+    }
+    deferredViewportPacket.current = null;
+    forward?.(event);
+    return true;
+  }, [cancelBootstrapRetry, deferredGeometryConfirmed, packetMatchesViewport, restore, restoreAfterGeometry, valid]);
+  drainDeferredPacket.current = () => {
+    const pending = deferredViewportPacket.current;
+    if (pending && valid() && deferredGeometryConfirmed()) {
+      // Its native offset belongs to the newly confirmed viewport, so an old
+      // cached offset cannot prove a no-op. Re-establish the retained target
+      // before applying the ordinary frame/command admission checks.
+      if (restoreAfterGeometry(true)) restore();
+      admitNativeScroll(pending.event, pending.forward, true);
+    }
+  };
   const renderScrollComponent = useCallback(
     (scrollProps: ScrollViewProps) => (
-      <ScrollView
-        {...scrollProps}
-        onScroll={event => {
-          if (!valid()) return;
-          const settled = settledRestoration.current;
-          if (settled && !target.current) {
-            const { contentOffset, contentSize } = event.nativeEvent;
-            // A packet can describe either an older native batch or a newer
-            // batch whose layout callback is still queued. It cannot establish
-            // new geometry by itself, or an unchanged scrollTo could leave us
-            // waiting for an arrival event that Android never needs to emit.
-            if (Math.abs(contentSize.height - metrics.current.contentHeight) > 1)
-              return;
-            const frame = frames.current.get(settled.anchor.id);
-            const geometryChanged =
-              Math.abs(contentSize.height - settled.contentHeight) > 1 ||
-              Math.abs(metrics.current.contentHeight - settled.contentHeight) > 1 ||
-              metrics.current.viewportHeight !== settled.viewportHeight ||
-              (frame && (frame.y !== settled.frame.y || frame.height !== settled.frame.height));
-            if (geometryChanged) {
-              if (restoreAfterGeometry(true)) restore();
-            } else if (Math.abs(contentOffset.y - settled.y) > 2) {
-              // Accessibility scrolls need not emit begin-drag. A move against
-              // unchanged geometry is new user control, not late list reflow.
-              if (!settled.awaitingFrame) settledRestoration.current = null;
-              else {
-                // Size and saved-row layout notifications from one native batch
-                // may straddle this packet. Forward the real scroll immediately;
-                // coalesce only ownership until that frame's layouts arrive.
-                if (userScrollFrame.current === null)
-                  userScrollFrame.current = requestAnimationFrame(() => {
-                    userScrollFrame.current = null;
-                    if (valid() && settledRestoration.current === settled && !target.current)
-                      settledRestoration.current = null;
-                  });
-              }
-            }
-          }
-          if (bootstrap.current.pending) {
-            const { contentOffset, contentSize } = event.nativeEvent;
-            const commandOffset = bootstrap.current.commandOffset;
-            const destination = target.current;
-            const anchorFrame = destination && 'anchor' in destination
-              ? frames.current.get(destination.anchor.id)
-              : null;
-            if (
-              commandOffset === null ||
-              !anchorFrame ||
-              metrics.current.contentHeight + 1 <
-                anchorFrame.y + anchorFrame.height ||
-              anchorFrame.y + anchorFrame.height <= contentOffset.y ||
-              anchorFrame.y >=
-                contentOffset.y + metrics.current.viewportHeight ||
-              Math.abs(contentSize.height - metrics.current.contentHeight) > 1 ||
-              Math.abs(contentOffset.y - commandOffset) > 2
-            ) {
-              // Android can deliver a scroll clamped to the first, prefix-free
-              // layout after the real prefix was measured. Forwarding it lets
-              // RN retire its pending initial scroll and unmount the saved row.
-              // Keep that bounded initial region until a current native command
-              // arrives; retry after the stale packet's native commit settles.
-              if (bootstrap.current.retryFrame === null)
-                bootstrap.current.retryFrame = requestAnimationFrame(() => {
-                  bootstrap.current.retryFrame = null;
-                  restore();
-                });
-              return;
-            }
-            bootstrap.current.pending = false;
-            bootstrap.current.initial = false;
-            cancelBootstrapRetry();
-          }
-          scrollProps.onScroll?.(event);
-        }}
-      />
+      <ScrollView {...scrollProps} onScroll={event => admitNativeScroll(event, scrollProps.onScroll)} />
     ),
-    [cancelBootstrapRetry, restore, restoreAfterGeometry, valid],
+    [admitNativeScroll],
   );
   return (
     <Measurements.Provider value={measurements}>
@@ -797,9 +860,11 @@ function MessageWindow({
         maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
         onLayout={event => {
           if (!valid()) return;
+          metrics.current.viewportWidth = event.nativeEvent.layout.width;
           metrics.current.viewportHeight = event.nativeEvent.layout.height;
           restoreAfterGeometry(false, true);
           restore();
+          drainDeferredPacket.current();
         }}
         onScrollBeginDrag={() => {
           if (!valid()) return;
@@ -874,6 +939,7 @@ function MessageWindow({
             target.current = { latest: true };
           restore();
           releaseHistory();
+          drainDeferredPacket.current();
         }}
       />
     </Measurements.Provider>

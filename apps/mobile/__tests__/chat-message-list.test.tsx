@@ -149,10 +149,12 @@ async function setup(
     },
     async scroll(y: number, drag = true, contentHeight = 121000) {
       await act(async () => {
+        const packet = scrollEvent(y, contentHeight);
+        packet.nativeEvent.layoutMeasurement.height = virtual()._scrollMetrics.visibleLength || 640;
         if (drag) list().props.onScrollBeginDrag(scrollEvent(y, contentHeight));
         tree.root.findAllByType(ScrollView)
           .find(node => node.props.testID === 'chat-message-list')!
-          .props.onScroll(scrollEvent(y, contentHeight));
+          .props.onScroll(packet);
       });
     },
     async update(next = messages, footer = '', version = latestVersion) {
@@ -268,6 +270,11 @@ test('deep Back keeps the installed RN initial window when an old 851px native s
   const app = await setup(messages, { id: 'message-48', offset: 175.619 });
   const nativePane = () => app.tree.root.findAllByType(ScrollView)
     .find(node => node.props.testID === 'chat-message-list')!;
+  const nativePacket = (y: number, height: number) => {
+    const event = scrollEvent(y, height);
+    event.nativeEvent.layoutMeasurement.height = 651.429;
+    return event;
+  };
   const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
   expect(app.list().props.initialScrollIndex).toBe(34);
   expect(app.virtual().state.pendingScrollUpdateCount).toBe(1);
@@ -278,7 +285,7 @@ test('deep Back keeps the installed RN initial window when an old 851px native s
   // The real new native cell layout may reach JS before its content-size event.
   // Neither that mixed geometry nor its old range-clamped packet is arrival.
   await app.measure('message-48', 4443.048, 190.857);
-  await act(async () => nativePane().props.onScroll(scrollEvent(200, 851.429)));
+  await act(async () => nativePane().props.onScroll(nativePacket(200, 851.429)));
   await app.tick(100);
   expect(app.virtual().state.pendingScrollUpdateCount).toBe(1);
   expect(app.rows().map(row => row.props.testID)).toContain('row-message-48');
@@ -292,19 +299,19 @@ test('deep Back keeps the installed RN initial window when an old 851px native s
   const commands = scroll.mock.calls.length;
   // This is the exact observed Android ordering: old content851/Y200 arrives
   // after fresh content5270 and scrollTo4618. RN must not consume that packet.
-  await act(async () => nativePane().props.onScroll(scrollEvent(200, 851.429)));
+  await act(async () => nativePane().props.onScroll(nativePacket(200, 851.429)));
   await app.tick(100);
   expect(scroll.mock.calls.length).toBeGreaterThan(commands);
   expect(app.virtual().state.pendingScrollUpdateCount).toBe(1);
   expect(app.virtual().state.cellsAroundViewport).toEqual({ first: 34, last: 39 });
   expect(app.rows().map(row => row.props.testID)).toContain('row-message-43');
   expect(app.viewport.anchor).toEqual({ id: 'message-48', offset: 175.619 });
-  await act(async () => nativePane().props.onScroll(scrollEvent(destination, 5270.095)));
+  await act(async () => nativePane().props.onScroll(nativePacket(destination, 5270.095)));
   await app.tick(100);
   expect(app.virtual().state.pendingScrollUpdateCount).toBe(0);
   expect(app.viewport.anchor?.id).toBe('message-48');
   // The gate retires after real arrival: normal scrolling is forwarded again.
-  await act(async () => nativePane().props.onScroll(scrollEvent(4500, 5270.095)));
+  await act(async () => nativePane().props.onScroll(nativePacket(4500, 5270.095)));
   expect(app.viewport.y).toBe(4500);
 });
 
@@ -400,6 +407,146 @@ test.each([
     nativeEvent: { contentOffset: { x: 0, y: 9380 }, contentSize },
   }));
   expect(app.viewport.anchor).toEqual({ id: 'message-5', offset: -420 });
+});
+
+test.each([9780, 9761])('a native viewport packet at Y%i before onLayout keeps reading intent and re-admits only its confirmed geometry', async nativeY => {
+  const app = await setup(Array.from({ length: 40 }, (_, index) => message(index)), {
+    id: 'message-6', offset: -620,
+  });
+  const pane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  await app.dimensions(12000);
+  await app.measure('message-5', 9800, 69);
+  await app.measure('message-6', 10000, 190);
+  await app.scroll(9380, false, 12000);
+  await app.tick(40);
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: -620 });
+  const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  const early = scrollEvent(nativeY, 12000);
+  early.nativeEvent.layoutMeasurement.height = 240;
+  const nativePacket = { ...early, nativeEvent: { ...early.nativeEvent } };
+  await act(async () => pane().props.onScroll(nativePacket));
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: -620 });
+  expect(app.virtual()._scrollMetrics.offset).toBe(9380);
+  // Fabric can pool the original synthetic event before the layout callback.
+  (nativePacket as any).nativeEvent = null;
+  await act(async () => app.virtual()._onLayout(layoutEvent(0, 240)));
+  expect(scroll).toHaveBeenLastCalledWith({ offset: 9761, animated: false });
+  if (nativeY !== 9761) {
+    expect(app.virtual()._scrollMetrics.offset).toBe(9380);
+    const arrived = scrollEvent(9761, 12000);
+    arrived.nativeEvent.layoutMeasurement.height = 240;
+    await act(async () => pane().props.onScroll(arrived));
+  }
+  // At9761 the native command is a no-op: no new packet is delivered in this
+  // branch. The retained real packet is the only valid arrival acknowledgment.
+  await app.tick(40);
+  expect(app.virtual()._scrollMetrics.offset).toBe(9761);
+  expect(app.virtual()._scrollMetrics.visibleLength).toBe(240);
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: -239 });
+  const ax = scrollEvent(9861, 12000);
+  ax.nativeEvent.layoutMeasurement.height = 240;
+  await act(async () => pane().props.onScroll(ax));
+  expect(app.viewport.y).toBe(9861);
+  expect(app.viewport.anchor).toEqual({ id: 'message-5', offset: 61 });
+});
+
+test('a deferred real width change retires the initial RN scroll once after matching measured width and pooled-event disposal', async () => {
+  const app = await setup(Array.from({ length: 40 }, (_, index) => message(index)), {
+    id: 'message-6', offset: -620,
+  });
+  const pane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  await app.dimensions(12000);
+  await app.measure('message-5', 9800, 69);
+  await app.measure('message-6', 10000, 190);
+  const early = scrollEvent(9380, 12000);
+  early.nativeEvent.layoutMeasurement.width = 720;
+  await act(async () => pane().props.onScroll(early));
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(1);
+  expect(app.virtual()._scrollMetrics.offset).toBe(0);
+  (early as any).nativeEvent = null;
+  let nativeMetrics = app.virtual()._scrollMetrics;
+  let admittedPackets = 0;
+  // RN replaces this object once per _onScroll, whereas _onLayout only updates
+  // its visibleLength. Count actual admissions, not unrelated viewability work.
+  Object.defineProperty(app.virtual(), '_scrollMetrics', {
+    configurable: true,
+    get: () => nativeMetrics,
+    set: next => { nativeMetrics = next; admittedPackets++; },
+  });
+  const resized = layoutEvent(0, 640);
+  resized.nativeEvent.layout.width = 720;
+  await act(async () => app.virtual()._onLayout(resized));
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(0);
+  expect(app.virtual()._scrollMetrics.offset).toBe(9380);
+  expect(admittedPackets).toBe(1);
+  await act(async () => app.virtual()._onLayout(resized));
+  await act(async () => app.virtual()._onContentSizeChange(720, 12000));
+  expect(admittedPackets).toBe(1);
+  await app.tick(40);
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: -620 });
+});
+
+test.each(['gesture', 'newer-packet', 'unmount'] as const)('a deferred viewport event is revoked by %s', async reason => {
+  const app = await setup(Array.from({ length: 40 }, (_, index) => message(index)), {
+    id: 'message-6', offset: -620,
+  });
+  const pane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  await app.dimensions(12000);
+  await app.measure('message-5', 9800, 69);
+  await app.measure('message-6', 10000, 190);
+  await app.scroll(9380, false, 12000);
+  await app.tick(40);
+  const early = scrollEvent(9761, 12000);
+  early.nativeEvent.layoutMeasurement.height = 240;
+  await act(async () => pane().props.onScroll(early));
+  if (reason === 'unmount') {
+    const oldLayout = app.list().props.onLayout;
+    await act(async () => app.tree.update(<React.Fragment />));
+    await act(async () => oldLayout(layoutEvent(0, 240)));
+    expect(app.viewport.y).toBe(9380);
+    return;
+  }
+  if (reason === 'gesture') await act(async () => app.list().props.onScrollBeginDrag());
+  await app.scroll(9480, false, 12000);
+  expect(app.viewport.anchor).toEqual({ id: 'message-5', offset: -320 });
+  await act(async () => app.virtual()._onLayout(layoutEvent(0, 240)));
+  expect(app.virtual()._scrollMetrics.offset).toBe(9480);
+  expect(app.viewport.anchor).toEqual({ id: 'message-5', offset: -320 });
+});
+
+test.each(['content-first', 'frame-first'] as const)('deferred viewport admission waits for the %s native batch without requiring a second packet', async order => {
+  const app = await setup(Array.from({ length: 40 }, (_, index) => message(index)), {
+    id: 'message-6', offset: -620,
+  });
+  const pane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  await app.dimensions(12000);
+  await app.measure('message-5', 9800, 69);
+  await app.measure('message-6', 10000, 190);
+  await app.scroll(9380, false, 12000);
+  await app.tick(40);
+  const early = scrollEvent(9400, 12020);
+  early.nativeEvent.layoutMeasurement.width = 720;
+  await act(async () => pane().props.onScroll(early));
+  const resized = layoutEvent(0, 640);
+  resized.nativeEvent.layout.width = 720;
+  await act(async () => app.virtual()._onLayout(resized));
+  expect(app.virtual()._scrollMetrics.offset).toBe(9380);
+  if (order === 'content-first') {
+    await act(async () => app.virtual()._onContentSizeChange(720, 12020));
+    expect(app.virtual()._scrollMetrics.offset).toBe(9380);
+    await app.measure('message-6', 10020, 190);
+  } else {
+    await app.measure('message-6', 10020, 190);
+    expect(app.virtual()._scrollMetrics.offset).toBe(9380);
+    await act(async () => app.virtual()._onContentSizeChange(720, 12020));
+  }
+  await app.tick(40);
+  expect(app.virtual()._scrollMetrics.offset).toBe(9400);
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: -620 });
 });
 
 async function zeroRangeBack() {
@@ -786,7 +933,9 @@ test('a negative retained inset stays reachable when a reflow makes the viewport
   expect(app.viewport.anchor).toEqual({ id: 'message-502', offset: -499 });
   const nativePane = () => app.tree.root.findAllByType(ScrollView)
     .find(node => node.props.testID === 'chat-message-list')!;
-  await act(async () => nativePane().props.onScroll(scrollEvent(2021, 121000)));
+  const arrival = scrollEvent(2021, 121000);
+  arrival.nativeEvent.layoutMeasurement.height = 500;
+  await act(async () => nativePane().props.onScroll(arrival));
   await app.tick(100);
   expect(app.virtual().state.pendingScrollUpdateCount).toBe(0);
   const settled = scroll.mock.calls.length;
