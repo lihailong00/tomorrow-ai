@@ -1,3 +1,4 @@
+import { addChatStreamMock } from '../test/chatStreamMock';
 import React from 'react';
 import { Text, TextInput } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
@@ -74,6 +75,7 @@ async function setup(
         },
       }),
   };
+  addChatStreamMock(api);
   const onConversationCreated = jest.fn();
   const context = {
     api,

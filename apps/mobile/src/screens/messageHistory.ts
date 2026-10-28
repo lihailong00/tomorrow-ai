@@ -1,6 +1,7 @@
 import type { ApiClient } from '../api/client';
 import { errorMessage } from '../api/client';
 import type { Message } from '../domain/types';
+import { createMessageViewport } from './messageListLayout';
 
 export const MESSAGE_HISTORY_PAGE_SIZE = 40;
 type HistoryPage = Awaited<ReturnType<ApiClient['messages']>>;
@@ -23,7 +24,12 @@ function messageOrder(message: Message) {
 /** Current turns win overlaps; adding an older page never removes a loaded page. */
 export function mergeMessageHistory(history: Message[], current: Message[]) {
   const byId = new Map(history.map(message => [message.id, message]));
-  current.forEach(message => byId.set(message.id, message));
+  current.forEach(message => {
+    // A page can reach JS before the stream's accepted event. When its server
+    // ID is reconciled, preserve the optimistic native key and retry state.
+    const existing = byId.get(message.id);
+    if (!existing?.client_key || message.client_key) byId.set(message.id, message);
+  });
   return Array.from(byId.values()).sort((left, right) => {
     const a = messageOrder(left);
     const b = messageOrder(right);
@@ -85,8 +91,8 @@ export function createMessageHistory() {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
-    // Native ScrollView owns prepend anchoring; retain only its reported offset for Back.
-    viewport: { y: 0 },
+    // Data and measured heights survive Back; native message Views do not.
+    viewport: createMessageViewport(),
     ensure: (api: ApiClient, id: string | undefined, apply: (items: Message[]) => void, canApply: () => boolean) =>
       snapshot.initialized ? Promise.resolve() : load(api, id, apply, canApply, false),
     refresh: (api: ApiClient, id: string | undefined, apply: (items: Message[]) => void, canApply: () => boolean) =>

@@ -4474,6 +4474,7 @@ dependencies = [
  "futures-util",
  "hmac 0.12.1",
  "rand 0.8.8",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",

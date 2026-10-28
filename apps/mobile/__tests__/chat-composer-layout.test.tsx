@@ -1,3 +1,4 @@
+import { addChatStreamMock } from '../test/chatStreamMock';
 import React from 'react';
 import {
   Dimensions,
@@ -60,6 +61,7 @@ async function setup(fontScale = 1) {
       .mockResolvedValue({ runtime: { model_mode: 'local' } }),
     chat: jest.fn().mockResolvedValue(reply),
   };
+  addChatStreamMock(api);
   let tree!: ReactTestRenderer;
   await act(async () => {
     tree = create(
@@ -212,8 +214,8 @@ test('large-font multiline drafts scroll in a bounded input and send every line'
     expect.any(String),
     [],
   );
-  expect(app.input().props.value).toBe(draft);
-  expect(app.input().props.editable).toBe(false);
+  expect(app.input().props.value).toBe('');
+  expect(app.input().props.editable).toBe(true);
   expect(app.inputStyle().maxHeight).toBe(68);
   for (const label of ['选择附件', '开始录音', '发送消息']) {
     expect(app.control(label).props.disabled).toBe(true);

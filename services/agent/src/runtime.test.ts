@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 import type { StreamFn } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
@@ -25,6 +27,34 @@ function fakeStream(replies: AssistantMessage['content'][], observe?: (value: un
       usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
     queueMicrotask(() => { stream.push({ type: 'start', partial: message }); stream.push({ type: 'done', reason: tool ? 'toolUse' : 'stop', message }); });
+    return stream;
+  };
+}
+
+function deltaStream(replies: AssistantMessage['content'][], deltas?: (string[] | null)[]): StreamFn {
+  let index = 0;
+  return (model) => {
+    const stream = createAssistantMessageEventStream();
+    const turn = Math.min(index++, replies.length - 1);
+    const content = replies[turn]!;
+    const tool = content.some(c => c.type === 'toolCall');
+    const message: AssistantMessage = { role: 'assistant', content, api: model.api, provider: model.provider, model: model.id,
+      timestamp: Date.now(), stopReason: tool ? 'toolUse' : 'stop',
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    queueMicrotask(() => {
+      stream.push({ type: 'start', partial: message });
+      content.forEach((part, contentIndex) => {
+        if (part.type !== 'text') return;
+        if (deltas?.[turn] === null) return;
+        stream.push({ type: 'text_start', contentIndex, partial: message });
+        for (const delta of deltas?.[turn] ?? [part.text]) {
+          stream.push({ type: 'text_delta', contentIndex, delta, partial: message });
+        }
+        stream.push({ type: 'text_end', contentIndex, content: part.text, partial: message });
+      });
+      stream.push({ type: 'done', reason: tool ? 'toolUse' : 'stop', message });
+    });
     return stream;
   };
 }
@@ -262,4 +292,289 @@ test('reserved web tool names cannot be replaced by a business tool definition',
     settings, fixture.value, undefined, undefined, fakeStream([final])),
   error => error instanceof RunError && error.code === 'invalid_request');
   assert.equal(fixture.effects.length, 0); assert.equal(fixture.events.length, 0);
+});
+
+test('real timed provider SSE reaches the bridge before upstream completion and preserves tool-turn order', { timeout: 8000 }, async () => {
+  const fixture = bridge();
+  let requests = 0, firstTextAt = 0, firstUpstreamEndAt = 0, callbackActive = 0, callbackMaximum = 0;
+  let providerFailure: unknown;
+  let releaseFirstText!: () => void;
+  const firstTextDelivered = new Promise<void>(resolve => { releaseFirstText = resolve; });
+  const provider = createServer((request, response) => {
+    void (async () => {
+      for await (const _chunk of request) { /* Consume only local fixture input. */ }
+      const turn = ++requests;
+      response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      const common = { id: `timed-${turn}`, object: 'chat.completion.chunk', created: 1, model: 'timed-fixture' };
+      const chunk = (delta: unknown, finish: string | null = null) => response.write(`data: ${JSON.stringify({
+        ...common, choices: [{ index: 0, delta, finish_reason: finish }],
+        ...(finish ? { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } : {}),
+      })}\n\n`);
+      if (turn === 1) {
+        chunk({ role: 'assistant', reasoning_content: 'private-reasoning-never-publish' });
+        chunk({ content: '先检查。' });
+        // The provider deliberately cannot finish until real text has crossed
+        // the callback boundary. A final-response typing effect cannot pass.
+        await firstTextDelivered;
+        chunk({ tool_calls: [{ index: 0, id: 'timed-save', type: 'function', function: {
+          name: 'save_memory', arguments: '{"content":"private-raw-tool-arguments"}',
+        } }] });
+        chunk({}, 'tool_calls');
+        firstUpstreamEndAt = performance.now();
+      } else {
+        chunk({ role: 'assistant', content: '已' });
+        await new Promise(resolve => setTimeout(resolve, 20)); chunk({ content: '保' });
+        await new Promise(resolve => setTimeout(resolve, 20)); chunk({ content: '存' });
+        await new Promise(resolve => setTimeout(resolve, 85)); chunk({ content: '。' });
+        chunk({}, 'stop');
+      }
+      response.end('data: [DONE]\n\n');
+    })().catch(error => { providerFailure = error; response.destroy(); });
+  });
+  provider.listen(0, '127.0.0.1');
+  await once(provider, 'listening');
+  const address = provider.address();
+  assert.ok(address && typeof address !== 'string');
+  const localSettings = resolveModel({ MODEL_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+    MODEL_NAME: 'timed-fixture', MODEL_API_KEY: 'local-fixture-key-never-publish' });
+  fixture.value.event = async event => {
+    callbackMaximum = Math.max(callbackMaximum, ++callbackActive);
+    await new Promise(resolve => setTimeout(resolve, 3));
+    fixture.events.push(event);
+    callbackActive--;
+    if (event.kind === 'text_delta' && !firstTextAt) { firstTextAt = performance.now(); releaseFirstText(); }
+  };
+  fixture.value.tool = async (name, args, _signal, operationIndex) => {
+    assert.equal(fixture.events.at(-1)?.kind, 'tool_start');
+    assert.equal(operationIndex, 1);
+    fixture.effects.push({ name, args });
+    return { value: { id: 'fixture-memory' } };
+  };
+  try {
+    const result = await executeRun(input(), localSettings, fixture.value, undefined,
+      { turns: 5, tools: 5, timeoutMs: 5000 });
+    assert.equal(providerFailure, undefined);
+    assert.equal(requests, 2); assert.equal(fixture.effects.length, 1);
+    assert.equal(result.content, '先检查。\n\n已保存。');
+    assert.ok(firstTextAt > 0 && firstTextAt < firstUpstreamEndAt);
+    assert.equal(callbackMaximum, 1);
+    assert.deepEqual(fixture.events.map(event => event.sequence), fixture.events.map((_event, index) => index + 7));
+    const texts = new Map<number, string>();
+    for (const event of fixture.events.filter(event => event.kind === 'text_delta')) {
+      const turn = event.body.turn as number;
+      texts.set(turn, (texts.get(turn) ?? '') + event.body.delta);
+    }
+    assert.equal([...texts.values()].join('\n\n'), result.content);
+    const kinds = fixture.events.map(event => event.kind);
+    assert.ok(kinds.indexOf('text_delta') < kinds.indexOf('tool_start'));
+    assert.ok(kinds.indexOf('tool_start') < kinds.indexOf('tool_end'));
+    assert.ok(kinds.indexOf('tool_end') < kinds.indexOf('turn'));
+    assert.equal(kinds.at(-1), 'finished');
+    assert.deepEqual(fixture.events.filter(event => event.kind === 'text_start').map(event => event.body.turn), [1, 2]);
+    for (const forbidden of ['private-reasoning-never-publish', 'private-raw-tool-arguments',
+      localSettings.apiKey, input().run_token, '"arguments"']) {
+      assert.equal(JSON.stringify(fixture.events).includes(forbidden), false);
+    }
+  } finally {
+    releaseFirstText();
+    provider.closeAllConnections();
+    await new Promise<void>((resolve, reject) => provider.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+test('chat keeps genuine visible tool-turn text while task output retains the final answer contract', async () => {
+  const replies: AssistantMessage['content'][] = [[{ type: 'text', text: '先保存偏好。' }, ...call],
+    [{ type: 'text', text: '\n已保存。\n' }]];
+  const chat = bridge();
+  const result = await executeRun(input(), settings, chat.value, undefined, undefined, deltaStream(replies));
+  assert.equal(result.content, '先保存偏好。\n\n\n已保存。\n');
+  assert.equal(chat.events.filter(event => event.kind === 'text_delta').map(event => event.body.delta).join('\n\n'), result.content);
+  const task = bridge();
+  const taskResult = await executeRun({ ...input(), scope: 'task' }, settings, task.value, undefined, undefined, deltaStream(replies));
+  assert.equal(taskResult.content, '已保存。');
+  assert.equal(task.events.some(event => event.kind.startsWith('text_')), false);
+});
+
+test('large genuine deltas stay Unicode-safe and bounded before the final event', async () => {
+  const fixture = bridge();
+  const text = '中文😀'.repeat(10000);
+  const result = await executeRun(input(), settings, fixture.value, undefined,
+    { turns: 20, tools: 40, timeoutMs: 5000 }, deltaStream([[{ type: 'text', text }]]));
+  const deltas = fixture.events.filter(event => event.kind === 'text_delta').map(event => event.body.delta as string);
+  assert.equal(deltas.join(''), text); assert.equal(result.content, text);
+  assert.ok(deltas.length > 1);
+  assert.ok(deltas.every(delta => Buffer.byteLength(delta, 'utf8') <= 12000 && !delta.includes('\ufffd')));
+  assert.ok(fixture.events.length <= 500);
+  assert.equal(fixture.events.at(-1)?.kind, 'finished');
+});
+
+test('a failed text callback is observed and stops before any business operation', async () => {
+  const fixture = bridge();
+  fixture.value.event = async event => {
+    fixture.events.push(event);
+    if (event.kind === 'text_delta') throw new Error('fixture callback failure with private details');
+  };
+  await assert.rejects(executeRun(input(), settings, fixture.value, undefined, undefined,
+    deltaStream([[{ type: 'text', text: '先保存。' }, ...call], final])),
+  error => error instanceof RunError && error.code === 'event_failed');
+  assert.equal(fixture.effects.length, 0);
+  assert.equal(fixture.events.some(event => event.kind === 'tool_start' || event.kind === 'finished'), false);
+});
+
+test('cancelling a pending text batch clears its timer and never emits late text or success', { timeout: 3000 }, async () => {
+  const fixture = bridge(); const controller = new AbortController();
+  let releaseFirst!: () => void, releaseSecond!: () => void;
+  const first = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const second = new Promise<void>(resolve => { releaseSecond = resolve; });
+  const source: StreamFn = (model, _context, options) => {
+    const stream = createAssistantMessageEventStream();
+    const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: '先' }], api: model.api,
+      provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop',
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    queueMicrotask(() => { stream.push({ type: 'start', partial: message });
+      stream.push({ type: 'text_delta', contentIndex: 0, delta: '先', partial: message }); });
+    void first.then(() => {
+      message.content = [{ type: 'text', text: '先稍等' }];
+      stream.push({ type: 'text_delta', contentIndex: 0, delta: '稍等', partial: message });
+      releaseSecond();
+    });
+    options?.signal?.addEventListener('abort', () => {
+      stream.push({ type: 'error', reason: 'aborted', error: { ...message, stopReason: 'aborted' } });
+    }, { once: true });
+    return stream;
+  };
+  fixture.value.event = async event => {
+    fixture.events.push(event);
+    if (event.kind === 'text_delta') releaseFirst();
+  };
+  const running = executeRun(input(), settings, fixture.value, controller.signal,
+    { turns: 5, tools: 5, timeoutMs: 1500 }, source);
+  const rejected = assert.rejects(running, error => error instanceof RunError && error.code === 'cancelled');
+  await second;
+  // Let Pi observe the second actual upstream delta before aborting its batch.
+  await new Promise(resolve => setImmediate(resolve));
+  controller.abort(); await rejected;
+  const count = fixture.events.length;
+  await new Promise(resolve => setTimeout(resolve, 90));
+  assert.equal(fixture.events.length, count);
+  assert.equal(fixture.events.filter(event => event.kind === 'text_delta').map(event => event.body.delta).join(''), '先');
+  assert.equal(fixture.events.some(event => event.kind === 'finished'), false);
+  assert.equal(fixture.effects.length, 0);
+});
+
+test('mixed delta and final-only provider turns cannot finalize text absent from the stream', async () => {
+  for (const deltas of [[null, ['已保存。']], [['先保存。'], null]]) {
+    const fixture = bridge();
+    await assert.rejects(executeRun(input(), settings, fixture.value, undefined, undefined,
+      deltaStream([[{ type: 'text', text: '先保存。' }, ...call], [{ type: 'text', text: '已保存。' }]], deltas)),
+    error => error instanceof RunError && error.code === 'model_failed');
+    assert.equal(fixture.events.some(event => event.kind === 'finished'), false);
+    assert.equal(fixture.effects.length, 1);
+  }
+});
+
+test('a provider splitting an emoji between JSON chunks never posts a lone surrogate', async () => {
+  const fixture = bridge();
+  const result = await executeRun(input(), settings, fixture.value, undefined, undefined,
+    deltaStream([[{ type: 'text', text: '😀完成。' }]], [['\ud83d', '\ude00', '完成。']]));
+  const deltas = fixture.events.filter(event => event.kind === 'text_delta').map(event => event.body.delta as string);
+  assert.equal(deltas[0], '😀');
+  assert.equal(deltas.join(''), result.content);
+  assert.equal(result.content, '😀完成。');
+  assert.equal(/\\u[dD][89a-fA-F][0-9a-fA-F]{2}/.test(JSON.stringify(fixture.events)), false);
+  const invalid = bridge();
+  await assert.rejects(executeRun(input(), settings, invalid.value, undefined, undefined,
+    deltaStream([[{ type: 'text', text: '\ud83d' }]], [['\ud83d']])),
+  error => error instanceof RunError && error.code === 'model_failed');
+  assert.equal(invalid.events.some(event => event.kind === 'text_delta' || event.kind === 'finished'), false);
+});
+
+test('a delayed batch timer observes the deadline without an uncaught timer exception', { timeout: 3000 }, async () => {
+  const fixture = bridge();
+  let releaseFirst!: () => void;
+  const first = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const source: StreamFn = (model, _context, options) => {
+    const stream = createAssistantMessageEventStream();
+    const message: AssistantMessage = { role: 'assistant', content: [{ type: 'text', text: '先后' }], api: model.api,
+      provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: 'stop',
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    queueMicrotask(() => { stream.push({ type: 'start', partial: message });
+      stream.push({ type: 'text_delta', contentIndex: 0, delta: '先', partial: message }); });
+    void first.then(() => {
+      stream.push({ type: 'text_delta', contentIndex: 0, delta: '后', partial: message });
+      setImmediate(() => {
+        // Make the 60ms batch timer due before the 100ms run timer, then delay
+        // both until past the monotonic deadline. No external work is involved.
+        const until = performance.now() + 125;
+        while (performance.now() < until) { /* Deliberate fixture event-loop delay. */ }
+      });
+    });
+    options?.signal?.addEventListener('abort', () => {
+      stream.push({ type: 'error', reason: 'aborted', error: { ...message, stopReason: 'aborted' } });
+    }, { once: true });
+    return stream;
+  };
+  fixture.value.event = async event => {
+    fixture.events.push(event);
+    if (event.kind === 'text_delta') releaseFirst();
+  };
+  await assert.rejects(executeRun(input(), settings, fixture.value, undefined,
+    { turns: 5, tools: 5, timeoutMs: 100 }, source),
+  error => error instanceof RunError && error.code === 'timeout');
+  assert.equal(fixture.events.filter(event => event.kind === 'text_delta').map(event => event.body.delta).join(''), '先');
+  assert.equal(fixture.events.some(event => event.kind === 'finished'), false);
+});
+
+test('opt-in chats add global mutation slots while preserving existing per-tool indices', async () => {
+  const mixedInput: RunInput = { ...input(), operation_slots: true, tools: [...input().tools,
+    { name: 'create_task', description: 'fixture task', parameters: input().tools[0]!.parameters },
+    { name: 'list_memories', description: 'fixture read', parameters: { type: 'object', properties: {}, additionalProperties: false } }] };
+  const mixedCalls: AssistantMessage['content'] = [
+    { type: 'toolCall', id: 'read-first', name: 'list_memories', arguments: {} },
+    { type: 'toolCall', id: 'save-first', name: 'save_memory', arguments: { content: 'one' } },
+    { type: 'toolCall', id: 'task-first', name: 'create_task', arguments: { content: 'two' } },
+    { type: 'toolCall', id: 'save-second', name: 'save_memory', arguments: { content: 'three' } },
+  ];
+  for (const request of [mixedInput, { ...mixedInput, operation_slots: false },
+    { ...mixedInput, operation_slots: undefined }, { ...mixedInput, scope: 'task' as const }]) {
+    const fixture = bridge();
+    const observed: { name: string; index?: number; slot?: number }[] = [];
+    fixture.value.tool = async (name, _args, _signal, index, slot) => {
+      observed.push({ name, index, slot }); return { value: { id: 'fixture' } };
+    };
+    await executeRun(request, settings, fixture.value, undefined, undefined, fakeStream([mixedCalls, final]));
+    assert.deepEqual(observed.map(value => value.index), [1, 1, 1, 2]);
+    assert.deepEqual(observed.map(value => value.slot), request.scope === 'chat' && request.operation_slots
+      ? [undefined, 1, 2, 3] : [undefined, undefined, undefined, undefined]);
+  }
+  assert.throws(() => validateRun({ ...mixedInput, operation_slots: 'true' }));
+});
+
+test('an opt-in retry changing the tool in an existing mutation slot stops without a second write', async () => {
+  const request: RunInput = { ...input(), operation_slots: true, tools: [...input().tools,
+    { name: 'create_task', description: 'fixture task', parameters: input().tools[0]!.parameters }] };
+  const receipts = new Map<number, string>();
+  let effects = 0;
+  const fixture = bridge();
+  fixture.value.tool = async (name, args, _signal, index, slot) => {
+    assert.ok(slot);
+    const identity = JSON.stringify({ name, args, index });
+    if (receipts.has(slot)) {
+      if (receipts.get(slot) !== identity) throw new RunError('agent_replay_conflict', 'fixture changed mutation slot');
+      return { value: { id: 'fixture' }, replayed: true };
+    }
+    receipts.set(slot, identity); effects++;
+    return { value: { id: 'fixture' }, replayed: false };
+  };
+  await executeRun(request, settings, fixture.value, undefined, undefined, fakeStream([call, final]));
+  await executeRun(request, settings, fixture.value, undefined, undefined, fakeStream([call, final]));
+  assert.equal(effects, 1);
+  fixture.events.length = 0;
+  await assert.rejects(executeRun(request, settings, fixture.value, undefined, undefined,
+    fakeStream([[{ type: 'toolCall', id: 'changed-tool', name: 'create_task', arguments: { content: '喜欢简洁回答' } }], final])),
+  error => error instanceof RunError && error.code === 'agent_replay_conflict');
+  assert.equal(effects, 1);
+  assert.equal(fixture.events.some(event => event.kind === 'finished'), false);
 });

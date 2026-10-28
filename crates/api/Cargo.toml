@@ -37,5 +37,6 @@ tokio-util = { version = "0.7", features = ["io"] }
 url = "2"
 
 [dev-dependencies]
+reqwest.workspace = true
 tower.workspace = true
 tempfile = "3"

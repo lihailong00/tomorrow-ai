@@ -9,6 +9,7 @@ export type RunInput = {
   run_id: string;
   run_token: string;
   scope: 'chat' | 'task';
+  operation_slots?: boolean;
   messages: { role: string; content: string; created_at?: string }[];
   tools: ToolDefinition[];
 };
@@ -16,7 +17,7 @@ export type RunEvent = { sequence: number; kind: string; body: Record<string, un
 export type Bridge = {
   state(signal?: AbortSignal): Promise<{ next_sequence: number }>;
   event(event: RunEvent, signal?: AbortSignal): Promise<void>;
-  tool(name: string, args: unknown, signal?: AbortSignal, operationIndex?: number): Promise<unknown>;
+  tool(name: string, args: unknown, signal?: AbortSignal, operationIndex?: number, operationSlot?: number): Promise<unknown>;
 };
 export type Limits = { turns: number; tools: number; timeoutMs: number };
 export const DEFAULT_LIMITS: Limits = { turns: 10, tools: 20, timeoutMs: 100000 };
@@ -45,6 +46,7 @@ export function validateRun(value: unknown): asserts value is RunInput {
   if (!body || typeof body.run_id !== 'string' || !/^[a-f\d-]{36}$/.test(body.run_id) ||
       typeof body.run_token !== 'string' || !/^[a-f\d]{64}$/.test(body.run_token) ||
       !['chat', 'task'].includes(body.scope ?? '') || !Array.isArray(body.messages) ||
+      (body.operation_slots !== undefined && typeof body.operation_slots !== 'boolean') ||
       body.messages.length < 1 || body.messages.length > 60 || !Array.isArray(body.tools) || body.tools.length > 20 ||
       body.messages.some(m => !m || !['system', 'user', 'assistant'].includes(m.role) ||
         typeof m.content !== 'string' || m.content.length > 350000) ||
@@ -83,6 +85,43 @@ function transcript(input: RunInput, model: Model<'openai-completions'>, webEnab
 const TOOL_RESULT_LIMIT = 48000;
 const MUTATING_TOOLS = new Set(['save_memory', 'update_memory', 'delete_memory', 'create_task',
   'cancel_task', 'create_schedule', 'pause_schedule']);
+
+const CHAT_TEXT_LIMIT = 60000;
+const CHAT_EVENT_LIMIT = 2500;
+const TASK_EVENT_LIMIT = 500;
+const TEXT_BATCH_MS = 60;
+const TEXT_BATCH_CHARS = 512;
+const TEXT_EVENT_BYTES = 12000;
+
+/** Keep callback bodies bounded without splitting a Unicode character. */
+function textChunks(text: string): string[] {
+  const chunks: string[] = [];
+  let chunk = '', bytes = 0;
+  for (const character of text) {
+    const size = Buffer.byteLength(character, 'utf8');
+    if (bytes + size > TEXT_EVENT_BYTES) { chunks.push(chunk); chunk = ''; bytes = 0; }
+    chunk += character; bytes += size;
+  }
+  if (chunk) chunks.push(chunk);
+  return chunks;
+}
+
+/** Providers may split a UTF-16 pair across JSON chunks; never post a lone half. */
+function completeTextDelta(value: string): { text: string; carry: string } {
+  let end = value.length;
+  const last = value.charCodeAt(end - 1);
+  const carry = last >= 0xd800 && last <= 0xdbff ? value.slice(--end) : '';
+  const text = value.slice(0, end);
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(++index);
+      if (next >= 0xdc00 && next <= 0xdfff) continue;
+    } else if (code < 0xdc00 || code > 0xdfff) continue;
+    throw new RunError('model_failed', '模型流式文本无效');
+  }
+  return { text, carry };
+}
 
 /** Never cut serialized JSON: it can remove IDs, escape boundaries and continuation metadata. */
 export function safeToolResult(value: unknown, tool: string): string {
@@ -169,14 +208,68 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
   if (signal?.aborted) cancel();
   const timer = setTimeout(timeout, limits.timeoutMs);
   let poll: ReturnType<typeof setInterval> | undefined;
+  let closeEvents = () => {};
   try {
     let sequence = (await readState()).next_sequence;
-    const emit = async (kind: string, body: Record<string, unknown>) => {
+    let eventTail = Promise.resolve();
+    let queued = 0, eventCount = 0;
+    const eventLimit = input.scope === 'chat' ? CHAT_EVENT_LIMIT : TASK_EVENT_LIMIT;
+    let textTimer: ReturnType<typeof setTimeout> | undefined;
+    let pendingText = '', pendingTurn = 0;
+    // Reserve lifecycle/tool events, a first and final delta per turn, and enough
+    // UTF-8 chunks for the entire bounded answer even if optional batching stops.
+    // A configured run is <=105s: at 60ms plus the 60000-character/512-char
+    // bound this stays below 2000 text updates, keeping the whole chat live.
+    let optionalTextEvents = Math.max(0, eventLimit - 2 - limits.tools * 2 - limits.turns * 4 - 64);
+    const failEvents = (error: unknown) => stop(error instanceof RunError ? error :
+      new RunError('event_failed', '执行记录暂时无法保存，请稍后重试'));
+    const queueEvents = (events: { kind: string; body: Record<string, unknown> }[]) => {
       checkActive();
-      await bounded(() => bridge.event({ sequence: sequence++, kind, body }, controller.signal));
+      // Pi 1.4 awaits subscribers. This bound also protects against a future
+      // subscriber contract change and a slow callback overlapping the timer.
+      if (queued >= 64) throw new RunError('event_limit', '执行更新过多，已停止本次执行');
+      queued++;
+      const delivery = eventTail.then(async () => {
+        try {
+          for (const event of events) {
+            checkActive();
+            if (eventCount >= eventLimit - (event.kind === 'finished' ? 0 : 1)) {
+              throw new RunError('event_limit', '执行更新过多，已停止本次执行');
+            }
+            await bounded(() => bridge.event({ sequence: sequence++, ...event }, controller.signal));
+            eventCount++;
+          }
+        } finally { queued--; }
+      });
+      // Timer-triggered delivery is always observed; failures abort the model
+      // before any subsequent tool can run, even if Pi normalizes its error.
+      eventTail = delivery.catch(failEvents);
+      return delivery;
     };
+    const flushText = (optional = false): Promise<void> => {
+      if (textTimer) clearTimeout(textTimer);
+      textTimer = undefined;
+      if (!pendingText) return eventTail;
+      const chunks = textChunks(pendingText);
+      if (optional && chunks.length > optionalTextEvents) return eventTail;
+      if (optional) optionalTextEvents -= chunks.length;
+      const turn = pendingTurn;
+      pendingText = '';
+      // Queue the whole batch together so another flush cannot interleave its
+      // deltas between this batch's UTF-8 chunks.
+      return queueEvents(chunks.map(delta => ({ kind: 'text_delta', body: { turn, delta } })));
+    };
+    const emit = async (kind: string, body: Record<string, unknown>) => {
+      await flushText();
+      await queueEvents([{ kind, body }]);
+    };
+    closeEvents = () => { if (textTimer) clearTimeout(textTimer); pendingText = ''; };
     let turns = 0, calls = 0, limitHit = false;
+    let currentTurn = 0, visibleLength = 0;
+    let unicodeCarry = '', unstreamedChatText = false;
+    const streamedTurns = new Map<number, string>();
     let replayConflict = false;
+    let mutationSlot = 0;
     const toolIndexes = new Map<string, number>();
     const usage = { input: 0, output: 0, cache_read: 0, cache_write: 0, total_tokens: 0,
       model_requests: 0, tool_calls: 0, pricing: 'unavailable' };
@@ -193,7 +286,11 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
         toolIndexes.set(definition.name, index);
         try {
           checkActive(); toolSignal?.throwIfAborted();
-          const value = await bounded(() => bridge.tool(definition.name, args, combinedSignal(toolSignal), index));
+          // New streaming chats opt in to a global mutation slot as well as the
+          // existing per-tool index. Legacy chat/task replay identities stay intact.
+          const slot = input.scope === 'chat' && input.operation_slots === true && MUTATING_TOOLS.has(definition.name)
+            ? ++mutationSlot : undefined;
+          const value = await bounded(() => bridge.tool(definition.name, args, combinedSignal(toolSignal), index, slot));
           return { content: [{ type: 'text', text: safeToolResult(value, definition.name) }], details: { tool: definition.name } };
         } catch (error) {
           if (error instanceof RunError && error.code === 'agent_replay_conflict') {
@@ -228,18 +325,69 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
       },
     });
     runningAgent.subscribe(async event => {
-      if (event.type === 'tool_execution_start') {
-        await emit('tool_start', { tool: event.toolName, tool_call_id: event.toolCallId, arguments: event.args });
-      } else if (event.type === 'tool_execution_end') {
-        // Business effects have their own atomic journal in Rust. Never persist chain-of-thought.
-        await emit('tool_end', { tool: event.toolName, tool_call_id: event.toolCallId, is_error: event.isError });
-      } else if (event.type === 'turn_end' && event.message.role === 'assistant') {
-        const message = event.message;
-        usage.input += message.usage.input; usage.output += message.usage.output;
-        usage.cache_read += message.usage.cacheRead; usage.cache_write += message.usage.cacheWrite;
-        usage.total_tokens += message.usage.totalTokens; usage.model_requests++;
-        await emit('turn', { turn: usage.model_requests, stop_reason: message.stopReason,
-          tokens: message.usage.totalTokens });
+      try {
+        checkActive();
+        if (event.type === 'turn_start') {
+          currentTurn++;
+        } else if (input.scope === 'chat' && event.type === 'message_update' &&
+            event.assistantMessageEvent.type === 'text_delta') {
+          // Forward only user-visible SDK text. Thinking, tool-call JSON, tool
+          // results and raw arguments never enter the public text/status stream.
+          const complete = completeTextDelta(unicodeCarry + event.assistantMessageEvent.delta);
+          unicodeCarry = complete.carry;
+          const delta = complete.text;
+          if (!delta) return;
+          // A provider with no delta support retains the old final-only contract.
+          // Mixed support cannot silently insert unseen text into a streamed answer.
+          if (unstreamedChatText) throw new RunError('model_failed', '模型流式回复未完整生成');
+          const first = !streamedTurns.has(currentTurn);
+          const separator = first && streamedTurns.size ? 2 : 0;
+          if (visibleLength + separator + delta.length > CHAT_TEXT_LIMIT) {
+            throw new RunError('invalid_response', '模型回复过长，已停止生成');
+          }
+          visibleLength += separator + delta.length;
+          streamedTurns.set(currentTurn, (streamedTurns.get(currentTurn) ?? '') + delta);
+          if (first) {
+            await flushText();
+            await queueEvents([{ kind: 'text_start', body: { turn: currentTurn } }]);
+          }
+          pendingTurn = currentTurn;
+          pendingText += delta;
+          if (first) await flushText();
+          else if (pendingText.length >= TEXT_BATCH_CHARS && optionalTextEvents) await flushText(true);
+          else if (!textTimer && optionalTextEvents) {
+            textTimer = setTimeout(() => {
+              // flushText can throw synchronously when a delayed timer observes
+              // the monotonic deadline. Keep that failure inside the observed job.
+              void Promise.resolve().then(() => flushText(true)).catch(failEvents);
+            }, TEXT_BATCH_MS);
+          }
+        } else if (input.scope === 'chat' && event.type === 'message_end' && event.message.role === 'assistant') {
+          const text = event.message.content.filter(c => c.type === 'text').map(c => c.text).join('');
+          if (unicodeCarry || (streamedTurns.has(currentTurn) && streamedTurns.get(currentTurn) !== text)) {
+            throw new RunError('model_failed', '模型流式回复未完整生成');
+          }
+          if (text && !streamedTurns.has(currentTurn) && !['error', 'aborted'].includes(event.message.stopReason)) {
+            if (streamedTurns.size) throw new RunError('model_failed', '模型流式回复未完整生成');
+            unstreamedChatText = true;
+          }
+          await flushText();
+        } else if (event.type === 'tool_execution_start') {
+          await emit('tool_start', { tool: event.toolName, tool_call_id: event.toolCallId });
+        } else if (event.type === 'tool_execution_end') {
+          // Business effects have their own atomic journal in Rust. Never persist chain-of-thought.
+          await emit('tool_end', { tool: event.toolName, tool_call_id: event.toolCallId, is_error: event.isError });
+        } else if (event.type === 'turn_end' && event.message.role === 'assistant') {
+          const message = event.message;
+          usage.input += message.usage.input; usage.output += message.usage.output;
+          usage.cache_read += message.usage.cacheRead; usage.cache_write += message.usage.cacheWrite;
+          usage.total_tokens += message.usage.totalTokens; usage.model_requests++;
+          await emit('turn', { turn: usage.model_requests, stop_reason: message.stopReason,
+            tokens: message.usage.totalTokens });
+        }
+      } catch (error) {
+        failEvents(error);
+        throw error;
       }
     });
     let polling = false;
@@ -256,8 +404,9 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
     if (limitHit) throw new RunError('step_limit', '已达到本次执行步数上限');
     const last = [...runningAgent.state.messages].reverse().find(m => m.role === 'assistant') as AssistantMessage | undefined;
     if (!last || last.stopReason !== 'stop') throw new RunError('model_failed', '模型调用失败或回复未完整生成');
-    const content = last.content.filter(c => c.type === 'text').map(c => c.text).join('\n').trim();
-    if (!content || content.length > 60000) throw new RunError('invalid_response', '模型未返回有效的最终回复');
+    const content = input.scope === 'chat' && streamedTurns.size ? [...streamedTurns.values()].join('\n\n') :
+      last.content.filter(c => c.type === 'text').map(c => c.text).join('\n').trim();
+    if (!content.trim() || content.length > CHAT_TEXT_LIMIT) throw new RunError('invalid_response', '模型未返回有效的最终回复');
     usage.tool_calls = Math.min(calls, limits.tools);
     const webUsage = web?.usage ?? { web_search_requests: 0, web_fetch_requests: 0 };
     await emit('finished', { model_requests: usage.model_requests, tool_calls: usage.tool_calls, ...webUsage });
@@ -268,6 +417,7 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
     if (stopped) throw stopped;
     throw error;
   } finally {
+    closeEvents();
     clearTimeout(timer); if (poll) clearInterval(poll); signal?.removeEventListener('abort', cancel);
     controller.abort();
     agent?.abort();

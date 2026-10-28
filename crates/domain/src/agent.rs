@@ -11,6 +11,7 @@ use crate::{auth, new_id, now, timestamp, validate_text, DomainError, Message, R
 const RUN_LEASE: i64 = 150;
 const MAX_RESPONSE: usize = 512 * 1024;
 const MAX_ATTEMPT_EVENTS: i64 = 500;
+const MAX_CHAT_ATTEMPT_EVENTS: i64 = 2500;
 const MAX_RETAINED_EVENTS: i64 = 500;
 const MAX_TOOL_RESULT_BYTES: usize = 40000;
 
@@ -183,15 +184,17 @@ impl AgentClient {
         let mut authorization = header::HeaderValue::from_str(&format!("Bearer {}", self.secret))
             .map_err(|_| DomainError::Unauthorized)?;
         authorization.set_sensitive(true);
+        let mut request=json!({"run_id":ticket.id,"run_token":ticket.token,"scope":scope,
+            "messages":messages,"tools":tool_definitions(scope)});
+        if scope=="chat" && repo.agent_operation_slots_enabled(&ticket.id).await? {
+            request["operation_slots"]=json!(true);
+        }
         let output = async {
             let mut response = self
                 .client
                 .post(format!("{}/v1/runs", self.url))
                 .header(header::AUTHORIZATION, authorization)
-                .json(
-                    &json!({"run_id":ticket.id,"run_token":ticket.token,"scope":scope,
-                    "messages":messages,"tools":tool_definitions(scope)}),
-                )
+                .json(&request)
                 .send()
                 .await
                 .map_err(|_| {
@@ -437,10 +440,13 @@ impl Repository {
         kind: &str,
         body: &Value,
     ) -> Result<(), DomainError> {
-        self.agent_authority(run_id, token).await?;
+        let (_, scope) = self.agent_authority(run_id, token).await?;
+        if matches!(kind,"text_start"|"text_delta") && scope!="chat" {
+            return Err(DomainError::Validation("后台执行不能发送聊天文本事件".into()));
+        }
         if sequence < 1
             || sequence == i64::MAX
-            || !["started", "turn", "tool_start", "tool_end", "finished"].contains(&kind)
+            || !["started", "turn", "tool_start", "tool_end", "finished", "text_start", "text_delta"].contains(&kind)
             || body.to_string().len() > 64000
         {
             return Err(DomainError::Validation("执行事件无效".into()));
@@ -482,13 +488,13 @@ impl Repository {
         if sequence != next {
             return Err(DomainError::Conflict("执行事件顺序无效".into()));
         }
-        if count >= MAX_ATTEMPT_EVENTS {
+        if count >= if scope=="chat" {MAX_CHAT_ATTEMPT_EVENTS} else {MAX_ATTEMPT_EVENTS} {
             return Err(DomainError::Validation(
                 "本次执行事件已达上限，请重试".into(),
             ));
         }
         sqlx::query("INSERT INTO agent_events(run_id,sequence,kind,body,created_at)VALUES($1,$2,$3,$4,$5)ON CONFLICT(run_id,sequence)DO NOTHING")
-            .bind(run_id).bind(sequence).bind(kind).bind(body).bind(now()).execute(&mut *tx).await?;
+            .bind(run_id).bind(sequence).bind(kind).bind(&body).bind(now()).execute(&mut *tx).await?;
         sqlx::query("UPDATE agent_event_cursors SET next_sequence=$1,attempt_events=attempt_events+1 WHERE run_id=$2")
             .bind(sequence + 1).bind(run_id).execute(&mut *tx).await?;
         sqlx::query("DELETE FROM agent_events WHERE run_id=$1 AND sequence<=$2")
@@ -496,6 +502,8 @@ impl Repository {
             .bind(sequence - MAX_RETAINED_EVENTS)
             .execute(&mut *tx)
             .await?;
+        crate::chat_stream::agent_event_tx(&mut tx, run_id, sequence, kind, &serde_json::from_str(&body)
+            .map_err(|_| DomainError::Validation("执行事件格式无效".into()))?).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -520,6 +528,12 @@ impl Repository {
         args: Value,
         operation_index: Option<u32>,
     ) -> Result<Value, DomainError> {
+        self.execute_agent_tool_with_slot(run_id,token,name,args,operation_index,None).await
+    }
+
+    pub async fn execute_agent_tool_with_slot(
+        &self,run_id:&str,token:&str,name:&str,args:Value,operation_index:Option<u32>,operation_slot:Option<u32>,
+    ) -> Result<Value,DomainError> {
         let (user_id, scope) = self.agent_authority(run_id, token).await?;
         if !tool_definitions(&scope).iter().any(|t| t.name == name) {
             return Err(DomainError::Forbidden);
@@ -613,6 +627,9 @@ impl Repository {
         if operation_index.is_some_and(|index| index == 0 || index > 40) {
             return Err(DomainError::Validation("工具操作编号无效".into()));
         }
+        if operation_slot.is_some_and(|slot|slot==0 || slot>40) || (operation_slot.is_some() && operation_index.is_none()) {
+            return Err(DomainError::Validation("工具操作顺序编号无效".into()));
+        }
         let operation_key = match operation_index {
             Some(index) => format!("{name}:{index}"),
             None => auth::hash_token(&format!("{name}:{}", args)),
@@ -623,6 +640,27 @@ impl Repository {
             .bind(now()).bind(run_id).bind(&user_id).bind(auth::hash_token(token)).execute(&mut *tx).await?.rows_affected();
         if locked != 1 {
             return Err(DomainError::Forbidden);
+        }
+        let slots_enabled:i64=sqlx::query_scalar("SELECT COUNT(*) FROM chat_streams WHERE agent_run_id=$1 AND slots_enabled=1")
+            .bind(run_id).fetch_one(&mut *tx).await?;
+        if (slots_enabled>0)!=operation_slot.is_some() {
+            return Err(DomainError::Validation("本次执行的写入工具顺序协议无效".into()));
+        }
+        if let Some(slot)=operation_slot {
+            if let Some(row)=sqlx::query("SELECT operation_slot,operation_key FROM agent_operation_slots WHERE run_id=$1 AND (operation_slot=$2 OR operation_key=$3)")
+                .bind(run_id).bind(i64::from(slot)).bind(&operation_key).fetch_optional(&mut *tx).await? {
+                if row.get::<i64,_>("operation_slot")!=i64::from(slot) || row.get::<String,_>("operation_key")!=operation_key {
+                    return Err(DomainError::AgentReplayConflict);
+                }
+            } else {
+                let last:i64=sqlx::query_scalar("SELECT COALESCE(MAX(operation_slot),0) FROM agent_operation_slots WHERE run_id=$1")
+                    .bind(run_id).fetch_one(&mut *tx).await?;
+                // A failed earlier call may leave a hole. Retrying that ordinal
+                // with a new mutation before a later committed effect is unsafe.
+                if i64::from(slot)<last {return Err(DomainError::AgentReplayConflict);}
+                sqlx::query("INSERT INTO agent_operation_slots(run_id,operation_slot,operation_key)VALUES($1,$2,$3)")
+                    .bind(run_id).bind(i64::from(slot)).bind(&operation_key).execute(&mut *tx).await?;
+            }
         }
         if let Some(row) = sqlx::query(
             "SELECT result,arguments FROM agent_operations WHERE run_id=$1 AND operation_key=$2",

@@ -15,6 +15,7 @@ use tomorrow_domain::*;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use utoipa::{OpenApi, ToSchema};
 mod agent_api;
+mod chat_stream;
 mod phone_api;
 pub mod admin;
 mod live;
@@ -173,6 +174,7 @@ pub fn app(state: AppState) -> Router {
         .route("/conversations", get(conversations))
         .route("/conversations/{id}/messages", get(messages))
         .route("/chat", post(chat))
+        .route("/chat/stream", post(chat_stream::chat_stream))
         .route("/capabilities", get(capabilities))
         .route("/notifications", get(notifications))
         .route("/notifications/{id}/read", post(read_notification))
@@ -704,6 +706,10 @@ async fn chat(
     result.map(Json)
 }
 async fn run_chat(state: &AppState, user_id: &str, input: ChatInput, attempt_token: &str) -> Result<ChatResponse> {
+    run_chat_inner(state,user_id,input,attempt_token,None).await
+}
+async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attempt_token: &str,
+    stream: Option<&tomorrow_domain::chat_stream::ChatStreamProducer>) -> Result<ChatResponse> {
     let content = validate_text(&input.message, "消息", 20000)?;
     let fingerprint = serde_json::to_string(&input)
         .map_err(|_| DomainError::Validation("消息格式无效".into()))?;
@@ -719,10 +725,12 @@ async fn run_chat(state: &AppState, user_id: &str, input: ChatInput, attempt_tok
             .await
             .map_err(tomorrow_attachments::AttachmentError::into_domain)?
     };
-    let (mut conversation, mut context) = if let Some(id) = input.conversation_id {
+    let resumed = stream.and_then(|stream|stream.accepted.as_ref());
+    let conversation_id=resumed.and_then(|accepted|accepted["conversation_id"].as_str()).or(input.conversation_id.as_deref());
+    let (mut conversation, mut context) = if let Some(id) = conversation_id {
         (
             state.repository.conversation(user_id, &id).await?,
-            state.repository.messages(user_id, &id).await?,
+            state.repository.messages_page(user_id, &id,0,40,None).await?.0,
         )
     } else {
         (
@@ -774,14 +782,16 @@ async fn run_chat(state: &AppState, user_id: &str, input: ChatInput, attempt_tok
         version: 1,
     });
     let user_message = Message {
-        id: new_id(),
+        id: resumed.and_then(|accepted|accepted.pointer("/user_message/id")).and_then(Value::as_str).map(str::to_owned).unwrap_or_else(new_id),
         conversation_id: conversation.id.clone(),
         role: "user".into(),
         content,
-        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        created_at: resumed.and_then(|accepted|accepted.pointer("/user_message/created_at")).and_then(Value::as_str).map(str::to_owned)
+            .unwrap_or_else(||chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos,true)),
         model_mode: None,
         attachments: message_attachments,
     };
+    context.retain(|message|message.id!=user_message.id);
     context.push(user_message.clone());
     if context.len() > 40 {
         context = context.split_off(context.len() - 40);
@@ -826,6 +836,12 @@ async fn run_chat(state: &AppState, user_id: &str, input: ChatInput, attempt_tok
             },
         );
     }
+    let assistant_id = resumed.and_then(|accepted|accepted["message_id"].as_str()).map(str::to_owned).unwrap_or_else(new_id);
+    let assistant_created_at=resumed.and_then(|accepted|accepted["message_created_at"].as_str()).map(str::to_owned)
+        .unwrap_or_else(||chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos,true));
+    if let Some(stream) = stream {
+        state.repository.accept_chat_stream(stream,user_id,&conversation,&user_message,&assistant_id,&assistant_created_at,ticket.as_ref().map(|t|t.id.as_str())).await?;
+    }
     let reply = if let (Some(agent), Some(ticket)) = (&state.agent, &ticket) {
         ModelReply {
             content: agent
@@ -834,15 +850,21 @@ async fn run_chat(state: &AppState, user_id: &str, input: ChatInput, attempt_tok
             mode: "llm".into(),
             provider: Some("pi".into()),
         }
+    } else if let Some(stream) = stream {
+        state.provider.complete_stream(&context,|delta| {
+            let repository = state.repository.clone();
+            let stream = stream.clone();
+            async move {repository.append_chat_stream_delta(&stream,delta).await}
+        }).await?
     } else {
         state.provider.complete(&context).await?
     };
     let message = Message {
-        id: new_id(),
+        id: assistant_id,
         conversation_id: conversation.id.clone(),
         role: "assistant".into(),
         content: reply.content,
-        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        created_at: if stream.is_some() {assistant_created_at} else {chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos,true)},
         model_mode: Some(reply.mode),
         attachments: Vec::new(),
     };
@@ -1098,6 +1120,7 @@ async fn download_artifact(
         conversations,
         messages,
         chat,
+        chat_stream::chat_stream,
         capabilities,
         notifications,
         read_notification,

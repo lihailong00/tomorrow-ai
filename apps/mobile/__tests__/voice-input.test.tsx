@@ -1,3 +1,4 @@
+import { addChatStreamMock } from '../test/chatStreamMock';
 import React from 'react';
 import { Text, TextInput } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
@@ -61,6 +62,7 @@ async function setup() {
         },
       }),
   };
+  addChatStreamMock(api);
   let navigation!: ReturnType<typeof useRouteStack>;
   function Harness({ client }: { client: typeof api }) {
     navigation = useRouteStack(client);

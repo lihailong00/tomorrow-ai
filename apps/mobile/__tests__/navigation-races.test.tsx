@@ -1,3 +1,4 @@
+import { addChatStreamMock } from '../test/chatStreamMock';
 import React from 'react';
 import { Alert, Text, TextInput } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
@@ -41,6 +42,7 @@ function deferred<T>() {
 }
 
 async function setup(api: object) {
+  if ('chat' in api) addChatStreamMock(api as { chat: jest.Mock });
   let navigation!: ReturnType<typeof useRouteStack>;
   const invalidate = jest.fn();
   function Harness({ client }: { client: object }) {
@@ -448,15 +450,15 @@ test.each([undefined, 'existing'])(
     await act(async () => { void app.labelled('发送消息').props.onPress(); });
     await app.navigate({ name: 'conversations' });
     await app.back();
-    expect(app.value(0)).toBe('Draft to send');
+    expect(app.value(0)).toBe('');
     expect(app.labelled('发送消息').props.disabled).toBe(true);
-    expect(app.text()).toContain('正在整理思路');
+    expect(app.text()).toContain('发送中');
     await act(async () => app.labelled('发送消息').props.onPress());
     expect(api.chat).toHaveBeenCalledTimes(1);
     await act(async () => pending.resolve(chatResult(conversationId ?? 'created')));
     expect(app.value(0)).toBe('');
     expect(app.text()).toContain('New successful reply');
-    expect(app.text()).not.toContain('正在整理思路');
+    expect(app.text()).not.toContain('发送中');
     expect(app.route()).toMatchObject({ name: 'chat', conversationId: conversationId ?? 'created' });
     await app.navigate({ name: 'conversations' });
     await app.back();
@@ -487,7 +489,7 @@ test('a hidden completion updates its retained route without changing another ch
   await app.close();
 });
 
-test('a lost response keeps its draft and request id through history/back before retry', async () => {
+test('a lost response keeps its optimistic row and original request id through history/back before retry', async () => {
   const pending = deferred<any>();
   const api = chatApi({ chat: jest.fn().mockReturnValueOnce(pending.promise)
     .mockResolvedValue(chatResult('created')) });
@@ -499,11 +501,14 @@ test('a lost response keeps its draft and request id through history/back before
   await app.navigate({ name: 'conversations' });
   await act(async () => pending.reject(new Error('Response lost')));
   await app.back();
-  expect(app.value(0)).toBe('Draft to send');
-  expect(app.text()).toContain('Response lost');
-  await act(async () => app.labelled('发送消息').props.onPress());
-  expect(api.chat.mock.calls[1][2]).toBe(firstRequest);
   expect(app.value(0)).toBe('');
+  expect(app.text()).toContain('Draft to send');
+  expect(app.text()).toContain('Response lost');
+  await app.input(0, 'New unsent draft');
+  await app.press('重试');
+  expect(api.chat.mock.calls[1][2]).toBe(firstRequest);
+  expect(api.chat.mock.calls[1][0]).toBe('Draft to send');
+  expect(app.value(0)).toBe('New unsent draft');
   await app.close();
 });
 

@@ -65,6 +65,11 @@ export type Schedule = {
 };
 export type Message = {
   id: string;
+  /** Stable native row identity while an optimistic ID is reconciled. */
+  client_key?: string;
+  delivery?: 'sending' | 'sent' | 'failed';
+  stream_status?: string;
+  stream_error?: string;
   conversation_id: string;
   role: 'user' | 'assistant';
   content: string;
@@ -129,6 +134,13 @@ export type Today = {
   runtime: RuntimeInfo;
 };
 export type CapabilityResponse = { items: Capability[]; runtime: RuntimeInfo };
+export type ChatIntent = {
+  message: string;
+  conversation_id: string | null;
+  client_request_id: string;
+  remember: boolean;
+  upload_ids: readonly string[];
+};
 export type ChatResponse = {
   conversation_id: string;
   message: Message;

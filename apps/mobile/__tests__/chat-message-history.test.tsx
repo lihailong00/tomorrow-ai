@@ -1,13 +1,15 @@
+import { addChatStreamMock } from '../test/chatStreamMock';
 import React from 'react';
-import { ScrollView, Text, TextInput } from 'react-native';
+import { FlatList, Text, TextInput, View } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { AppContextValue, AppProvider } from '../src/app/context';
 import { useRouteStack } from '../src/app/navigation';
 import { ChatScreen, createChatEntryState } from '../src/screens/Chat';
 import { Button, ErrorNotice } from '../src/ui/components';
 import type { Message } from '../src/domain/types';
+import { platform } from '../src/platform/ports';
 
-jest.mock('../src/platform/ports', () => ({ platform: {} }));
+jest.mock('../src/platform/ports', () => ({ platform: { share: jest.fn().mockResolvedValue(undefined) } }));
 jest.mock('../src/ui/visuals', () => ({ AssistantOrb: () => null, Icon: () => null }));
 jest.mock('../src/screens/Main', () => ({ ModeNotice: () => null }));
 beforeAll(() => { (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; });
@@ -31,6 +33,7 @@ async function setup(initial = [message('recent', 100)], options?: {
     capabilities: jest.fn().mockResolvedValue({ items: [], runtime: { model_mode: 'local' } }),
     chat: jest.fn().mockResolvedValue({ conversation_id: 'chat', user_message: message('new turn', 200), message: { ...message('new reply', 201), role: 'assistant' } }),
   };
+  addChatStreamMock(api);
   let navigation!: ReturnType<typeof useRouteStack>;
   let entry!: ReturnType<typeof createChatEntryState>;
   function Harness({ client }: { client: typeof api }) {
@@ -83,20 +86,23 @@ test('loads the oldest sentinel, preserves a new reply and draft, and keeps all 
 
 test('native anchoring skips the fixed header and keeps the same message View through prepend and repeated layouts', async () => {
   const app = await setup();
-  const pane = () => app.tree.root.findAllByType(ScrollView)[0];
-  const children = () => React.Children.toArray(pane().props.children) as React.ReactElement<any>[];
-  expect(pane().props.maintainVisibleContentPosition).toEqual({ minIndexForVisible: 1 });
-  expect(children()[0].props).toMatchObject({ testID: 'chat-history-header', collapsable: false });
-  expect(children()[1].props).toMatchObject({ testID: 'chat-message-recent', collapsable: false });
-  const retainedKey = children()[1].key;
+  const pane = () => app.tree.root.findByType(FlatList);
+  const row = (id: string) => app.tree.root.findAllByType(View).find(node => node.props.testID === `chat-message-${id}`)!;
+  // The inverted list keeps the visual history heading in its native footer.
+  expect(pane().props.maintainVisibleContentPosition).toEqual({ minIndexForVisible: 0 });
+  expect(pane().props.ListFooterComponent.props).toMatchObject({ testID: 'chat-history-header', collapsable: false });
+  expect(row('recent').props).toMatchObject({ testID: 'chat-message-recent', collapsable: false });
+  const retainedRow = row('recent');
+  const retainedKey = pane().props.keyExtractor(pane().props.data[0]);
   await act(async () => pane().props.onContentSizeChange(360, 1000));
+  await act(async () => pane().props.onScrollBeginDrag());
   await act(async () => pane().props.onScroll({ nativeEvent: { contentOffset: { y: 120 } } }));
   await app.older();
   await act(async () => app.late.resolve({ items: [message('earliest sentinel', 1)], next_offset: null }));
-  expect(children()[0].props.testID).toBe('chat-history-header');
-  expect(children()[1].props.testID).toBe('chat-message-earliest sentinel');
-  expect(children()[2].key).toBe(retainedKey);
-  expect(children()[2].props).toMatchObject({ testID: 'chat-message-recent', collapsable: false });
+  expect(pane().props.ListFooterComponent.props.testID).toBe('chat-history-header');
+  expect(pane().props.data.map((item: Message) => item.id)).toEqual(['recent', 'earliest sentinel']);
+  expect(pane().props.keyExtractor(pane().props.data.find((item: Message) => item.id === 'recent'))).toBe(retainedKey);
+  expect(row('recent')).toBe(retainedRow);
   // Layout can settle over several frames. JS must not add a second height-delta
   // correction to the offset that native anchoring reports via onScroll.
   for (const height of [1600, 1840, 1800]) {
@@ -111,17 +117,20 @@ test('native anchoring skips the fixed header and keeps the same message View th
   await app.close();
 });
 
-test('the header keeps native child index zero when an empty conversation receives its first turn', async () => {
+test('the header keeps its stable identity ahead of messages when an empty conversation receives its first turn', async () => {
   const app = await setup([]);
-  const children = () => React.Children.toArray(app.tree.root.findAllByType(ScrollView)[0].props.children) as React.ReactElement<any>[];
-  const headerKey = children()[0].key;
-  expect(children()[0].props.testID).toBe('chat-history-header');
-  expect(children().filter(child => child.props.testID?.startsWith('chat-message-'))).toHaveLength(0);
+  const pane = () => app.tree.root.findByType(FlatList);
+  const header = () => pane().props.inverted
+    ? pane().props.ListFooterComponent : pane().props.ListHeaderComponent.props.children;
+  const headerKey = header().key;
+  expect(header().props.testID).toBe('chat-history-header');
+  expect(pane().props.data).toHaveLength(0);
   await app.input('first turn');
   await app.send();
-  expect(children()[0].key).toBe(headerKey);
-  expect(children()[1].props).toMatchObject({ testID: 'chat-message-new turn', collapsable: false });
-  expect(children()[2].props).toMatchObject({ testID: 'chat-message-new reply', collapsable: false });
+  expect(header().key).toBe(headerKey);
+  expect(pane().props.data.map((item: Message) => item.id)).toEqual(['new reply', 'new turn']);
+  expect(app.tree.root.findAllByType(View).find(node => node.props.testID === `chat-message-${pane().props.data.find((item: Message) => item.id === 'new turn').client_key}`)?.props.collapsable).toBe(false);
+  expect(app.tree.root.findAllByType(View).find(node => node.props.testID === `chat-message-${pane().props.data.find((item: Message) => item.id === 'new reply').client_key}`)?.props.collapsable).toBe(false);
   await app.close();
 });
 
@@ -136,10 +145,79 @@ test('a late older page cannot enter a new account after ownership changes', asy
   await app.close();
 });
 
+test.each(['api', 'entry', 'user', 'server', 'instance'])(
+  'an old reply share callback rejects a changed %s owner while current-owner sharing still works', async changed => {
+    const assistant = { ...message('private reply', 100), role: 'assistant' as const };
+    const api = { messages: jest.fn().mockResolvedValue({ items: [] }),
+      capabilities: jest.fn().mockResolvedValue({ runtime: { model_mode: 'local' } }) };
+    const first = createChatEntryState('chat');
+    first.update(old => ({ ...old, messages: [assistant] }));
+    const context = { api, user: { id: 'first-user' }, preferences: {
+      serverUrl: 'https://first.example', instance: { id: 'first-instance' } },
+      invalidate: jest.fn(), formatDate: () => '' } as unknown as AppContextValue;
+    const render = (value = context, entry = first) => <AppProvider value={value}>
+      <ChatScreen conversationId="chat" entryState={entry} />
+    </AppProvider>;
+    let tree!: ReactTestRenderer;
+    await act(async () => { tree = create(render()); });
+    const share = () => tree.root.findAll(node => node.props.accessibilityLabel === '分享这条回复' &&
+      typeof node.props.onPress === 'function')[0].props.onPress;
+    const oldShare = share();
+    await act(async () => tree.root.findByType(TextInput).props.onChangeText('same-owner draft'));
+    expect(share()).toBe(oldShare);
+    const next = createChatEntryState('chat');
+    next.update(old => ({ ...old, messages: [assistant] }));
+    const replacement = { ...context,
+      ...(changed === 'api' ? { api: { ...api } } : {}),
+      ...(changed === 'user' ? { user: { id: 'next-user' } } : {}),
+      preferences: { ...context.preferences,
+        ...(changed === 'server' ? { serverUrl: 'https://next.example' } : {}),
+        ...(changed === 'instance' ? { instance: { ...context.preferences.instance, id: 'next-instance' } } : {}) },
+    } as AppContextValue;
+    (platform.share as jest.Mock).mockClear();
+    await act(async () => tree.update(render(replacement, changed === 'entry' ? next : first)));
+    await act(async () => oldShare());
+    expect(platform.share).not.toHaveBeenCalled();
+    const currentShare = share();
+    await act(async () => currentShare());
+    expect(platform.share).toHaveBeenCalledTimes(1);
+    expect(platform.share).toHaveBeenCalledWith('private reply');
+    await act(async () => tree.unmount());
+    await act(async () => currentShare());
+    expect(platform.share).toHaveBeenCalledTimes(1);
+  },
+);
+
+test('a send completed while History is open returns to the new turn instead of an earlier reading anchor', async () => {
+  const app = await setup(Array.from({ length: 80 }, (_, index) => message(`loaded-${index}`, index)));
+  const completion = deferred<Awaited<ReturnType<typeof app.api.chat>>>();
+  app.api.chat.mockReturnValueOnce(completion.promise);
+  app.entry().history.viewport.anchor = { id: 'loaded-12', offset: 19 };
+  await app.input('send then read History');
+  let sending!: Promise<void>;
+  await act(async () => {
+    sending = app.tree.root.findAll(node => node.props.accessibilityLabel === '发送消息' &&
+      typeof node.props.onPress === 'function')[0].props.onPress();
+  });
+  await app.history();
+  await act(async () => {
+    completion.resolve({ conversation_id: 'chat', user_message: message('new turn', 200),
+      message: { ...message('new reply', 201), role: 'assistant' } });
+    await sending;
+  });
+  expect(app.entry().history.viewport.anchor).toBeNull();
+  await app.back();
+  expect(app.tree.root.findByType(FlatList).props.initialScrollIndex).toBe(0);
+  expect(app.entry().getSnapshot().messages).toHaveLength(82);
+  expect(app.text()).toContain('new reply');
+  await app.close();
+});
+
 test('leaving while older is pending preserves the reading position and cursor until a visible retry', async () => {
   const app = await setup();
-  const pane = () => app.tree.root.findAllByType(ScrollView)[0];
+  const pane = () => app.tree.root.findByType(FlatList);
   await act(async () => pane().props.onContentSizeChange(360, 1000));
+  await act(async () => pane().props.onScrollBeginDrag());
   await act(async () => pane().props.onScroll({ nativeEvent: { contentOffset: { y: 120 } } }));
   await app.input('retained draft');
   await app.older();

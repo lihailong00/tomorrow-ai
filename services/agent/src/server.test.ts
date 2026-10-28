@@ -195,3 +195,72 @@ test('the configured run deadline cancels real state, journal and tool HTTP call
     await closeServer(provider); await closeServer(backend);
   }
 });
+
+test('the HTTP adapter forwards opt-in global mutation slots and keeps legacy callback indices', { timeout: 25000 }, async () => {
+  const observed: Record<string, unknown>[] = [];
+  const events: Record<string, unknown>[] = [];
+  let fixtureFailure: unknown;
+  const backend = createServer((request, response) => {
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown> : {};
+      if (request.url?.endsWith('/tools')) observed.push(body);
+      if (request.url?.endsWith('/events')) events.push(body);
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify(request.url?.endsWith('/state') ? { next_sequence: 1 } :
+        request.url?.endsWith('/tools') ? { value: { id: 'fixture-only' } } : { ok: true }));
+    })().catch(error => { fixtureFailure = error; response.destroy(); });
+  });
+  const backendPort = await listen(backend);
+  let modelCalls = 0;
+  const provider = createServer((request, response) => {
+    void (async () => {
+      for await (const _chunk of request) { /* Consume the local fixture request. */ }
+      const tools = ++modelCalls % 2 === 1;
+      response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      const common = { id: `slots-${modelCalls}`, object: 'chat.completion.chunk', created: 1, model: 'slot-fixture' };
+      const call = (index: number, name: string, args: unknown) => ({ index, id: `slot-${index}`, type: 'function',
+        function: { name, arguments: JSON.stringify(args) } });
+      const delta = tools ? { role: 'assistant', tool_calls: [call(0, 'list_memories', {}),
+        call(1, 'save_memory', { content: 'one' }), call(2, 'create_task', { content: 'two' }),
+        call(3, 'save_memory', { content: 'three' })] } : { role: 'assistant', content: 'fixture complete' };
+      response.write(`data: ${JSON.stringify({ ...common, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+      response.write(`data: ${JSON.stringify({ ...common, choices: [{ index: 0, delta: {}, finish_reason: tools ? 'tool_calls' : 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\n`);
+      response.end('data: [DONE]\n\n');
+    })().catch(error => { fixtureFailure = error; response.destroy(); });
+  });
+  const providerPort = await listen(provider);
+  const fixture = await start({ RUST_API_URL: `http://127.0.0.1:${backendPort}`,
+    MODEL_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, MODEL_NAME: 'slot-fixture', MODEL_API_KEY: 'local-slots-fixture-only',
+    AGENT_TIMEOUT_MS: '3000', AGENT_MAX_CONCURRENT: '1' });
+  try {
+    const parameters = { type: 'object', properties: { content: { type: 'string' } }, required: ['content'] };
+    const tools = [{ name: 'save_memory', description: 'fixture save', parameters },
+      { name: 'create_task', description: 'fixture task', parameters },
+      { name: 'list_memories', description: 'fixture read', parameters: { type: 'object', properties: {} } }];
+    for (const slots of [true, false]) {
+      observed.length = 0; events.length = 0;
+      const result = await fetch(`${fixture.url}/v1/runs`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${serviceToken}` },
+        body: JSON.stringify({ ...input, operation_slots: slots, tools }), signal: AbortSignal.timeout(8000) });
+      assert.equal(result.status, 200);
+      assert.equal((await result.json() as { content: string }).content, 'fixture complete');
+      assert.equal(fixtureFailure, undefined);
+      assert.deepEqual(observed.map(value => value.operation_index), [1, 1, 1, 2]);
+      assert.deepEqual(observed.map(value => value.operation_slot), slots ? [undefined, 1, 2, 3] :
+        [undefined, undefined, undefined, undefined]);
+      assert.equal(events.some(value => value.kind === 'text_delta'), true);
+      assert.equal(events.at(-1)?.kind, 'finished');
+      assert.ok(events.filter(value => value.kind === 'tool_start').every(value =>
+        !Object.hasOwn(value.body as object, 'arguments')));
+    }
+    for (const forbidden of [serviceToken, input.run_token, 'local-slots-fixture-only']) {
+      assert.equal(fixture.logs().includes(forbidden), false);
+    }
+  } finally {
+    await fixture.stop();
+    await closeServer(provider); await closeServer(backend);
+  }
+});

@@ -107,6 +107,7 @@ struct ToolInput {
     name: String,
     arguments: Value,
     operation_index: Option<u32>,
+    operation_slot: Option<u32>,
 }
 async fn tool(
     State(state): State<Arc<AppState>>,
@@ -177,12 +178,13 @@ async fn tool(
     Ok(Json(
         state
             .repository
-            .execute_agent_tool_at(
+            .execute_agent_tool_with_slot(
                 &id,
                 &token,
                 &input.name,
                 input.arguments,
                 input.operation_index,
+                input.operation_slot,
             )
             .await?,
     ))

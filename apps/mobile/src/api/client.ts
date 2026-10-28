@@ -3,6 +3,7 @@ import type {
   AuthSession,
   CapabilityResponse,
   ChatResponse,
+  ChatIntent,
   Connector,
   ConnectorItem,
   Conversation,
@@ -19,6 +20,7 @@ import type {
 import type { LocalFile } from '../platform/ports';
 import { normalizePhoneNumber } from '../domain/phone';
 import { validatePassword } from '../domain/password';
+import { readChatSse, type SseEvent } from './chatSse';
 
 export type PhoneCodeChallenge = {
   challenge_id: string;
@@ -374,6 +376,47 @@ export class ApiClient {
       remember: false,
       upload_ids,
     });
+  async chatStream(
+    intent: ChatIntent,
+    onEvent: (event: SseEvent) => void,
+    options: { signal: AbortSignal; lastEventId?: number; retry?: boolean },
+  ): Promise<void> {
+    if (this.disposed || !this.baseUrl) {
+      throw new ApiError('connection_required', '请先检查并确认服务器连接。');
+    }
+    if (options.signal.aborted) throw new ApiError('cancelled', '操作已取消。');
+    // The identity probe is anonymous and must finish before constructing an
+    // authenticated native request, on first send and every reattachment.
+    if (this.verifyIdentity) await this.verifyIdentity();
+    if (this.disposed) throw new ApiError('connection_changed', '服务器连接已变化，请重新操作。');
+    if (options.signal.aborted) throw new ApiError('cancelled', '操作已取消。');
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    this.requests.add(controller);
+    options.signal.addEventListener('abort', cancel);
+    if (options.signal.aborted) controller.abort();
+    try {
+      await readChatSse({
+        url: `${this.baseUrl}/v1/chat/stream`,
+        headers: {
+          Accept: 'text/event-stream',
+          'Content-Type': 'application/json',
+          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+          ...(options.lastEventId !== undefined ? { 'Last-Event-ID': String(options.lastEventId) } : {}),
+          ...(options.retry ? { 'X-Chat-Retry': '1' } : {}),
+        },
+        body: JSON.stringify(intent),
+        signal: controller.signal,
+        onEvent: event => {
+          if (!this.disposed && !controller.signal.aborted) onEvent(event);
+        },
+        onUnauthorized: () => { if (!this.disposed && this.token) this.onUnauthorized?.(); },
+      });
+    } finally {
+      options.signal.removeEventListener('abort', cancel);
+      this.requests.delete(controller);
+    }
+  }
   upload = (file: LocalFile, signal?: AbortSignal) => {
     const data = new FormData();
     data.append('file', {

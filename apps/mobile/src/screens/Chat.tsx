@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -28,6 +28,8 @@ import { colors, styles as s } from '../ui/theme';
 import { AssistantOrb, Icon } from '../ui/visuals';
 import { ModeNotice, usePagedList } from './Main';
 import { createMessageHistory, mergeMessageHistory } from './messageHistory';
+import { ChatMessageList } from './ChatMessageList';
+import { createChatStreamController, type ChatProgress, type ChatStreamController } from './chatStreamController';
 
 type Attachment = { file: LocalFile; upload?: Upload; transcript?: string };
 type VoiceInput = { key: string; file: LocalFile; upload?: Upload; text?: string };
@@ -67,12 +69,16 @@ export function createChatEntryState(
   };
   const listeners = new Set<() => void>();
   const history = createMessageHistory();
+  const streams = new Map<string, ChatStreamController>();
+  const disposeStreams = () => { streams.forEach(stream => stream.dispose()); streams.clear(); };
   scope?.onDispose(history.dispose);
+  scope?.onDispose(disposeStreams);
   return {
     scope,
     history,
     voiceRequest: null as VoiceRequest | null,
-    request: { key: '', id: newRequestId() },
+    streams,
+    disposeStreams,
     getSnapshot: () => snapshot,
     subscribe: (listener: () => void) => {
       listeners.add(listener);
@@ -104,7 +110,7 @@ export function ChatScreen({
   navigationActions?: React.ReactNode;
   entryState?: ChatEntryState;
 }) {
-  const { api, invalidate, formatDate } = useApp();
+  const { api, invalidate, formatDate, user, preferences } = useApp();
   const { height: windowHeight, fontScale } = useWindowDimensions();
   const [availableHeight, setAvailableHeight] = useState(windowHeight);
   const localState = useRef<{ api: typeof api; value: ChatEntryState } | null>(null);
@@ -112,12 +118,12 @@ export function ChatScreen({
     localState.current = { api, value: createChatEntryState(conversationId, prompt) };
   }
   const state = entryState ?? localState.current.value;
-  const { id, messages, draft, attachment, voice, voicePhase, voiceError, voiceBusy, sending, sendError } =
+  const { id, messages, messageVersion, draft, attachment, voice, voicePhase, voiceError, voiceBusy, sending } =
     useSyncExternalStore(state.subscribe, state.getSnapshot, state.getSnapshot);
-  const setDraft = (next: React.SetStateAction<string>) => state.update(old => ({
+  const setDraft = useCallback((next: React.SetStateAction<string>) => state.update(old => ({
     ...old,
     draft: typeof next === 'function' ? next(old.draft) : next,
-  }));
+  })), [state]);
   const setAttachment = (next: React.SetStateAction<Attachment | null>) => state.update(old => ({
     ...old,
     attachment: typeof next === 'function' ? next(old.attachment) : next,
@@ -133,9 +139,6 @@ export function ChatScreen({
   voiceOwner.current = { api, state };
   const attachmentAbort = useRef<AbortController | null>(null);
   const recordingRef = useRef(false);
-  const scroll = useRef<ScrollView>(null);
-  const scrollToLatest = useRef(!state.history.getSnapshot().initialized);
-  const restoreViewport = useRef(state.history.getSnapshot().initialized);
   const composerScroll = useRef<ScrollView>(null);
   const composerTop = useRef(0);
   const inputFocused = useRef(false);
@@ -153,19 +156,42 @@ export function ChatScreen({
   const initialConversationId = useRef(id).current;
   const history = useSyncExternalStore(state.history.subscribe,
     state.history.getSnapshot, state.history.getSnapshot);
-  const canApplyHistory = () => state.scope ? state.scope.isRetained() :
-    mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state;
-  const applyHistory = (items: Message[]) => state.update(old => ({
+  const canApplyHistory = useCallback(() => state.scope ? state.scope.isRetained() :
+    mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state, [api, state]);
+  const applyHistory = useCallback((items: Message[]) => state.update(old => ({
     ...old, messages: mergeMessageHistory(items, old.messages),
-  }));
-  const refreshHistory = () => state.history.refresh(api, initialConversationId, applyHistory, canApplyHistory);
-  const loadOlder = () => state.history.older(api, id, items => {
-    scrollToLatest.current = false;
-    applyHistory(items);
-  }, canApplyHistory);
+  })), [state]);
+  const refreshHistory = useCallback(() => state.history.refresh(api, initialConversationId, applyHistory, canApplyHistory),
+    [state, api, initialConversationId, applyHistory, canApplyHistory]);
+  const loadOlder = useCallback(() => state.history.older(api, id, applyHistory, canApplyHistory),
+    [state, api, id, applyHistory, canApplyHistory]);
   const capabilities = useResource(() => api.capabilities(), [api]);
-  const sendAction = useAction();
   const fileAction = useAction();
+  const fileActionRef = useRef(fileAction);
+  fileActionRef.current = fileAction;
+  const shareOwner = useMemo(() => ({ api, state, userId: user?.id,
+    serverUrl: preferences?.serverUrl, instanceId: preferences?.instance?.id }),
+    [api, state, user?.id, preferences?.serverUrl, preferences?.instance?.id]);
+  const currentShareOwner = useRef(shareOwner);
+  currentShareOwner.current = shareOwner;
+  useEffect(() => () => {
+    if (currentShareOwner.current !== shareOwner) state.disposeStreams();
+  }, [shareOwner, state]);
+  const shareMessage = useCallback((content: string) => {
+    // A previously rendered row must keep its original owner's action fence.
+    if (!mounted.current || currentShareOwner.current !== shareOwner ||
+      voiceOwner.current.api !== api || voiceOwner.current.state !== state) return;
+    return fileActionRef.current.run(() => platform.share(content));
+  }, [api, state, shareOwner]);
+  const retryMessage = useCallback((key: string) => {
+    if (!mounted.current || currentShareOwner.current !== shareOwner ||
+      voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
+      state.getSnapshot().sending || (state.scope && !state.scope.isRetained())) return;
+    return state.streams.get(key)?.retry();
+  }, [api, state, shareOwner]);
+  const renderMessage = useCallback(({ item }: { item: Message }) =>
+    <ChatMessage message={item} formatDate={formatDate} share={shareMessage} retry={retryMessage} />,
+    [formatDate, shareMessage, retryMessage]);
   const attachmentReady =
     !attachment ||
     Boolean(
@@ -183,7 +209,7 @@ export function ChatScreen({
       mounted.current = false;
       attachmentAbort.current?.abort();
       // An authorized conversion belongs to the retained route, not this mount.
-      if (!state.scope?.isRetained()) state.voiceRequest?.cancel();
+      if (!state.scope?.isRetained()) { state.voiceRequest?.cancel(); state.disposeStreams(); }
       state.history.dispose();
       if (recordingRef.current) {
         platform.stopRecording().catch(() => {});
@@ -314,78 +340,120 @@ export function ChatScreen({
     // Recording is deliberately bounded; native adapter has its own hard limit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording, seconds]);
-  const send = () =>
-    sendAction.run(async ({ isCurrent }) => {
-      const before = state.getSnapshot();
-      const text = before.draft.trim();
-      const selected = before.attachment;
-      const ready = !selected || Boolean(selected.upload &&
-        (isTextFile(selected.file) || selected.transcript));
-      if (!text || before.sending || recording || fileAction.busy || voice || !ready) {
-        return;
-      }
-      const uploadIds =
-        selected?.upload &&
-        (isTextFile(selected.file) || selected.transcript)
-          ? [selected.upload.id]
-          : [];
-      const key = JSON.stringify({ text, id: before.id, uploadIds });
-      if (state.request.key !== key) {
-        state.request = { key, id: newRequestId() };
-      }
-      const requestId = state.request.id;
-      // A retained entry can complete while its screen is unmounted. Popped,
-      // reset, or previous-owner entries can never publish their result.
-      const canApply = () => state.scope
-        ? state.scope.isRetained()
-        : isCurrent();
-      state.update(old => ({ ...old, sending: true, sendError: null }));
-      try {
-        const result = await api.chat(text, before.id, requestId, uploadIds);
+  const awaitingInitialConversation = () => !state.getSnapshot().id &&
+    Array.from(state.streams.values()).some(stream => stream.intent.conversation_id === null &&
+      stream.getSnapshot().phase === 'failed' && !stream.getSnapshot().conversationId);
+  const send = () => {
+    const before = state.getSnapshot();
+    const text = before.draft.trim();
+    const selected = before.attachment;
+    const ready = !selected || Boolean(selected.upload &&
+      (isTextFile(selected.file) || selected.transcript));
+    if (!mounted.current || currentShareOwner.current !== shareOwner ||
+      voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
+      (state.scope && !state.scope.isRetained()) ||
+      !text || before.sending || awaitingInitialConversation() ||
+      recording || fileAction.busy || voice || !ready) return;
+    const requestId = newRequestId();
+    const userKey = `${requestId}:user`;
+    const assistantKey = `${requestId}:assistant`;
+    const uploadIds = selected?.upload && (isTextFile(selected.file) || selected.transcript)
+      ? [selected.upload.id] : [];
+    const now = Date.now();
+    const userMessage: Message = {
+      id: userKey, client_key: userKey, conversation_id: before.id ?? '', role: 'user',
+      content: text, created_at: new Date(now).toISOString(), delivery: 'sending',
+      attachments: selected?.upload && uploadIds.length ? [{
+        upload_id: selected.upload.id, name: selected.upload.name,
+        mime_type: selected.upload.mime_type, size: selected.upload.size, unavailable: false,
+      }] : [],
+    };
+    const assistantMessage: Message = {
+      id: assistantKey, client_key: assistantKey, conversation_id: before.id ?? '', role: 'assistant',
+      content: '', created_at: new Date(now + 1).toISOString(), stream_status: '发送中…',
+    };
+    const canApply = () => currentShareOwner.current === shareOwner &&
+      (state.scope ? state.scope.isRetained() :
+        mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state);
+    const applyProgress = (progress: ChatProgress) => {
+      if (!canApply()) return;
+      const conversationChanged = Boolean(progress.conversationId &&
+        progress.conversationId !== state.getSnapshot().id);
+      state.update(old => {
+        const next = old.messages.map(message => {
+          if (message.client_key === userKey) {
+            const canonical = progress.userMessage;
+            const error = progress.error && !before.id && !progress.conversationId
+              ? `${progress.error}\n请先重试这条消息，再继续发送新消息。`
+              : progress.error;
+            const delivery = progress.phase === 'failed' ? 'failed' as const :
+              canonical || progress.phase === 'complete' ? 'sent' as const : 'sending' as const;
+            if (message.delivery === delivery && message.stream_error === error &&
+              (!canonical || (message.id === canonical.id && message.content === canonical.content &&
+                message.attachments === canonical.attachments))) return message;
+            return { ...message, ...(canonical ?? {}), client_key: userKey,
+              delivery, stream_error: error,
+              attachments: canonical ? canonical.attachments : message.attachments };
+          }
+          if (message.client_key === assistantKey) {
+            const error = progress.phase === 'failed' ? '回复中断，收到的内容已保留。' : undefined;
+            if (!progress.response && message.content === progress.content &&
+              message.stream_status === progress.status && message.stream_error === error &&
+              (!progress.assistantId || message.id === progress.assistantId) &&
+              (!progress.conversationId || message.conversation_id === progress.conversationId)) return message;
+            return {
+            ...message, ...(progress.response?.message ?? {}),
+            id: progress.assistantId ?? message.id, client_key: assistantKey,
+            conversation_id: progress.conversationId ?? message.conversation_id,
+            content: progress.content, stream_status: progress.status,
+            stream_error: error,
+          };
+          }
+          return message;
+        });
+        const reconciled = next.some((message, index) => message.id !== old.messages[index].id);
+        const localIds = reconciled ? new Set(next.filter(message => message.client_key).map(message => message.id)) : null;
+        const seen = new Set<string>();
+        return { ...old, id: progress.conversationId ?? old.id,
+          // Preserve the submitted turn's order while removing any server row
+          // that a history refresh returned before the accepted event arrived.
+          messages: reconciled ? next.filter(message => {
+            if (!message.client_key && localIds?.has(message.id)) return false;
+            if (seen.has(message.id)) return false;
+            seen.add(message.id);
+            return true;
+          }) : next,
+          sending: progress.phase !== 'complete' && progress.phase !== 'failed',
+          sendError: progress.error ?? null };
+      });
+      if (conversationChanged && progress.conversationId) state.scope?.updateRoute(route => route.name === 'chat'
+        ? { ...route, conversationId: progress.conversationId, prompt: undefined } : route);
+    };
+    const operation: ChatStreamController = createChatStreamController({ api,
+      intent: { message: text, conversation_id: before.id ?? null,
+        client_request_id: requestId, upload_ids: uploadIds, remember: false },
+      isCurrent: () => canApply() && state.streams.get(userKey) === operation,
+      onChange: applyProgress,
+      onComplete: result => {
         if (!canApply()) return;
-        scrollToLatest.current = true;
-        const userMessage: Message = result.user_message ?? {
-          id: requestId,
-          conversation_id: result.conversation_id,
-          role: 'user',
-          content: text,
-          attachments:
-            selected?.upload && uploadIds.length
-              ? [{
-                  upload_id: selected.upload.id,
-                  name: selected.upload.name,
-                  mime_type: selected.upload.mime_type,
-                  size: selected.upload.size,
-                  unavailable: false,
-                }]
-              : [],
-          created_at: new Date().toISOString(),
-        };
-        state.update(old => ({
-          ...old,
-          id: result.conversation_id,
-          messages: mergeMessageHistory(old.messages, [userMessage, result.message]),
-          messageVersion: old.messageVersion + 1,
-          draft: old.draft === before.draft ? '' : old.draft,
-          attachment: old.attachment === before.attachment ? null : old.attachment,
-          sending: false,
-        }));
-        state.scope?.updateRoute(current => current.name === 'chat'
-          ? { ...current, conversationId: result.conversation_id, prompt: undefined }
-          : current);
-        if (isCurrent()) onConversationCreated?.(result.conversation_id);
-        state.request = { key: '', id: newRequestId() };
+        if (mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state)
+          onConversationCreated?.(result.conversation_id);
         invalidate();
-      } catch (failure) {
-        if (canApply()) {
-          state.update(old => ({ ...old, sendError: errorMessage(failure) }));
-        }
-      } finally {
-        if (canApply()) state.update(old => ({ ...old, sending: false }));
-      }
+        state.streams.delete(userKey);
+      },
     });
+    state.streams.set(userKey, operation);
+    // Publish before the first identity probe or HTTP request can yield.
+    state.history.viewport.anchor = null;
+    state.history.viewport.followTail = true;
+    state.update(old => ({ ...old, draft: '', attachment: null, sending: true, sendError: null,
+      messages: [...old.messages, userMessage, assistantMessage],
+      messageVersion: old.messageVersion + 1 }));
+    return operation.start();
+  };
   const sendDisabled =
     !draft.trim() ||
+    awaitingInitialConversation() ||
     sending ||
     recording ||
     Boolean(voice) ||
@@ -406,33 +474,7 @@ export function ChatScreen({
     inputMinHeight,
     Math.min(110, availableHeight * 0.22),
   );
-  return (
-    <View
-      style={[s.fill, chat.chatRoot]}
-      onLayout={event => setAvailableHeight(event.nativeEvent.layout.height)}
-    >
-      <ScrollView
-        ref={scroll}
-        style={chat.messagePane}
-        keyboardShouldPersistTaps="handled"
-        contentContainerStyle={chat.messages}
-        // Child 0 is always the header. Native anchoring follows the same message
-        // View through every layout pass, including text and keyboard reflow.
-        maintainVisibleContentPosition={{ minIndexForVisible: 1 }}
-        onScroll={event => { state.history.viewport.y = event.nativeEvent.contentOffset.y; }}
-        scrollEventThrottle={16}
-        onContentSizeChange={() => {
-          const viewport = state.history.viewport;
-          if (messages.length > 0 && restoreViewport.current) {
-            scroll.current?.scrollTo({ y: viewport.y, animated: false });
-            restoreViewport.current = false;
-          } else if (messages.length > 0 && scrollToLatest.current) {
-            scroll.current?.scrollToEnd({ animated: true });
-            scrollToLatest.current = false;
-          }
-        }}
-      >
-        <View key="history-header" testID="chat-history-header" collapsable={false}>
+  const messageHeader = useMemo(() => (<View key="history-header" testID="chat-history-header" collapsable={false}>
         <ErrorNotice message={history.error} retry={refreshHistory} />
         {history.nextOffset !== null && <Button variant="ghost" disabled={history.loading}
           onPress={loadOlder}>{history.loading ? '正在加载…' : '加载更早消息'}</Button>}
@@ -476,63 +518,19 @@ export function ChatScreen({
             <ModeNotice runtime={capabilities.value.runtime} />
           </View>
         )}
-        </View>
-        {messages.map(message =>
-          message.role === 'user' ? (
-            <View key={message.id} testID={`chat-message-${message.id}`} collapsable={false} style={chat.userBubble}>
-              <Text selectable style={[s.body, { color: colors.ink }]}>
-                {message.content}
-              </Text>
-              {(message.attachments ?? []).map(file => (
-                <Text key={file.upload_id} selectable style={s.small}>
-                  附件：{file.name}
-                  {file.unavailable ? '（已删除或不可用）' : ''}
-                </Text>
-              ))}
-            </View>
-          ) : (
-            <View key={message.id} testID={`chat-message-${message.id}`} collapsable={false} style={chat.assistantMessage}>
-              <View style={chat.messageIdentity}>
-                <AssistantOrb size={22} />
-                <Text style={chat.assistantName}>妥啦</Text>
-                {message.model_mode === 'local' && (
-                  <Pill tone="neutral">本地生成</Pill>
-                )}
-              </View>
-              <View style={chat.answer}>
-                <ResultText content={message.content} />
-                <View style={chat.answerFooter}>
-                  <Text style={chat.timestamp}>
-                    {formatDate(message.created_at)}
-                  </Text>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="分享这条回复"
-                    style={chat.shareButton}
-                    onPress={() =>
-                      fileAction.run(() => platform.share(message.content))
-                    }
-                  >
-                    <Text style={chat.shareText}>分享</Text>
-                    <Icon
-                      name="arrowRight"
-                      size={14}
-                      color={colors.secondary}
-                    />
-                  </Pressable>
-                </View>
-              </View>
-            </View>
-          ),
-        )}
-        {sending && (
-          <View style={chat.thinking}>
-            <ActivityIndicator color={colors.accent} size="small" />
-            <Text style={s.small}>正在整理思路…</Text>
-          </View>
-        )}
-        <ErrorNotice message={sendError} />
-      </ScrollView>
+        </View>),
+    [history.error, history.nextOffset, history.loading, refreshHistory, loadOlder,
+      capabilities.error, capabilities.refresh, capabilities.value, messages.length, conversationId, setDraft]);
+  const messageFooter = useMemo(() => <View style={chat.messageFooter} />, []);
+  return (
+    <View
+      style={[s.fill, chat.chatRoot]}
+      onLayout={event => setAvailableHeight(event.nativeEvent.layout.height)}
+    >
+      <ChatMessageList messages={messages} viewport={state.history.viewport}
+        latestVersion={messageVersion} renderItem={renderMessage}
+        header={messageHeader} footer={messageFooter}
+        style={chat.messagePane} contentContainerStyle={chat.messages} />
       <ScrollView
         ref={composerScroll}
         testID="chat-composer-scroll"
@@ -772,7 +770,7 @@ export function ChatScreen({
             onBlur={() => {
               inputFocused.current = false;
             }}
-            editable={!sending}
+            editable
             style={[
               chat.input,
               { minHeight: inputMinHeight, maxHeight: inputMaxHeight },
@@ -863,6 +861,73 @@ export function ChatScreen({
   );
 }
 
+const ChatMessage = memo(function ChatMessage({
+  message,
+  formatDate,
+  share,
+  retry,
+}: {
+  message: Message;
+  formatDate: (value: string) => string;
+  share: (content: string) => unknown;
+  retry: (key: string) => unknown;
+}) {
+  return message.role === 'user' ? (
+    <View
+      testID={`chat-message-${message.client_key ?? message.id}`}
+      collapsable={false}
+      style={chat.userBubble}
+    >
+      <Text selectable style={[s.body, { color: colors.ink }]}>
+        {message.content}
+      </Text>
+      {message.delivery === 'sending' && <Text style={s.small}>发送中…</Text>}
+      {message.delivery === 'failed' && <View>
+        <Text style={s.small}>{message.stream_error ?? '发送未完成，已保留这条消息。'}</Text>
+        <Button variant="ghost" onPress={() => retry(message.client_key ?? message.id)}>重试</Button>
+      </View>}
+      {(message.attachments ?? []).map(file => (
+        <Text key={file.upload_id} selectable style={s.small}>
+          附件：{file.name}
+          {file.unavailable ? '（已删除或不可用）' : ''}
+        </Text>
+      ))}
+    </View>
+  ) : (
+    <View
+      testID={`chat-message-${message.client_key ?? message.id}`}
+      collapsable={false}
+      style={chat.assistantMessage}
+    >
+      <View style={chat.messageIdentity}>
+        <AssistantOrb size={22} />
+        <Text style={chat.assistantName}>妥啦</Text>
+        {message.model_mode === 'local' && <Pill tone="neutral">本地生成</Pill>}
+      </View>
+      <View style={chat.answer}>
+        {message.content ? <ResultText content={message.content} /> : null}
+        {message.stream_status ? <View style={chat.thinking}>
+          <ActivityIndicator color={colors.accent} size="small" />
+          <Text style={s.small}>{message.stream_status}</Text>
+        </View> : null}
+        {message.stream_error && <Text style={s.small}>{message.stream_error}</Text>}
+        {!!message.content && <View style={chat.answerFooter}>
+          <Text style={chat.timestamp}>{formatDate(message.created_at)}</Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="分享这条回复"
+            style={chat.shareButton}
+            onPress={() => share(message.content)}
+          >
+            <Text style={chat.shareText}>分享</Text>
+            <Icon name="arrowRight" size={14} color={colors.secondary} />
+          </Pressable>
+        </View>}
+      </View>
+    </View>
+  );
+});
+
 export function ConversationsScreen() {
   const { api, navigate, formatDate } = useApp();
   const data = usePagedList(offset => api.conversations({ offset, limit: 50 }), [api]);
@@ -933,7 +998,8 @@ export function ConversationsScreen() {
 const chat = StyleSheet.create({
   chatRoot: { minHeight: 0 },
   messagePane: { flex: 1, minHeight: 0 },
-  messages: { paddingHorizontal: 24, paddingBottom: 24, flexGrow: 1 },
+  messages: { paddingHorizontal: 24, flexGrow: 1 },
+  messageFooter: { paddingBottom: 24 },
   welcome: { alignItems: 'center', paddingTop: 27, paddingBottom: 12 },
   welcomeOrb: { marginBottom: 19 },
   welcomeTitle: {

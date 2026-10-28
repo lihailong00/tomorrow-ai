@@ -13,6 +13,8 @@ const SYSTEM_INSTRUCTION: &str = "你是妥啦手机助手。请用清晰、简�
 
 #[cfg(test)]
 mod probe_tests;
+#[cfg(test)]
+mod stream_tests;
 
 // Deliberately no Debug implementation: provider credentials must not enter logs.
 #[derive(Clone)]
@@ -352,6 +354,116 @@ impl LlmProvider {
         })
     }
 
+    /// Forward only visible upstream content as it arrives. Awaiting the callback
+    /// lets the caller durably checkpoint each delta before consuming more data.
+    /// Local demonstrations have no upstream deltas and return their reply once.
+    pub async fn complete_stream<F, Fut>(
+        &self,
+        messages: &[Message],
+        mut on_delta: F,
+    ) -> Result<ModelReply, DomainError>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = Result<(), DomainError>>,
+    {
+        if messages.is_empty() {
+            return Err(DomainError::Validation("消息不能为空".into()));
+        }
+        if !self.remote_intent {
+            return Ok(local_reply(messages));
+        }
+        let api_key = self.api_key.as_deref().ok_or_else(|| {
+            DomainError::External(format!("模型服务缺少 {} 配置", self.kind.key_variable()))
+        })?;
+        let model = self.model.as_deref().ok_or_else(|| {
+            DomainError::External(format!("模型服务缺少 {} 配置", self.kind.model_variable()))
+        })?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| DomainError::Internal("无法初始化模型服务连接".into()))?;
+        let endpoint = completion_endpoint(&self.base_url)?;
+        let mut authorization = header::HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .map_err(|_| DomainError::External("模型服务凭证配置无效".into()))?;
+        authorization.set_sensitive(true);
+        let mut provider_messages = vec![ProviderMessage {
+            role: "system",
+            content: SYSTEM_INSTRUCTION,
+        }];
+        for message in messages {
+            if !matches!(message.role.as_str(), "user" | "assistant" | "system") {
+                return Err(DomainError::Validation("消息角色无效".into()));
+            }
+            provider_messages.push(ProviderMessage {
+                role: &message.role,
+                content: &message.content,
+            });
+        }
+        // No generation retries: a disconnect must not start a second model run.
+        let mut response = client
+            .post(endpoint)
+            .header(header::AUTHORIZATION, authorization)
+            .json(&CompletionRequest {
+                model,
+                messages: provider_messages,
+                stream: true,
+            })
+            .send()
+            .await
+            .map_err(model_transport_error)?;
+        if !response.status().is_success() {
+            return Err(DomainError::External(format!(
+                "模型服务返回错误（HTTP {}）",
+                response.status().as_u16()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > RESPONSE_LIMIT_BYTES as u64)
+        {
+            return Err(DomainError::External("模型回复超过大小限制".into()));
+        }
+        let mut decoder = CompletionStreamDecoder::default();
+        let mut total_bytes = 0usize;
+        let mut content = String::new();
+        let mut content_chars = 0usize;
+        let mut finished = false;
+        'response: while let Some(chunk) = response.chunk().await.map_err(model_transport_error)? {
+            total_bytes = total_bytes.saturating_add(chunk.len());
+            if total_bytes > RESPONSE_LIMIT_BYTES {
+                return Err(DomainError::External("模型回复超过大小限制".into()));
+            }
+            for event in decoder.push(&chunk)? {
+                let update = completion_stream_update(&event)?;
+                if let Some(delta) = update.delta.filter(|value| !value.is_empty()) {
+                    content_chars = content_chars.saturating_add(delta.chars().count());
+                    if content_chars > 60000 {
+                        return Err(DomainError::External("模型回复超过大小限制".into()));
+                    }
+                    content.push_str(&delta);
+                    on_delta(delta).await?;
+                }
+                if update.finished {
+                    finished = true;
+                    break 'response;
+                }
+            }
+        }
+        if !finished {
+            return Err(DomainError::External(
+                "模型回复连接中断；已收到的内容已保留".into(),
+            ));
+        }
+        if content.trim().is_empty() {
+            return Err(DomainError::External("模型服务未返回可显示的文本".into()));
+        }
+        Ok(ModelReply {
+            content,
+            mode: "llm".into(),
+            provider: Some(self.kind.name().into()),
+        })
+    }
+
     pub fn from_settings(base_url: String, api_key: Option<String>, model: Option<String>) -> Self {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -368,6 +480,83 @@ impl LlmProvider {
             kind: ProviderKind::Compatible,
         }
     }
+}
+
+/// Parse SSE at byte boundaries, never decoding an incomplete UTF-8 chunk.
+/// Keeping only one unfinished event also bounds providers that omit newlines.
+#[derive(Default)]
+struct CompletionStreamDecoder {
+    pending: Vec<u8>,
+    data: String,
+}
+
+impl CompletionStreamDecoder {
+    fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, DomainError> {
+        const MAX_EVENT_BYTES: usize = 128 * 1024;
+        self.pending.extend_from_slice(bytes);
+        let mut events = Vec::new();
+        let mut consumed = 0;
+        while let Some(offset) = self.pending[consumed..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+        {
+            let end = consumed + offset;
+            let line = self.pending[consumed..end]
+                .strip_suffix(b"\r")
+                .unwrap_or(&self.pending[consumed..end]);
+            let line = std::str::from_utf8(line)
+                .map_err(|_| DomainError::External("模型服务返回了无效的回复格式".into()))?;
+            if line.is_empty() {
+                if !self.data.is_empty() {
+                    events.push(std::mem::take(&mut self.data));
+                }
+            } else if let Some(data) = line.strip_prefix("data:") {
+                let data = data.strip_prefix(' ').unwrap_or(data);
+                if !self.data.is_empty() {
+                    self.data.push('\n');
+                }
+                self.data.push_str(data);
+                if self.data.len() > MAX_EVENT_BYTES {
+                    return Err(DomainError::External("模型流事件超过大小限制".into()));
+                }
+            }
+            consumed = end + 1;
+        }
+        self.pending.drain(..consumed);
+        if self.pending.len().saturating_add(self.data.len()) > MAX_EVENT_BYTES {
+            return Err(DomainError::External("模型流事件超过大小限制".into()));
+        }
+        Ok(events)
+    }
+}
+
+struct CompletionStreamUpdate {
+    delta: Option<String>,
+    finished: bool,
+}
+
+fn completion_stream_update(data: &str) -> Result<CompletionStreamUpdate, DomainError> {
+    if data.trim() == "[DONE]" {
+        return Ok(CompletionStreamUpdate {
+            delta: None,
+            finished: true,
+        });
+    }
+    let value: serde_json::Value = serde_json::from_str(data)
+        .map_err(|_| DomainError::External("模型服务返回了无效的回复格式".into()))?;
+    if value.get("error").is_some() || !value.get("choices").is_some_and(|v| v.is_array()) {
+        return Err(DomainError::External("模型服务返回了无效的回复格式".into()));
+    }
+    let choice = value.pointer("/choices/0");
+    let delta = choice
+        .and_then(|v| v.pointer("/delta/content"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let finished = choice
+        .and_then(|v| v.get("finish_reason"))
+        .is_some_and(|v| !v.is_null());
+    // reasoning_content, tool arguments, and every other field remain private.
+    Ok(CompletionStreamUpdate { delta, finished })
 }
 
 #[derive(Serialize)]

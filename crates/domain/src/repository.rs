@@ -819,7 +819,7 @@ impl Repository {
         let key = chat_request_key(user_id, request_id)?;
         let fingerprint = auth::hash_token(input_fingerprint);
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("DELETE FROM chat_requests WHERE request_key=$1 AND user_id=$2 AND response IS NULL AND created_at<$3").bind(&key).bind(user_id).bind(now()-300).execute(&mut *transaction).await?;
+        sqlx::query("DELETE FROM chat_requests WHERE request_key=$1 AND user_id=$2 AND response IS NULL AND created_at<$3 AND NOT EXISTS(SELECT 1 FROM chat_streams s WHERE s.request_key=chat_requests.request_key)").bind(&key).bind(user_id).bind(now()-300).execute(&mut *transaction).await?;
         let inserted=sqlx::query("INSERT INTO chat_requests(request_key,user_id,created_at)VALUES($1,$2,$3)ON CONFLICT(request_key)DO NOTHING").bind(&key).bind(user_id).bind(now()).execute(&mut *transaction).await?.rows_affected();
         if inserted > 0 {
             sqlx::query("INSERT INTO chat_request_inputs(request_key,user_id,fingerprint)VALUES($1,$2,$3)")
@@ -897,7 +897,7 @@ impl Repository {
                 }
             }
         }
-        if let Some(key) = request_key {
+        if let Some(key) = &request_key {
             let changed=sqlx::query("UPDATE chat_requests SET response=$1 WHERE request_key=$2 AND user_id=$3 AND response IS NULL AND EXISTS(SELECT 1 FROM chat_request_inputs i WHERE i.request_key=$2 AND i.user_id=$3 AND i.fingerprint=$4) AND (EXISTS(SELECT 1 FROM chat_request_attempts a WHERE a.request_key=$2 AND a.user_id=$3 AND a.attempt_token=$5) OR ($5='' AND NOT EXISTS(SELECT 1 FROM chat_request_attempts a WHERE a.request_key=$2)))")
                 .bind(turn.response.to_string()).bind(key).bind(user_id).bind(auth::hash_token(input_fingerprint)).bind(attempt_token).execute(&mut *transaction).await?.rows_affected();
             if changed != 1 {
@@ -934,6 +934,9 @@ impl Repository {
             if changed != 1 {
                 return Err(DomainError::Forbidden);
             }
+        }
+        if let Some(key) = &request_key {
+            crate::chat_stream::finish_tx(&mut transaction,user_id,key,attempt_token,&turn.response).await?;
         }
         transaction.commit().await?;
         Ok(())
@@ -1096,6 +1099,8 @@ impl Repository {
         ))
         .execute(&pool)
         .await?;
+        sqlx::raw_sql(include_str!("../../../migrations/sqlite/012_chat_streams.sql"))
+            .execute(&pool).await?;
         // Authentication checks this table even in non-admin processes such as
         // attachment and connector services; it must exist before any login.
         sqlx::query("CREATE TABLE IF NOT EXISTS admin_user_controls(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,disabled BIGINT NOT NULL DEFAULT 0,updated_at BIGINT NOT NULL)")
@@ -1338,7 +1343,7 @@ async fn reserve_creation(
     }
     Ok((row.get("resource_id"), false))
 }
-fn chat_request_key(user_id: &str, request_id: &str) -> Result<String, DomainError> {
+pub(crate) fn chat_request_key(user_id: &str, request_id: &str) -> Result<String, DomainError> {
     Ok(format!("{user_id}:{}", validate_text(request_id, "请求编号", 120)?))
 }
 

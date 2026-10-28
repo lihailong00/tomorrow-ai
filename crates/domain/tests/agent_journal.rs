@@ -130,7 +130,7 @@ async fn postgres_retries_keep_bounded_history_and_recover_after_500_lifetime_ev
 }
 
 #[tokio::test]
-async fn attempt_limit_sequence_guards_and_legacy_500_event_recovery() {
+async fn chat_attempt_limit_sequence_guards_and_pruned_history_recovery() {
     let repo = Repository::connect("sqlite::memory:").await.unwrap();
     let user = repo
         .create_user(
@@ -182,15 +182,15 @@ async fn attempt_limit_sequence_guards_and_legacy_500_event_recovery() {
             .await,
         Err(DomainError::Conflict(_))
     ));
-    assert!(matches!(
-        repo.record_agent_event(&first.id, &first.token, 501, "turn", &json!({}))
-            .await,
-        Err(DomainError::Validation(_))
-    ));
+    // Real chat text updates have a larger attempt budget; retention stays 500.
+    for sequence in 501..=2500 {
+        repo.record_agent_event(&first.id,&first.token,sequence,"turn",&json!({})).await.unwrap();
+    }
+    assert!(matches!(repo.record_agent_event(&first.id,&first.token,2501,"turn",&json!({})).await,Err(DomainError::Validation(_))));
     repo.finish_agent_run(&first, None, Some("failure"))
         .await
         .unwrap();
-    // Simulate an upgraded legacy run whose 500 rows predate the durable cursor.
+    // Recover a cursor from its retained tail without reusing pruned sequences.
     sqlx::query("DELETE FROM agent_event_cursors WHERE run_id=$1")
         .bind(&first.id)
         .execute(&repo.pool())
@@ -201,7 +201,7 @@ async fn attempt_limit_sequence_guards_and_legacy_500_event_recovery() {
         .await
         .unwrap();
     assert_eq!(retry.id, first.id);
-    assert_eq!(repo.next_agent_sequence(&retry.id).await.unwrap(), 501);
+    assert_eq!(repo.next_agent_sequence(&retry.id).await.unwrap(), 2501);
     assert!(matches!(
         repo.record_agent_event(
             &retry.id,
@@ -213,7 +213,7 @@ async fn attempt_limit_sequence_guards_and_legacy_500_event_recovery() {
         .await,
         Err(DomainError::Conflict(_))
     ));
-    repo.record_agent_event(&retry.id, &retry.token, 501, "started", &json!({}))
+    repo.record_agent_event(&retry.id, &retry.token, 2501, "started", &json!({}))
         .await
         .unwrap();
     assert!(
@@ -223,6 +223,6 @@ async fn attempt_limit_sequence_guards_and_legacy_500_event_recovery() {
     );
     let trace = repo.agent_run(&user.id, &retry.id).await.unwrap();
     assert_eq!(trace.events.len(), 500);
-    assert_eq!(trace.events[0]["sequence"], 2);
-    assert_eq!(trace.events.last().unwrap()["sequence"], 501);
+    assert_eq!(trace.events[0]["sequence"], 2002);
+    assert_eq!(trace.events.last().unwrap()["sequence"], 2501);
 }
