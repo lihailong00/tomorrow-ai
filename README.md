@@ -144,15 +144,43 @@ cargo check -p tomorrow-worker --features temporal --locked
 
 所有交付 APK 统一保存在 `artifacts/apk/`，不再放在 `artifacts/` 根目录或散落到其他项目目录。每次使用 `./scripts/Build-Android.ps1` 构建时，保留 `tada-v<版本号>-<北京时间 yyyyMMdd-HHmmss-fff>.apk`，同时更新固定入口 `tada-latest.apk`。旧入口 `tomorrow-ai-latest.apk` 同步指向同一最新版，兼容已有下载路径。版本号读取 `apps/mobile/package.json`。
 
-清理历史安装包、仅保留最新版时，在项目根目录执行：
+先停止所有并发构建和发布，再在项目根目录清理历史版本。以下命令保留两个固定入口、`latest.json` 及其中 `source_filename` 指向的当前来源 APK；元数据缺失、无法解析、来源文件名非法或保留文件不存在时立即停止，不猜测替代来源：
 
 ```powershell
-Get-ChildItem -LiteralPath ./artifacts/apk -File -Filter '*.apk' |
-  Where-Object Name -ne 'tada-latest.apk' |
-  Remove-Item -Force
+& {
+  $ErrorActionPreference = 'Stop'
+  $apkDir = Get-Item -LiteralPath ./artifacts/apk -Force
+  $metaFile = Get-Item -LiteralPath (Join-Path $apkDir.FullName 'latest.json') -Force
+  if (-not $apkDir.PSIsContainer -or $metaFile.PSIsContainer -or
+      ($apkDir.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+      ($metaFile.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw '发布目录或元数据不是普通目录/文件。' }
+  $raw = Get-Content -LiteralPath $metaFile.FullName -Raw -Encoding UTF8
+  if (-not $raw.TrimStart().StartsWith('{')) { throw 'latest.json 必须是 JSON 对象。' }
+  $meta = $raw | ConvertFrom-Json -ErrorAction Stop
+  $source = $meta.source_filename
+  if ($meta -isnot [pscustomobject] -or $source -isnot [string] -or
+      [string]::IsNullOrWhiteSpace($source) -or $source -cne $source.Trim() -or
+      $source -ne [IO.Path]::GetFileName($source) -or
+      $source.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
+      [IO.Path]::GetExtension($source) -ine '.apk' -or
+      $source -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw 'source_filename 必须是本目录内的合法 APK 文件名。' }
+  $keep = @('tada-latest.apk', 'tomorrow-ai-latest.apk', $source)
+  foreach ($name in $keep) {
+    $file = Get-Item -LiteralPath (Join-Path $apkDir.FullName $name) -Force
+    if ($file.PSIsContainer -or $file.DirectoryName -ne $apkDir.FullName -or
+        ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw '保留文件必须是发布目录的直接子文件。' }
+  }
+  $old = @(Get-ChildItem -LiteralPath $apkDir.FullName -File -Filter 'tada-v*.apk' -Force |
+    Where-Object Name -notin $keep)
+  foreach ($file in $old) {
+    if ($file.DirectoryName -ne $apkDir.FullName -or
+        ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw '历史 APK 路径异常，已停止清理。' }
+  }
+  foreach ($file in $old) { Remove-Item -LiteralPath $file.FullName -Force }
+}
 ```
 
-该目录只存安装包，可以整体清理；下次构建会重新创建，不影响 `data/` 中的账号和业务资料。Gradle 自己的 `apps/mobile/android/app/build/outputs/apk/` 是构建内部输出，交付与查找安装包以 `artifacts/apk/` 为准。
+该目录还包含发布元数据和锁文件；上述命令只删除本目录单层的历史 `tada-v*.apk`，保留其他内容，不整体清空目录。Gradle 自己的 `apps/mobile/android/app/build/outputs/apk/` 是构建内部输出，交付与查找安装包以 `artifacts/apk/` 为准。
 
 `Test-Pi.ps1` 需要默认 Pi 模式服务在线，会进行真实付费模型调用，使用独立账号，逐项核验工具事件与实际资源。报告为 `artifacts/pi-live-verification.json`，包含虚构测试题、真实回答、Token 用量和脱敏执行记录，不包含会话令牌或模型密钥。测试结束删除测试计划和附件并注销测试会话。
 
