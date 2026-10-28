@@ -357,9 +357,9 @@ export class ApiClient {
     );
   conversations = (page?: { offset?: number; limit?: number }) =>
     this.request<{ items: Conversation[]; next_offset?: number | null }>(`/conversations${listQuery(page)}`);
-  messages = (id: string) =>
-    this.request<{ items: Message[] }>(
-      `/conversations/${encodeURIComponent(id)}/messages`,
+  messages = (id: string, page?: { offset?: number; limit?: number; before?: string }) =>
+    this.request<{ items: Message[]; next_offset?: number | null; next_before?: string | null }>(
+      `/conversations/${encodeURIComponent(id)}/messages${listQuery(page)}`,
     );
   chat = (
     message: string,

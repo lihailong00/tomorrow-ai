@@ -111,8 +111,8 @@ android {
         applicationId "com.tomorrowai"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 13
-        versionName "0.1.12"
+        versionCode 14
+        versionName "0.1.13"
         buildConfigField "boolean", "OFFLINE_BUNDLE", offlineBundle.toString()
     }
     signingConfigs {

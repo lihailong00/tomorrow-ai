@@ -3,6 +3,7 @@ import { Alert, Text, TextInput } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { AppContextValue, AppProvider, useAction } from '../src/app/context';
 import { useRouteStack } from '../src/app/navigation';
+import type { RetainedRouteScope } from '../src/app/navigation';
 import {
   MemoryEditor,
   NewTaskScreen,
@@ -301,7 +302,7 @@ test('an old action cannot clear the loading state or error of a new owner reque
   await act(async () => tree.unmount());
 });
 
-test('a created chat keeps its route identity and reloads the same conversation after history then back', async () => {
+test('a created chat keeps its route identity and loaded messages after history then back', async () => {
   const reply = {
     id: 'reply',
     conversation_id: 'created',
@@ -347,7 +348,7 @@ test('a created chat keeps its route identity and reloads the same conversation 
   expect(app.value(0)).toBe('');
   await app.navigate({ name: 'conversations' });
   await app.back();
-  expect(api.messages).toHaveBeenCalledWith('created');
+  expect(api.messages).not.toHaveBeenCalled();
   expect(
     app.tree.root
       .findAllByType(Text)
@@ -566,4 +567,38 @@ test('leaving a chat stops recording and a late picker cannot change its retaine
   await act(async () => picked.resolve({ uri: 'late', name: 'late.txt', mime_type: 'text/plain' }));
   expect(app.text()).not.toContain('late.txt');
   await app.close();
+});
+
+test('retained route disposal survives StrictMode replay and fires once on removal or owner change', async () => {
+  const disposed = jest.fn();
+  let navigation!: ReturnType<typeof useRouteStack>;
+  let scope!: RetainedRouteScope;
+  function Harness({ owner }: { owner: object }) {
+    navigation = useRouteStack(owner);
+    scope = navigation.getEntryState(lifetime => {
+      lifetime.onDispose(disposed);
+      return lifetime;
+    });
+    return <Text>{navigation.entry.route.name}</Text>;
+  }
+  const owner = {};
+  let tree!: ReactTestRenderer;
+  await act(async () => { tree = create(<React.StrictMode><Harness owner={owner} /></React.StrictMode>); });
+  const original = scope;
+  expect(original.isRetained()).toBe(true);
+  expect(disposed).not.toHaveBeenCalled();
+  await act(async () => navigation.navigate({ name: 'conversations' }));
+  const pushed = scope;
+  expect(original.isRetained()).toBe(true);
+  await act(async () => navigation.back());
+  expect(pushed.isRetained()).toBe(false);
+  expect(original.isRetained()).toBe(true);
+  expect(disposed).toHaveBeenCalledTimes(1);
+  await act(async () => tree.update(<React.StrictMode><Harness owner={{}} /></React.StrictMode>));
+  expect(original.isRetained()).toBe(false);
+  expect(scope.isRetained()).toBe(true);
+  expect(disposed).toHaveBeenCalledTimes(2);
+  await act(async () => tree.unmount());
+  expect(scope.isRetained()).toBe(false);
+  expect(disposed).toHaveBeenCalledTimes(3);
 });
