@@ -322,9 +322,10 @@ function MessageWindow({
       ? { id, offset: y - frame.y }
       : null;
   }, []);
-  const passiveRetainedAnchor = useCallback((y: number, contentHeight: number): MessageAnchor | null => {
+  const passiveRetainedAnchor = useCallback((y: number, contentHeight: number | undefined): MessageAnchor | null => {
     const settled = settledRestoration.current;
-    if (!settled || target.current || interacting.current ||
+    if (typeof contentHeight !== 'number' || !Number.isFinite(contentHeight) ||
+      !settled || target.current || interacting.current ||
       Math.abs(y - settled.y) > 2 ||
       Math.abs(contentHeight - metrics.current.contentHeight) > 1 ||
       Math.abs(metrics.current.contentHeight - settled.contentHeight) > 1 ||
@@ -856,7 +857,7 @@ function MessageWindow({
           // mixed neighboring frames may still sort ahead of the restored row.
           // A different native offset (including AX without begin-drag) remains
           // authoritative immediately, even while ownership cleanup is deferred.
-          const retained = passiveRetainedAnchor(y, event.nativeEvent.contentSize.height);
+          const retained = passiveRetainedAnchor(y, event.nativeEvent.contentSize?.height);
           viewport.anchor = retained ??
             messageAnchorAt(
               y,

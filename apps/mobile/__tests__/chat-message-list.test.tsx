@@ -378,6 +378,30 @@ test.each([false, true])('History detach retains confirmed partial reading inten
   expect(app.rows().map(row => row.props.testID)).toContain(`row-${expected.id}`);
 });
 
+test.each([
+  ['omitted content size', undefined],
+  ['null content size', null],
+  ['missing height', { width: 360 }],
+  ['NaN height', { width: 360, height: NaN }],
+  ['infinite height', { width: 360, height: Infinity }],
+])('%s cannot establish coherent passive geometry or throw during an ordinary scroll update', async (_label, contentSize) => {
+  const app = await setup(Array.from({ length: 40 }, (_, index) => message(index)), {
+    id: 'message-6', offset: -620,
+  });
+  await app.dimensions(12000);
+  await app.measure('message-5', 9800, 69);
+  await app.measure('message-6', 10000, 190);
+  await app.scroll(9380, false, 12000);
+  await app.tick(40);
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: -620 });
+  // Direct partial callbacks are also supported. An absent/nonfinite extent
+  // must not be mistaken for proof that this packet matches settled geometry.
+  await act(async () => app.list().props.onScroll({
+    nativeEvent: { contentOffset: { x: 0, y: 9380 }, contentSize },
+  }));
+  expect(app.viewport.anchor).toEqual({ id: 'message-5', offset: -420 });
+});
+
 async function zeroRangeBack() {
   const app = await setup(allMessages(), { id: 'message-641', offset: 83.4296875 }, {
     hasOlder: false, header: <View />,
