@@ -308,6 +308,76 @@ test('deep Back keeps the installed RN initial window when an old 851px native s
   expect(app.viewport.y).toBe(4500);
 });
 
+test('arrival keeps the requested bottom-partial row through mixed native neighbor frames and late prefix refinement', async () => {
+  const messages = Array.from({ length: 40 }, (_, index) => message(index));
+  const app = await setup(messages, { id: 'message-6', offset: -620 });
+  const nativePane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  await app.dimensions(12000);
+  // RN cell callbacks need not describe the same native prefix revision yet.
+  // The requested006 is genuinely visible by20px; the stale005 frame overlaps
+  // it at a lower logical Y and would win a global messageAnchorAt selection.
+  await app.measure('message-5', 9800, 69);
+  await app.measure('message-6', 10000, 190);
+  expect(scroll).toHaveBeenLastCalledWith({ offset: 9380, animated: false });
+  expect(app.virtual()._listMetrics.getCellMetrics(33, app.virtual().props))
+    .toMatchObject({ offset: 10000, length: 190 });
+  expect(messageAnchorAt(9380, new Map([
+    ['message-5', { y: 9800, height: 69 }],
+    ['message-6', { y: 10000, height: 190 }],
+  ]), 640)?.id).toBe('message-5');
+  await act(async () => nativePane().props.onScroll(scrollEvent(9380, 12000)));
+  await app.tick(40);
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(0);
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: -620 });
+  await act(async () => nativePane().props.onScroll(scrollEvent(9380, 12000)));
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: -620 });
+
+  // A later real prefix measurement must correct the same partially visible
+  // row, rather than promoting the unrelated stale neighbor into reading intent.
+  await app.dimensions(12020);
+  await app.measure('message-6', 10020, 190);
+  expect(scroll).toHaveBeenLastCalledWith({ offset: 9400, animated: false });
+  await act(async () => nativePane().props.onScroll(scrollEvent(9400, 12020)));
+  await app.tick(40);
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: -620 });
+  await act(async () => nativePane().props.onScroll(scrollEvent(9400, 12020)));
+  expect(app.viewport.anchor).toEqual({ id: 'message-6', offset: -620 });
+
+  // A one-shot accessibility move still takes ownership without begin-drag,
+  // even though006 remains partly visible and no second scroll packet follows.
+  await act(async () => nativePane().props.onScroll(scrollEvent(9500, 12020)));
+  expect(app.viewport.y).toBe(9500);
+  expect(app.viewport.anchor).toEqual({ id: 'message-5', offset: -300 });
+});
+
+test.each([false, true])('History detach retains confirmed partial reading intent and yields to one-shot AX movement=%s', async moved => {
+  const app = await setup(Array.from({ length: 40 }, (_, index) => message(index)), {
+    id: 'message-6', offset: -620,
+  });
+  const nativePane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  await app.dimensions(12000);
+  await app.measure('message-5', 9800, 69);
+  await app.measure('message-6', 10000, 190);
+  await act(async () => nativePane().props.onScroll(scrollEvent(9380, 12000)));
+  await app.tick(40);
+  expect(app.viewport.anchor?.id).toBe('message-6');
+  // This coherent extent update is a no-op scroll. Its matching row callback
+  // may still be queued when accessibility moves once and History opens.
+  await app.dimensions(12020);
+  await act(async () => nativePane().props.onScroll(scrollEvent(moved ? 9480 : 9380, 12020)));
+  const expected = moved ? { id: 'message-5', offset: -320 } : { id: 'message-6', offset: -620 };
+  expect(app.viewport.anchor).toEqual(expected);
+  // Detach before the deferred ownership frame, without a second AX packet.
+  await act(async () => app.tree.update(<React.Fragment />));
+  expect(app.viewport.anchor).toEqual(expected);
+  await app.update();
+  expect(app.list().props.initialScrollIndex).toBe(moved ? 34 : 33);
+  expect(app.rows().map(row => row.props.testID)).toContain(`row-${expected.id}`);
+});
+
 async function zeroRangeBack() {
   const app = await setup(allMessages(), { id: 'message-641', offset: 83.4296875 }, {
     hasOlder: false, header: <View />,

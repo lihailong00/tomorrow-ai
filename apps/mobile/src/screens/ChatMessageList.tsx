@@ -314,6 +314,27 @@ function MessageWindow({
     bootstrap.current.commandOffset = null;
     return true;
   }, [valid]);
+  const measuredRetainedAnchor = useCallback((id: string, y: number): MessageAnchor | null => {
+    const frame = frames.current.get(id);
+    const height = metrics.current.viewportHeight;
+    return frame && frame.height > 0 && height > 0 &&
+      frame.y + frame.height > y && frame.y < y + height
+      ? { id, offset: y - frame.y }
+      : null;
+  }, []);
+  const passiveRetainedAnchor = useCallback((y: number, contentHeight: number): MessageAnchor | null => {
+    const settled = settledRestoration.current;
+    if (!settled || target.current || interacting.current ||
+      Math.abs(y - settled.y) > 2 ||
+      Math.abs(contentHeight - metrics.current.contentHeight) > 1 ||
+      Math.abs(metrics.current.contentHeight - settled.contentHeight) > 1 ||
+      metrics.current.viewportHeight !== settled.viewportHeight
+    ) return null;
+    const frame = frames.current.get(settled.anchor.id);
+    if (!frame || frame.y !== settled.frame.y || frame.height !== settled.frame.height)
+      return null;
+    return measuredRetainedAnchor(settled.anchor.id, y);
+  }, [measuredRetainedAnchor]);
   const verifyArrival = useCallback(() => {
     cancelSettle();
     const destination = target.current;
@@ -387,7 +408,14 @@ function MessageWindow({
         bootstrap.current.pending = false;
         bootstrap.current.initial = false;
         cancelBootstrapRetry();
-        const visible = messageAnchorAt(
+        // Arrival already proved this measured destination. Other cell frames
+        // can still belong to an older native prefix batch and overlap it; they
+        // must not replace a requested row that is actually visible, even by a
+        // small portion at the viewport edge. Record its observed clamped inset.
+        const arrived = 'anchor' in destination
+          ? measuredRetainedAnchor(destination.anchor.id, observed.current)
+          : null;
+        const visible = arrived ?? messageAnchorAt(
           observed.current, frames.current, dimensions.viewportHeight,
         ) ?? current.current.viewport.anchor;
         current.current.viewport.anchor = visible;
@@ -402,7 +430,7 @@ function MessageWindow({
           : null;
       });
     });
-  }, [cancelBootstrapRetry, cancelSettle, initialIndex, valid]);
+  }, [cancelBootstrapRetry, cancelSettle, initialIndex, measuredRetainedAnchor, valid]);
   const restore = useCallback(() => {
     cancelSettle();
     if (
@@ -500,7 +528,7 @@ function MessageWindow({
         observed.current !== null &&
         metrics.current.viewportHeight > 0
       ) {
-        const visible = messageAnchorAt(
+        const visible = passiveRetainedAnchor(observed.current, metrics.current.contentHeight) ?? messageAnchorAt(
           observed.current,
           frames.current,
           metrics.current.viewportHeight,
@@ -518,7 +546,7 @@ function MessageWindow({
       if (userScrollFrame.current !== null)
         cancelAnimationFrame(userScrollFrame.current);
     };
-  }, [cancelBootstrapRetry, cancelSettle, viewport, valid]);
+  }, [cancelBootstrapRetry, cancelSettle, passiveRetainedAnchor, viewport, valid]);
   const measurements = useMemo(
     () => ({
       layout: (message: Message, event: LayoutChangeEvent) => {
@@ -824,7 +852,12 @@ function MessageWindow({
             followTail.current = y <= 2;
             viewport.followTail = followTail.current;
           }
-          viewport.anchor =
+          // A repeated arrival packet is not new reading intent. In particular,
+          // mixed neighboring frames may still sort ahead of the restored row.
+          // A different native offset (including AX without begin-drag) remains
+          // authoritative immediately, even while ownership cleanup is deferred.
+          const retained = passiveRetainedAnchor(y, event.nativeEvent.contentSize.height);
+          viewport.anchor = retained ??
             messageAnchorAt(
               y,
               frames.current,
