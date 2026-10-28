@@ -259,6 +259,70 @@ test('deep Back waits for the real RN prefix and native arrival rather than expi
   expect(scroll).toHaveBeenCalledTimes(settled);
 });
 
+test('deep Back keeps the installed RN initial window when an old 851px native scroll arrives after the 5270px prefix layout', async () => {
+  const messages = Array.from({ length: 40 }, (_, index) => message(index + 43));
+  const app = await setup(messages, { id: 'message-48', offset: 175.619 });
+  const nativePane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  expect(app.list().props.initialScrollIndex).toBe(34);
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(1);
+  await app.dimensions(851.429);
+  await act(async () => app.virtual()._onLayout(layoutEvent(0, 651.429)));
+  await app.measure('message-48', 24, 190.857);
+  await app.measure('message-43', 734.476, 69.333);
+  // The real new native cell layout may reach JS before its content-size event.
+  // Neither that mixed geometry nor its old range-clamped packet is arrival.
+  await app.measure('message-48', 4443.048, 190.857);
+  await act(async () => nativePane().props.onScroll(scrollEvent(200, 851.429)));
+  await app.tick(100);
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(1);
+  expect(app.rows().map(row => row.props.testID)).toContain('row-message-48');
+  expect(app.rows().length).toBeLessThanOrEqual(6);
+  await app.dimensions(5270.095);
+  await act(async () => app.virtual()._onLayout(layoutEvent(0, 651.429)));
+  const destination = 5270.095 - 651.429;
+  expect(scroll).toHaveBeenLastCalledWith({
+    offset: expect.closeTo(destination, 3), animated: false,
+  });
+  const commands = scroll.mock.calls.length;
+  // This is the exact observed Android ordering: old content851/Y200 arrives
+  // after fresh content5270 and scrollTo4618. RN must not consume that packet.
+  await act(async () => nativePane().props.onScroll(scrollEvent(200, 851.429)));
+  await app.tick(100);
+  expect(scroll.mock.calls.length).toBeGreaterThan(commands);
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(1);
+  expect(app.virtual().state.cellsAroundViewport).toEqual({ first: 34, last: 39 });
+  expect(app.rows().map(row => row.props.testID)).toContain('row-message-43');
+  expect(app.viewport.anchor).toEqual({ id: 'message-48', offset: 175.619 });
+  await act(async () => nativePane().props.onScroll(scrollEvent(destination, 5270.095)));
+  await app.tick(100);
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(0);
+  expect(app.viewport.anchor?.id).toBe('message-48');
+  // The gate retires after real arrival: normal scrolling is forwarded again.
+  await act(async () => nativePane().props.onScroll(scrollEvent(4500, 5270.095)));
+  expect(app.viewport.y).toBe(4500);
+});
+
+test('a real gesture releases a deep bootstrap immediately and an obsolete retry cannot scroll its replacement', async () => {
+  const app = await setup(allMessages(), { id: 'message-502', offset: 27 });
+  await app.dimensions(180000);
+  await app.measure('message-502', 24, 255);
+  const nativePane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  await act(async () => nativePane().props.onScroll(scrollEvent(0, 640)));
+  const obsoleteScroll = nativePane().props.onScroll;
+  await act(async () => app.list().props.onScrollBeginDrag());
+  await act(async () => nativePane().props.onScroll(scrollEvent(10, 180000)));
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(0);
+  expect(app.viewport.y).toBe(10);
+  await app.update(allMessages(), '', 1);
+  const freshScroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  await act(async () => obsoleteScroll(scrollEvent(200, 851)));
+  await app.tick(100);
+  expect(freshScroll).not.toHaveBeenCalled();
+});
+
 test('same-row append growth preserves already-read text after dragging, while momentum remains in control', async () => {
   const original = {
     ...message(0),
@@ -825,6 +889,54 @@ test.each([
         .reverse()
         .findIndex(item => item.id === visible.id),
     );
+    const backScroll = jest.spyOn(list().instance, 'scrollToOffset');
+    const backPane = () => tree.root.findAllByType(ScrollView)
+      .find(node => node.props.testID === 'chat-message-list')!;
+    await act(async () => {
+      virtual()._onLayout(layoutEvent(0, 640));
+      list().props.ListHeaderComponent.props.onLayout(layoutEvent(0, 24));
+      list().props.ListFooterComponent.props.onLayout(layoutEvent(0, 48));
+    });
+    async function backNativePass() {
+      const children = React.Children.toArray(
+        backPane().props.children,
+      ) as React.ReactElement<any>[];
+      let y = 0;
+      await act(async () => {
+        for (const child of children) {
+          if (child.props.item) {
+            const item = child.props.item as Message;
+            const height = item.id === 'mixed-80' ? 1600 : 64;
+            nativeCell(item.id).props.onLayout(layoutEvent(y, height));
+            y += height;
+          } else if (child.key?.toString().includes('$header')) y += 24;
+          else if (child.key?.toString().includes('$footer')) y += 48;
+          else y += Number(child.props.style?.height ?? 0);
+        }
+        virtual()._onContentSizeChange(360, Math.max(640, y));
+      });
+      return Math.max(640, y);
+    }
+    const initialNativeHeight = await backNativePass();
+    const prefixedNativeHeight = await backNativePass();
+    expect(prefixedNativeHeight).toBeGreaterThan(initialNativeHeight);
+    // A delayed initial native packet must not move the real RN Back window
+    // toward tall80, even after the pending older response completed hidden.
+    await act(async () => backPane().props.onScroll(
+      scrollEvent(Math.max(0, initialNativeHeight - 640), initialNativeHeight),
+    ));
+    await act(async () => { await jest.advanceTimersByTimeAsync(100); });
+    expect(virtual().state.pendingScrollUpdateCount).toBe(1);
+    expect(tree.root.findAllByType(View).some(node =>
+      node.props.testID === `chat-message-${visible.id}`,
+    )).toBe(true);
+    const arrival = (backScroll.mock.calls.at(-1)![0] as { offset: number }).offset;
+    await act(async () => backPane().props.onScroll(
+      scrollEvent(arrival, prefixedNativeHeight),
+    ));
+    await act(async () => { await jest.advanceTimersByTimeAsync(100); });
+    expect(virtual().state.pendingScrollUpdateCount).toBe(0);
+    expect(entry.history.viewport.anchor?.id).toBe(visible.id);
     expect(api.messages).toHaveBeenCalledTimes(2);
     api.messages.mockResolvedValueOnce({
       items: [mixedMessage(42)],

@@ -12,6 +12,8 @@ import {
   FlatList,
   LayoutChangeEvent,
   ListRenderItem,
+  ScrollView,
+  ScrollViewProps,
   StyleProp,
   useWindowDimensions,
   View,
@@ -184,6 +186,11 @@ function MessageWindow({
   });
   const observed = useRef<number | null>(null);
   const settleFrame = useRef<number | null>(null);
+  const bootstrap = useRef({
+    pending: initialIndex > 0,
+    commandOffset: null as number | null,
+    retryFrame: null as number | null,
+  });
   const [geometry, setGeometry] = useState(0);
   const oldestKey = messages.length ? messageRowKey(messages.at(-1)!) : null;
   const firstKey = messages.length ? messageRowKey(messages[0]) : null;
@@ -353,11 +360,13 @@ function MessageWindow({
       offset = Math.max(0, frame.y + inset);
     } else if (!frames.current.has(messageRowKey(current.current.messages[0])))
       return;
+    const commandOffset = Math.min(
+      offset,
+      Math.max(0, dimensions.contentHeight - dimensions.viewportHeight),
+    );
+    bootstrap.current.commandOffset = commandOffset;
     list.current?.scrollToOffset({
-      offset: Math.min(
-        offset,
-        Math.max(0, dimensions.contentHeight - dimensions.viewportHeight),
-      ),
+      offset: commandOffset,
       animated: false,
     });
     // Geometry being quiet alone is insufficient. Retire a target only after a
@@ -415,6 +424,8 @@ function MessageWindow({
       cancelSettle();
       if (endDragFrame.current !== null)
         cancelAnimationFrame(endDragFrame.current);
+      if (bootstrap.current.retryFrame !== null)
+        cancelAnimationFrame(bootstrap.current.retryFrame);
     };
   }, [cancelSettle, viewport, valid]);
   const measurements = useMemo(
@@ -526,6 +537,7 @@ function MessageWindow({
         ) ?? viewport.anchor;
   };
   const takeUserControl = () => {
+    bootstrap.current.pending = false;
     interacting.current = true;
     followTail.current = false;
     viewport.followTail = false;
@@ -533,6 +545,49 @@ function MessageWindow({
     if (heldHistory.current) heldHistory.current.interacted = true;
     cancelSettle();
   };
+  const renderScrollComponent = useCallback(
+    (scrollProps: ScrollViewProps) => (
+      <ScrollView
+        {...scrollProps}
+        onScroll={event => {
+          if (!valid()) return;
+          if (bootstrap.current.pending) {
+            const { contentOffset, contentSize } = event.nativeEvent;
+            const commandOffset = bootstrap.current.commandOffset;
+            const anchorFrame = initialAnchor
+              ? frames.current.get(initialAnchor.id)
+              : null;
+            if (
+              commandOffset === null ||
+              !anchorFrame ||
+              metrics.current.contentHeight + 1 <
+                anchorFrame.y + anchorFrame.height ||
+              anchorFrame.y + anchorFrame.height <= contentOffset.y ||
+              anchorFrame.y >=
+                contentOffset.y + metrics.current.viewportHeight ||
+              Math.abs(contentSize.height - metrics.current.contentHeight) > 1 ||
+              Math.abs(contentOffset.y - commandOffset) > 2
+            ) {
+              // Android can deliver a scroll clamped to the first, prefix-free
+              // layout after the real prefix was measured. Forwarding it lets
+              // RN retire its pending initial scroll and unmount the saved row.
+              // Keep that bounded initial region until a current native command
+              // arrives; retry after the stale packet's native commit settles.
+              if (bootstrap.current.retryFrame === null)
+                bootstrap.current.retryFrame = requestAnimationFrame(() => {
+                  bootstrap.current.retryFrame = null;
+                  restore();
+                });
+              return;
+            }
+            bootstrap.current.pending = false;
+          }
+          scrollProps.onScroll?.(event);
+        }}
+      />
+    ),
+    [initialAnchor, restore, valid],
+  );
   return (
     <Measurements.Provider value={measurements}>
       <FlatList<Message>
@@ -543,6 +598,7 @@ function MessageWindow({
         keyboardShouldPersistTaps="handled"
         data={messages}
         renderItem={renderItem}
+        renderScrollComponent={renderScrollComponent}
         keyExtractor={messageRowKey}
         inverted={inverted}
         CellRendererComponent={MessageCell}
