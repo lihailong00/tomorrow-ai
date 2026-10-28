@@ -1,5 +1,7 @@
+import { FlashList } from '@shopify/flash-list';
+jest.mock('@shopify/flash-list', () => require('../test/flashListMock'));
 import React from 'react';
-import { FlatList, TextInput } from 'react-native';
+import { TextInput } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { AppProvider, type AppContextValue } from '../src/app/context';
 import { ChatScreen, createChatEntryState } from '../src/screens/Chat';
@@ -39,7 +41,7 @@ async function setup() {
   });
   return {
     api, tree, entry,
-    rows: () => [...tree.root.findByType(FlatList).props.data].reverse() as Message[],
+    rows: () => [...tree.root.findByType(FlashList).props.data].reverse() as Message[],
     emit: async (id: number, event: string, data: Record<string, unknown>) => {
       await act(async () => receive({ id, event, data }));
     },

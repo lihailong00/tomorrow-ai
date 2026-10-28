@@ -1,6 +1,8 @@
+import { FlashList } from '@shopify/flash-list';
+jest.mock('@shopify/flash-list', () => require('../test/flashListMock'));
 import { addChatStreamMock } from '../test/chatStreamMock';
 import React from 'react';
-import { FlatList, Text, TextInput, View } from 'react-native';
+import { Text, TextInput, View } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { AppContextValue, AppProvider } from '../src/app/context';
 import { useRouteStack } from '../src/app/navigation';
@@ -86,10 +88,10 @@ test('loads the oldest sentinel, preserves a new reply and draft, and keeps all 
 
 test('native anchoring skips the fixed header and keeps the same message View through prepend and repeated layouts', async () => {
   const app = await setup();
-  const pane = () => app.tree.root.findByType(FlatList);
+  const pane = () => app.tree.root.findByType(FlashList);
   const row = (id: string) => app.tree.root.findAllByType(View).find(node => node.props.testID === `chat-message-${id}`)!;
   // The inverted list keeps the visual history heading in its native footer.
-  expect(pane().props.maintainVisibleContentPosition).toEqual({ minIndexForVisible: 0 });
+  expect(pane().props.maintainVisibleContentPosition).toEqual({ disabled: false });
   expect(pane().props.ListFooterComponent.props).toMatchObject({ testID: 'chat-history-header', collapsable: false });
   expect(row('recent').props).toMatchObject({ testID: 'chat-message-recent', collapsable: false });
   const retainedRow = row('recent');
@@ -119,7 +121,7 @@ test('native anchoring skips the fixed header and keeps the same message View th
 
 test('the header keeps its stable identity ahead of messages when an empty conversation receives its first turn', async () => {
   const app = await setup([]);
-  const pane = () => app.tree.root.findByType(FlatList);
+  const pane = () => app.tree.root.findByType(FlashList);
   const header = () => pane().props.inverted
     ? pane().props.ListFooterComponent : pane().props.ListHeaderComponent.props.children;
   const headerKey = header().key;
@@ -207,7 +209,7 @@ test('a send completed while History is open returns to the new turn instead of 
   });
   expect(app.entry().history.viewport.anchor).toBeNull();
   await app.back();
-  expect(app.tree.root.findByType(FlatList).props.initialScrollIndex).toBe(0);
+  expect(app.tree.root.findByType(FlashList).props.initialScrollIndex).toBe(0);
   expect(app.entry().getSnapshot().messages).toHaveLength(82);
   expect(app.text()).toContain('new reply');
   await app.close();
@@ -215,7 +217,7 @@ test('a send completed while History is open returns to the new turn instead of 
 
 test('leaving while older is pending preserves the reading position and cursor until a visible retry', async () => {
   const app = await setup();
-  const pane = () => app.tree.root.findByType(FlatList);
+  const pane = () => app.tree.root.findByType(FlashList);
   await act(async () => pane().props.onContentSizeChange(360, 1000));
   await act(async () => pane().props.onScrollBeginDrag());
   await act(async () => pane().props.onScroll({ nativeEvent: { contentOffset: { y: 120 } } }));
