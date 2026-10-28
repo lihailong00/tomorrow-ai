@@ -23,6 +23,7 @@ import type { CellRendererProps } from '@react-native/virtualized-lists';
 import type { Message } from '../domain/types';
 import {
   messageAnchorAt,
+  messageAnchorInset,
   messageInitialIndex,
   messageRowKey,
   MessageAnchor,
@@ -294,9 +295,10 @@ function MessageWindow({
             ? Math.max(
                 0,
                 frame.y +
-                  Math.min(
+                  messageAnchorInset(
                     destination.anchor.offset,
-                    Math.max(0, frame.height - 1),
+                    frame.height,
+                    dimensions.viewportHeight,
                   ),
               )
             : 0;
@@ -307,11 +309,19 @@ function MessageWindow({
         // Before RN has measured the older tail, a clamped scroll merely wakes
         // its next render batch. It is not proof of arrival. At the true oldest
         // row, however, a taller viewport may make the old inset unreachable.
-        if (
-          requested > maxOffset &&
-          !frames.current.has(messageRowKey(current.current.messages.at(-1)!))
-        )
-          return;
+        if (requested > maxOffset) {
+          const oldest = frames.current.get(
+            messageRowKey(current.current.messages.at(-1)!),
+          );
+          // Cell layout and content size can arrive in different native batches.
+          // Existence of the last row alone does not prove the end is committed.
+          if (
+            !oldest ||
+            dimensions.contentHeight + 1 <
+              oldest.y + oldest.height + dimensions.tailHeight
+          )
+            return;
+        }
         const desired = Math.min(requested, maxOffset);
         if (Math.abs(observed.current - desired) > 2) return;
         target.current = null;
@@ -349,9 +359,10 @@ function MessageWindow({
       // until RN's own measured average has produced the actual native prefix.
       // contentOffset below suppresses its one-shot, premature index scroll.
       if (initialIndex > 0 && frame.y <= dimensions.headHeight + 1) return;
-      const inset = Math.min(
+      const inset = messageAnchorInset(
         destination.anchor.offset,
-        Math.max(0, frame.height - 1),
+        frame.height,
+        dimensions.viewportHeight,
       );
       current.current.viewport.anchor = {
         id: destination.anchor.id,

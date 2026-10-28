@@ -24,6 +24,17 @@ export function createMessageViewport(): MessageViewport {
 export const messageRowKey = (message: Message) =>
   message.client_key ?? message.id;
 
+export function messageAnchorInset(
+  offset: number,
+  rowHeight: number,
+  viewportHeight: number,
+) {
+  return Math.max(
+    Math.min(0, 1 - viewportHeight),
+    Math.min(offset, Math.max(0, rowHeight - 1)),
+  );
+}
+
 export function messageAnchorAt(
   y: number,
   frames: ReadonlyMap<string, { y: number; height: number }>,

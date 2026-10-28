@@ -18,6 +18,7 @@ import { Button } from '../src/ui/components';
 import {
   createMessageViewport,
   messageAnchorAt,
+  messageAnchorInset,
   messageInitialIndex,
   messageRowKey,
 } from '../src/screens/messageListLayout';
@@ -372,6 +373,75 @@ test('a taller return viewport accepts native end clamping only after the true o
   const settled = scroll.mock.calls.length;
   await app.measure('message-0', 2525, 64);
   expect(scroll).toHaveBeenCalledTimes(settled);
+});
+
+test.each([0, 48])('a clamped arrival waits for the last measured row and %ipx footer extent to reach native content size', async tailHeight => {
+  const fullHeight = 2800 + tailHeight;
+  const requested = fullHeight - 640;
+  const app = await setup(Array.from({ length: 5 }, (_, index) => message(index)), {
+    id: 'message-4', offset: requested - 24,
+  });
+  const nativePane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  await app.dimensions(fullHeight - 20);
+  await act(async () => app.list().props.ListFooterComponent.props.onLayout(
+    layoutEvent(2800, tailHeight),
+  ));
+  // Actual installed RN cell layouts reach JS before the next content-size
+  // notification. The visible tall anchor fits even in the stale content size.
+  for (const [id, y, height] of [
+    ['message-4', 24, 2200],
+    ['message-3', 2224, 150],
+    ['message-2', 2374, 150],
+    ['message-1', 2524, 212],
+    ['message-0', 2736, 64],
+  ] as const) await app.measure(id, y, height);
+  expect(app.virtual()._listMetrics.getCellMetrics(4, app.virtual().props))
+    .toMatchObject({ offset: 2736, length: 64 });
+  await act(async () => nativePane().props.onScroll(
+    scrollEvent(requested - 20, fullHeight - 20),
+  ));
+  await app.tick(100);
+  const beforeExtent = scroll.mock.calls.length;
+  await app.dimensions(fullHeight);
+  expect(scroll.mock.calls.length).toBeGreaterThan(beforeExtent);
+  expect(scroll).toHaveBeenLastCalledWith({ offset: requested, animated: false });
+  await act(async () => nativePane().props.onScroll(scrollEvent(requested, fullHeight)));
+  await app.tick(100);
+  const settled = scroll.mock.calls.length;
+  await app.dimensions(fullHeight);
+  expect(scroll).toHaveBeenCalledTimes(settled);
+});
+
+test('a negative retained inset stays reachable when a reflow makes the viewport shorter', async () => {
+  const app = await setup(allMessages(), { id: 'message-502', offset: -528 });
+  await app.dimensions(121000);
+  await app.measure('message-502', 2520, 255);
+  await app.scroll(1992, false, 121000);
+  await app.tick(100);
+  const oldList = app.list().instance;
+  await act(async () => Dimensions.set({
+    window: { width: 720, height: 500, scale: 2.75, fontScale: 1 },
+  }));
+  expect(app.list().instance).not.toBe(oldList);
+  expect(app.rows().length).toBeLessThanOrEqual(6);
+  await app.dimensions(121000);
+  await act(async () => app.virtual()._onLayout(layoutEvent(0, 500)));
+  const scroll = jest.spyOn(app.list().instance, 'scrollToOffset');
+  await app.measure('message-502', 2520, 255);
+  expect(scroll).toHaveBeenLastCalledWith({ offset: 2021, animated: false });
+  expect(app.viewport.anchor).toEqual({ id: 'message-502', offset: -499 });
+  const nativePane = () => app.tree.root.findAllByType(ScrollView)
+    .find(node => node.props.testID === 'chat-message-list')!;
+  await act(async () => nativePane().props.onScroll(scrollEvent(2021, 121000)));
+  await app.tick(100);
+  expect(app.virtual().state.pendingScrollUpdateCount).toBe(0);
+  const settled = scroll.mock.calls.length;
+  await app.measure('message-502', 2525, 255);
+  expect(scroll).toHaveBeenCalledTimes(settled);
+  expect(messageAnchorInset(-20, 255, 500)).toBe(-20);
+  expect(messageAnchorInset(27, 255, 500)).toBe(27);
 });
 
 test('an anchor reply that appended text while hidden translates its retained old-text inset on the first fresh measurement', async () => {
