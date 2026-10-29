@@ -33,11 +33,26 @@ async function press(tree:ReactTestRenderer,label:string) {
 async function input(tree:ReactTestRenderer,label:string,value:string) {const node=tree.root.findAllByType(TextInput).find(n=>n.props.accessibilityLabel===label);expect(node).toBeDefined();await act(async()=>node!.props.onChangeText(value));}
 function storedApi(value:Todo) {
   let saved=value;
+  let replied=false;
+  const detailPath='/todos/'+encodeURIComponent(value.id);
   const request=jest.fn(async(path:string,method='GET',body?:any)=>{
-    if(method==='PATCH'){saved={...saved,...body,version:saved.version+1};return {...saved};}
-    if(path.endsWith('/prepare')) {saved={...saved,linked_task_id:'owned-preparation',version:saved.version+1};return {...saved};}
+    if(path===detailPath+'/actions') {
+      if(method==='GET')return {replied,replied_at:replied?'2026-10-30T00:00:00Z':null};
+      if(method!=='POST'||body.version!==saved.version||!body.client_request_id)throw new Error('Invalid typed action fixture request');
+      if(body.kind==='replied'&&saved.kind==='communication') {
+        replied=true;saved={...saved,status:'waiting',completed_at:null,version:saved.version+1};
+        if(Object.prototype.hasOwnProperty.call(body,'draft'))saved.draft=body.draft;
+      } else if(body.kind==='exercise_completed'&&saved.kind==='exercise') {
+        saved={...saved,status:'completed',completed_at:'2026-10-30T00:00:00Z',version:saved.version+1};
+        if(Object.prototype.hasOwnProperty.call(body,'progress_notes'))saved.progress_notes=body.progress_notes;
+      } else throw new Error('Unsupported typed action fixture request');
+      return {todo:{...saved},actions:{replied,replied_at:replied?'2026-10-30T00:00:00Z':null},reward:null};
+    }
+    if(path===detailPath&&method==='PATCH'){saved={...saved,...body,version:saved.version+1};return {...saved};}
+    if(path===detailPath+'/prepare'&&method==='POST') {saved={...saved,linked_task_id:'owned-preparation',version:saved.version+1};return {...saved};}
     if(path.startsWith('/todos?')) {const filter=query(path).filter;return {items:filter==='active'?[{...saved}]:[],next_offset:null};}
-    return {...saved};
+    if(path===detailPath&&method==='GET')return {...saved};
+    throw new Error('Unexpected stored fixture request: '+method+' '+path);
   });return {baseUrl:'https://fixture.invalid',request,saved:()=>saved};
 }
 
@@ -81,8 +96,9 @@ it('guards duplicate quick-add taps and retains one creation intent for a lost-r
 
 it('sharing a communication draft never claims a send or waiting until the user confirms replying',async()=>{
   const api=storedApi(todo('mail',{kind:'communication',draft:'用户自己的回复草稿'}));const app=await mount(<TodoDetail id="mail"/>,api);
-  await press(app.tree,'分享回复');expect(platform.share).toHaveBeenCalledWith('用户自己的回复草稿','事项mail');expect(api.request.mock.calls.filter(call=>call[1]==='PATCH')).toHaveLength(0);expect(texts(app.tree)).toContain('实际回复后，再确认进入等待');expect(api.saved().status).toBe('pending');
-  await input(app.tree,'修改回复草稿','真实发送给客户的修订版');await press(app.tree,'我已实际回复 → 等待');expect(api.saved().status).toBe('waiting');expect(api.saved().draft).toBe('真实发送给客户的修订版');expect(api.saved().completed_at).toBeUndefined();await app.close();
+  await press(app.tree,'分享回复');expect(platform.share).toHaveBeenCalledWith('用户自己的回复草稿','事项mail');expect(api.request.mock.calls.filter(call=>call[1]==='PATCH'||call[1]==='POST')).toHaveLength(0);expect(texts(app.tree)).toContain('实际回复后，再确认进入等待');expect(api.saved().status).toBe('pending');
+  await input(app.tree,'修改回复草稿','真实发送给客户的修订版');await press(app.tree,'我已实际回复 → 等待');expect(api.saved().status).toBe('waiting');expect(api.saved().draft).toBe('真实发送给客户的修订版');expect(api.saved().completed_at??null).toBeNull();
+  const actions=api.request.mock.calls.filter(([path,method])=>path==='/todos/mail/actions'&&method==='POST');expect(actions).toHaveLength(1);expect(actions[0][2]).toEqual(expect.objectContaining({kind:'replied',version:1,draft:'真实发送给客户的修订版',client_request_id:expect.any(String)}));expect(api.request.mock.calls.filter(call=>call[1]==='PATCH')).toHaveLength(0);await app.close();
 });
 
 it('learning preparation is not fabricated previous progress or personal completion',async()=>{
@@ -94,8 +110,9 @@ it('learning preparation is not fabricated previous progress or personal complet
 it('exercise only starts and ends from user actions; 1000 minutes is not truncated into completion',async()=>{
   const api=storedApi(todo('exercise',{kind:'exercise'}));const app=await mount(<TodoDetail id="exercise"/>,api);
   await press(app.tree,'开始这次运动');expect(api.saved().status).toBe('in_progress');
-  for(const value of ['0','361','2.5','1000']) {await input(app.tree,'实际运动分钟数（可选）',value);const before=api.request.mock.calls.filter(call=>call[1]==='PATCH').length;await press(app.tree,'我已完成这次运动');expect(api.request.mock.calls.filter(call=>call[1]==='PATCH')).toHaveLength(before);expect(api.saved().status).toBe('in_progress');expect(errors(app.tree).join(' ')).toContain('1–360');}
-  await input(app.tree,'实际运动分钟数（可选）','23');await press(app.tree,'我已完成这次运动');expect(api.saved().status).toBe('completed');expect(api.saved().progress_notes).toContain('23 分钟（自行记录）');await app.close();
+  for(const value of ['0','361','2.5','1000']) {await input(app.tree,'实际运动分钟数（可选）',value);const before=api.request.mock.calls.filter(call=>call[1]==='PATCH'||call[1]==='POST').length;await press(app.tree,'我已完成这次运动');expect(api.request.mock.calls.filter(call=>call[1]==='PATCH'||call[1]==='POST')).toHaveLength(before);expect(api.saved().status).toBe('in_progress');expect(errors(app.tree).join(' ')).toContain('1–360');}
+  await input(app.tree,'实际运动分钟数（可选）','23');await press(app.tree,'我已完成这次运动');expect(api.saved().status).toBe('completed');expect(api.saved().progress_notes).toContain('23 分钟（自行记录）');
+  const actions=api.request.mock.calls.filter(([path,method])=>path==='/todos/exercise/actions'&&method==='POST');expect(actions).toHaveLength(1);expect(actions[0][2]).toEqual(expect.objectContaining({kind:'exercise_completed',version:2,actual_minutes:23,progress_notes:expect.stringContaining('23 分钟（自行记录）'),client_request_id:expect.any(String)}));expect(api.request.mock.calls.filter(call=>call[1]==='PATCH')).toHaveLength(1);await app.close();
 });
 
 it('suggested items cannot prepare or run work before the user admits them',async()=>{
