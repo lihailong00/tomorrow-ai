@@ -32,6 +32,7 @@ describe("shared practical mailbox policy", () => {
   it("keeps the import phone login and normalization at the server boundary", () => {
     expect(importPage).toContain("$('account').type=phone?'tel':'text'");
     expect(importPage).toContain("$('account').inputMode=phone?'tel':'email'");
-    expect(importPage).toContain("[phone?'phone':'email']:$('account').value,password");
+    expect(importPage).toContain("const account=phone?normalizePhoneIdentifier($('account').value):$('account').value");
+    expect(importPage).toContain("[phone?'phone':'email']:account,password");
   });
 });

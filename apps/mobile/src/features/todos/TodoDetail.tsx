@@ -162,8 +162,12 @@ function TodoContent({
           ['failed', 'cancelled', 'succeeded', 'uncertain'].includes(
             result.status,
           )
-        )
+        ) {
           onPreparationStopped();
+          setNotice(current =>
+            current === preparationPendingNotice ? '' : current,
+          );
+        }
       }
     });
   const completeExercise = () =>

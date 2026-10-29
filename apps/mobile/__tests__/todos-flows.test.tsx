@@ -586,14 +586,17 @@ it('does not let an older in-flight preparation poll undo a successful user comp
 });
 
 it.each([
-  ['succeeded', 'pending'],
-  ['failed', 'pending'],
-  ['cancelled', 'pending'],
-  ['uncertain', 'pending'],
-  ['succeeded', 'waiting'],
+  ['succeeded', 'pending', false],
+  ['failed', 'pending', false],
+  ['cancelled', 'pending', false],
+  ['uncertain', 'pending', false],
+  ['succeeded', 'waiting', false],
+  ['failed', 'pending', true],
+  ['cancelled', 'pending', true],
+  ['uncertain', 'pending', true],
 ] as const)(
-  'recovers a %s preparation on a %s todo with no draft while retaining saved and edited progress',
-  async (status, todoStatus) => {
+  'recovers a %s preparation on a %s todo with no draft while retaining progress and newer notice (%s)',
+  async (status, todoStatus, saveProgressNotice) => {
     jest.useFakeTimers();
     try {
       let current = todo({
@@ -603,14 +606,22 @@ it.each([
         draft: null,
         progress_notes: '实际已学到第二课',
       });
-      const request = jest.fn(async (path: string) => {
-        if (path.endsWith('/prepare'))
-          current = { ...current, linked_task_id: 'new-real-task', version: 2 };
-        return current;
-      });
+      const request = jest.fn(
+        async (path: string, method: string, patch: any) => {
+          if (path.endsWith('/prepare'))
+            current = {
+              ...current,
+              linked_task_id: 'new-real-task',
+              version: 2,
+            };
+          if (method === 'PATCH')
+            current = { ...current, ...patch, version: current.version + 1 };
+          return current;
+        },
+      );
       const task = jest
         .fn()
-        .mockResolvedValue({ id: 'real-linked-task', status });
+        .mockImplementation(async (id: string) => ({ id, status }));
       const tree = await mount(
         <TodoDetail id="one" />,
         context({ request, task, baseUrl: 'https://api.example.com' }),
@@ -645,6 +656,20 @@ it.each([
       expect(texts(tree)).toContain(
         todoStatus === 'waiting' ? '我已确认这件事结束' : '我已完成这次学习',
       );
+      expect(texts(tree)).toContain('妥啦正在准备内容。你可以稍后回来查看。');
+      if (saveProgressNotice) {
+        await act(async () => button(tree, '保存进展').props.onPress());
+        expect(texts(tree)).toContain('进展已保存。');
+      }
+      await act(async () => button(tree, '查看准备进展').props.onPress());
+      expect(task).toHaveBeenLastCalledWith('new-real-task');
+      expect(texts(tree)).not.toContain(
+        '妥啦正在准备内容。你可以稍后回来查看。',
+      );
+      expect(button(tree, '重新准备内容')).toBeDefined();
+      if (saveProgressNotice) expect(texts(tree)).toContain('进展已保存。');
+      expect(progress().props.value).toBe('实际已学到第二课，补充自己的笔记');
+      expect(current.status).toBe(todoStatus);
       await act(async () => tree.unmount());
     } finally {
       jest.clearAllTimers();
