@@ -52,6 +52,7 @@ async fn graph_routes_require_auth_and_preserve_source_ownership() {
                 content: "王伟确认 Tomorrow 的方案V3。".into(),
                 kind: "project".into(),
                 source: None,
+                client_request_id: None,
             },
         )
         .await

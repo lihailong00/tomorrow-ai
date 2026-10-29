@@ -26,6 +26,7 @@ async fn memory(repo: &Repository, user: &str) -> Memory {
                     .into(),
             kind: "project".into(),
             source: None,
+            client_request_id: None,
         },
     )
     .await
