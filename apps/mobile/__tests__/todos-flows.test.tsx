@@ -96,6 +96,46 @@ it('shows real compact rows, folds suggestions and queries Today/All with bounde
   );
   await act(async () => tree.unmount());
 });
+it('keeps progress beside a short source on long imported labels while the full source remains available in detail', async () => {
+  const sourceLabel = '已导入 · qq_mail · ' + '很长的客户资料标题'.repeat(20);
+  const item = todo({
+    source_kind: 'integration_import',
+    source_label: sourceLabel,
+    source_excerpt: '真实来源原文依据',
+    progress_notes: '回复已准备，等你确认',
+  });
+  const request = jest.fn(async (path: string) =>
+    path === '/todos/one'
+      ? item
+      : {
+          items: path.includes('filter=active') ? [item] : [],
+          next_offset: null,
+        },
+  );
+  const value = context({ request, baseUrl: 'https://api.example.com' });
+  const tree = await mount(<TodosScreen />, value);
+  const metadata = tree.root
+    .findAllByType(Text)
+    .find(node => [node.props.children].flat().join('').includes('QQ 邮箱 ·'))!;
+  expect([metadata.props.children].flat().join('')).toContain(
+    'QQ 邮箱 · 回复已准备，等你确认',
+  );
+  expect(texts(tree)).not.toContain('很长的客户资料标题');
+  await act(async () => byLabel(tree, '查看事项：真实事项').props.onPress());
+  expect(value.navigate).toHaveBeenCalledWith({ name: 'todo', id: item.id });
+  await act(async () => tree.unmount());
+  const detail = await mount(<TodoDetail id={item.id} />, value);
+  expect(texts(detail)).toContain(sourceLabel);
+  const source = detail.root.findAll(
+    node =>
+      node.props.accessibilityRole === 'button' &&
+      node.props.accessibilityState?.expanded === false,
+  )[0];
+  await act(async () => source.props.onPress());
+  expect(texts(detail)).toContain('真实来源原文依据');
+  expect(item.source_label).toBe(sourceLabel);
+  await act(async () => detail.unmount());
+});
 it('does not leak an old account list or its pending page into a new owner', async () => {
   const late = deferred<{ items: Todo[]; next_offset: null }>();
   const oldRequest = jest.fn((path: string) =>

@@ -10,9 +10,31 @@ import {
   localDue,
   nextAction,
   parseDue,
+  shortSourceLabel,
   validateMinutes,
 } from '../src/features/todos/model';
 import type { Todo } from '../src/features/todos/types';
+
+it.each([
+  ['manual', '很长的手动来源描述', '你添加'],
+  ['conversation', '对话 · 很长的真实对话标题', '对话'],
+  ['integration_import', '已导入 · qq_mail · 很长的客户邮件标题', 'QQ 邮箱'],
+  ['integration_import', '已导入 · shared · 很长的分享资料标题', '分享资料'],
+  [
+    'integration_import',
+    '已导入 · unknown_provider · 很长的未知来源标题',
+    '导入资料',
+  ],
+  ['integration_import', '无法识别的来源格式 · qq_mail', '导入资料'],
+  ['integration_import', '已导入 · constructor · 未知来源', '导入资料'],
+] as const)(
+  'shortens %s source metadata without changing its full evidence label',
+  (source_kind, source_label, expected) => {
+    const item = { source_kind, source_label } as Todo;
+    expect(shortSourceLabel(item)).toBe(expected);
+    expect(item.source_label).toBe(source_label);
+  },
+);
 
 const response = (data: unknown, status = 200) =>
   ({

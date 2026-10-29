@@ -17,6 +17,42 @@ export const kindIcons = {
   reading: 'file',
   expense: 'file',
 } as const;
+// Display names from crates/connectors/src/domestic/catalog.rs; these describe
+// an already imported source and do not imply a connected or readable account.
+const importSourceNames: Record<string, string> = {
+  wechat: '微信',
+  qq: 'QQ',
+  qq_mail: 'QQ 邮箱',
+  netease163: '163 邮箱',
+  netease126: '126 邮箱',
+  tencent_docs: '腾讯文档',
+  wps: 'WPS',
+  amap: '高德地图',
+  xiaohongshu: '小红书',
+  bilibili: '哔哩哔哩',
+  douyin: '抖音',
+  zhihu: '知乎',
+  feishu: '飞书',
+  dingtalk: '钉钉',
+  yuque: '语雀',
+  wecom: '企业微信',
+  taobao: '淘宝',
+  jd: '京东',
+  meituan: '美团',
+  alipay: '支付宝',
+  didi: '滴滴',
+};
+export function shortSourceLabel(todo: Todo): string {
+  if (todo.source_kind === 'manual') return '你添加';
+  if (todo.source_kind === 'conversation') return '对话';
+  if (todo.source_kind === 'integration_import') {
+    const id = /^已导入\s*·\s*([a-z0-9_]+)\s*·/.exec(todo.source_label)?.[1];
+    if (id === 'shared') return '分享资料';
+    if (id && Object.prototype.hasOwnProperty.call(importSourceNames, id))
+      return importSourceNames[id];
+  }
+  return '导入资料';
+}
 export function nextAction(todo: Todo): string {
   if (todo.status === 'suggested') return '确认';
   if (todo.status === 'completed' || todo.status === 'waiting') return '查看';

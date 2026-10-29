@@ -15,7 +15,12 @@ import { Button, ErrorNotice, Loading, Notice } from '../../ui/components';
 import { colors } from '../../ui/theme';
 import { Icon } from '../../ui/visuals';
 import { createTodo, listTodos } from './api';
-import { kindIcons, nextAction, progressLabel } from './model';
+import {
+  kindIcons,
+  nextAction,
+  progressLabel,
+  shortSourceLabel,
+} from './model';
 import { TodoEditor } from './TodoEditor';
 import { useTodoList } from './useTodoList';
 import type { CreateTodo, Todo, TodoScope } from './types';
@@ -323,7 +328,7 @@ export function TodosScreen() {
                   {todo.title}
                 </Text>
                 <Text style={s.muted} numberOfLines={1}>
-                  {todo.source_label || '你添加'} · {progressLabel(todo)}
+                  {shortSourceLabel(todo)} · {progressLabel(todo)}
                   {todo.due_at ? ' · ' + formatDate(todo.due_at) : ''}
                 </Text>
               </Pressable>
