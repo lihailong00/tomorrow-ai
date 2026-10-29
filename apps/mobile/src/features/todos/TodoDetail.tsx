@@ -340,6 +340,36 @@ function TodoContent({
       {!!todo.description && <Text style={s.body}>{todo.description}</Text>}
       <ErrorNotice message={action.error} retry={refresh} />
       {!!notice && <Notice>{notice}</Notice>}
+      {todo.kind === 'communication' && (
+        <>
+          {replyRecord.value?.replied && (
+            <>
+              <Text style={s.small}>
+                你已确认实际回复。回复记录与整件事的完成状态分别记录，可以单独纠正。
+              </Text>
+              <Button
+                variant="ghost"
+                loading={action.busy}
+                onPress={() => {
+                  void confirmedAction(
+                    'undo_replied',
+                    {},
+                    '已撤销回复确认；已确认的事项完成记录会保留。',
+                  );
+                }}
+              >
+                撤销已回复记录
+              </Button>
+            </>
+          )}
+          {replyRecord.error && (
+            <ErrorNotice
+              message="回复确认记录暂时无法读取。可以重试，原有事项仍然保留。"
+              retry={replyRecord.refresh}
+            />
+          )}
+        </>
+      )}
       {todo.status === 'suggested' ? (
         <>
           <Notice>这是从所选资料发现的候选事项，请确认后加入。</Notice>
@@ -388,32 +418,6 @@ function TodoContent({
       ) : todo.status === 'waiting' ? (
         <>
           <Notice>正在等待后续进展。你可以记录新消息，再决定是否结束。</Notice>
-          {todo.kind === 'communication' && replyRecord.value?.replied && (
-            <>
-              <Text style={s.small}>
-                你已明确确认回复，这一步已按服务端规则记录；整件事仍等待后续。
-              </Text>
-              <Button
-                variant="ghost"
-                loading={action.busy}
-                onPress={() => {
-                  void confirmedAction(
-                    'undo_replied',
-                    {},
-                    '已撤销回复确认，对应成长会同步修正。',
-                  );
-                }}
-              >
-                撤销已回复记录
-              </Button>
-            </>
-          )}
-          {todo.kind === 'communication' && replyRecord.error && (
-            <ErrorNotice
-              message="回复确认记录暂时无法读取。可以重试，原有事项仍然保留。"
-              retry={replyRecord.refresh}
-            />
-          )}
           <Button
             variant="secondary"
             loading={action.busy}

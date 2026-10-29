@@ -194,8 +194,12 @@ function apiFixture(initial = todo()) {
             reconcile(true);
           } else if (body.kind === 'undo_replied') {
             replied = false;
-            saved = { ...saved, status: 'pending', version: saved.version + 1 };
-            reconcile(false);
+            saved = {
+              ...saved,
+              status: saved.status === 'waiting' ? 'pending' : saved.status,
+              version: saved.version + 1,
+            };
+            reconcile(saved.status === 'completed');
           } else {
             saved = {
               ...saved,
@@ -625,11 +629,108 @@ test('opening share never grants growth; explicit typed reply grants one receipt
   expect(api.rewards()).toHaveLength(1);
   expect(texts(app.tree)).toContain('+10 成长');
   expect(button(app.tree, '撤销已回复记录')).toBeDefined();
+  expect(
+    app.tree.root
+      .findAllByType(Button)
+      .filter(node => node.props.children === '撤销已回复记录'),
+  ).toHaveLength(1);
   await act(async () => button(app.tree, '撤销已回复记录').props.onPress());
   expect(api.saved().status).toBe('pending');
   expect(api.rewards()[0].active).toBe(false);
   await app.close();
 });
+
+test('completed communication can undo its separate reply fact without restoring the Todo or giving another reward', async () => {
+  const api = apiFixture(todo({ kind: 'communication', draft: '真实回复' }));
+  const app = await mount(<TodoDetail id="one" />, api.api);
+  await act(async () =>
+    button(app.tree, '我已实际回复 → 等待').props.onPress(),
+  );
+  const earned = clone(api.rewards()[0]);
+  await act(async () => button(app.tree, '我已确认这件事结束').props.onPress());
+  expect(api.saved().status).toBe('completed');
+  expect(button(app.tree, '撤销已回复记录')).toBeDefined();
+  expect(label(app.tree, '收起成长提示')).toBeUndefined();
+  const version = api.saved().version;
+  await act(async () => button(app.tree, '撤销已回复记录').props.onPress());
+  expect(api.api.request).toHaveBeenCalledWith(
+    '/todos/one/actions',
+    'POST',
+    expect.objectContaining({ kind: 'undo_replied', version }),
+  );
+  expect(api.saved().status).toBe('completed');
+  expect(api.rewards()).toHaveLength(1);
+  expect(api.rewards()[0]).toMatchObject({
+    id: earned.id,
+    xp: earned.xp,
+    earned_at: earned.earned_at,
+    active: true,
+  });
+  expect(button(app.tree, '撤销已回复记录')).toBeUndefined();
+  expect(texts(app.tree)).toContain('已确认的事项完成记录会保留');
+  expect(label(app.tree, '收起成长提示')).toBeUndefined();
+  await app.close();
+});
+
+test('pending communication can undo its reply fact directly without reconfirming a reply', async () => {
+  const api = apiFixture(todo({ kind: 'communication', draft: '真实回复' }));
+  const app = await mount(<TodoDetail id="one" />, api.api);
+  await act(async () =>
+    button(app.tree, '我已实际回复 → 等待').props.onPress(),
+  );
+  await act(async () => button(app.tree, '继续处理').props.onPress());
+  expect(api.saved().status).toBe('pending');
+  expect(button(app.tree, '撤销已回复记录')).toBeDefined();
+  await act(async () => button(app.tree, '撤销已回复记录').props.onPress());
+  expect(api.saved().status).toBe('pending');
+  expect(api.rewards()[0].active).toBe(false);
+  expect(
+    api.api.request.mock.calls
+      .filter(call => call[0] === '/todos/one/actions' && call[1] === 'POST')
+      .map(call => call[2].kind),
+  ).toEqual(['replied', 'undo_replied']);
+  expect(button(app.tree, '撤销已回复记录')).toBeUndefined();
+  expect(label(app.tree, '收起成长提示')).toBeUndefined();
+  await app.close();
+});
+
+test.each(['pending', 'completed'] as const)(
+  'reply fact read failure has its own retry even when the communication Todo is %s',
+  async status => {
+    const api = apiFixture(todo({ kind: 'communication', status }));
+    const original = api.api.request.getMockImplementation()!;
+    let unavailable = true;
+    api.api.request.mockImplementation(async (path, method, body) => {
+      if (
+        path === '/todos/one/actions' &&
+        (!method || method === 'GET') &&
+        unavailable
+      )
+        throw new ApiError('network', '回复记录读取失败', 0);
+      return original(path, method, body);
+    });
+    const app = await mount(<TodoDetail id="one" />, api.api);
+    const retry = app.tree.root
+      .findAllByType(ErrorNotice)
+      .find(node =>
+        node.props.message?.startsWith('回复确认记录暂时无法读取'),
+      )!;
+    expect(retry).toBeDefined();
+    unavailable = false;
+    await act(async () => retry.props.retry());
+    expect(texts(app.tree)).not.toContain('回复确认记录暂时无法读取');
+    expect(api.saved().status).toBe(status);
+    expect(
+      api.api.request.mock.calls.filter(
+        call => call[0] === '/todos/one/actions',
+      ),
+    ).toHaveLength(2);
+    expect(api.api.request.mock.calls.some(call => call[1] === 'POST')).toBe(
+      false,
+    );
+    await app.close();
+  },
+);
 
 test('exercise records explicit optional real minutes and rejects 1000 without creating a completion action', async () => {
   const api = apiFixture(
