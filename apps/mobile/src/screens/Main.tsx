@@ -373,7 +373,7 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
           )}
         </Pressable>
       </View>
-      <ErrorNotice message={data.error} retry={data.refresh} />
+      <ErrorNotice message={data.loading ? null : data.error} retry={data.refresh} />
       {data.loading && !data.value && <Loading label="正在查看今天的安排…" />}
       {data.value && (
         <>

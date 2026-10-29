@@ -8,7 +8,7 @@ import type { InstanceManifest } from '../src/domain/instance';
 import type { Today } from '../src/domain/types';
 import { platform } from '../src/platform/ports';
 import { HomeScreen } from '../src/screens/Main';
-import { ErrorNotice } from '../src/ui/components';
+import { ErrorNotice, Loading } from '../src/ui/components';
 
 jest.mock('../src/platform/ports', () => ({
   platform: { onForeground: jest.fn() },
@@ -170,7 +170,10 @@ test('foreground queues a Home GET after its aborted cold-start anonymous check,
     expect(oldSignal.aborted).toBe(true);
     expect(anonymous).toHaveBeenCalledTimes(2);
     expect(accounts).not.toHaveBeenCalled();
-    expect(errors(app.tree).join(' ')).toContain('暂时无法验证这台服务器');
+    expect(errors(app.tree)).toEqual([]);
+    expect(app.tree.root.findByType(Loading).props.label).toBe(
+      '正在查看今天的安排…',
+    );
     await act(async () => second.resolve(response(manifest)));
     expect(text(app.tree)).toContain(today.briefing);
     expect(errors(app.tree)).toEqual([]);
@@ -212,6 +215,38 @@ test('foreground Home recovery still rejects a replacement instance before sendi
     expect(errors(app.tree).join(' ')).toContain('服务器身份已变化');
     expect(accounts).not.toHaveBeenCalled();
     expect(text(app.tree)).not.toContain(today.briefing);
+  } finally {
+    await app.close();
+  }
+});
+
+test('a real network failure on the new foreground check stays visible and does not invent a successful Home read', async () => {
+  const first = deferred<Response>();
+  const anonymous = jest
+    .fn()
+    .mockReturnValueOnce(first.promise)
+    .mockRejectedValue(new TypeError('network remains offline'));
+  const accounts = jest.fn().mockResolvedValue(response(today, '/today'));
+  const app = await mount(anonymous, accounts);
+  try {
+    await act(async () => {
+      listeners.forEach(listener => listener());
+      first.reject(
+        Object.assign(new Error('native fetch aborted'), {
+          name: 'AbortError',
+        }),
+      );
+    });
+    expect(anonymous).toHaveBeenCalledTimes(2);
+    expect(errors(app.tree).join(' ')).toContain('暂时无法验证这台服务器');
+    expect(app.tree.root.findAllByType(Loading)).toHaveLength(0);
+    expect(accounts).not.toHaveBeenCalled();
+    expect(text(app.tree)).not.toContain(today.briefing);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(anonymous).toHaveBeenCalledTimes(2);
+    expect(errors(app.tree).join(' ')).toContain('暂时无法验证这台服务器');
   } finally {
     await app.close();
   }
