@@ -39,6 +39,9 @@ import { IntegrationsScreen } from './src/features/integrations/IntegrationsScre
 import { TodosScreen } from './src/features/todos/TodosScreen';
 import { TodoDetail } from './src/features/todos/TodoDetail';
 import { TodoSources } from './src/features/todos/TodoSources';
+import { GrowthProvider, GrowthFeedbackBanner } from './src/features/growth/context';
+import { GrowthScreen, GrowthWeekScreen } from './src/features/growth/GrowthScreen';
+import { GrowthSettingsScreen } from './src/features/growth/GrowthSettings';
 import { HealthScreen } from './src/features/health/HealthScreen';
 import { AiHistoryScreen } from './src/features/ai-history/AiHistoryScreen';
 import { appInputs } from './src/platform/appInputs';
@@ -382,6 +385,15 @@ function Application() {
       case 'todoSources':
         page = <TodoSources conversationId={route.conversationId} />;
         break;
+      case 'growth':
+        page = <GrowthScreen />;
+        break;
+      case 'growthSettings':
+        page = <GrowthSettingsScreen />;
+        break;
+      case 'growthWeek':
+        page = <GrowthWeekScreen />;
+        break;
       case 'assistantTasks':
         page = <TasksScreen />;
         break;
@@ -472,6 +484,7 @@ function Application() {
           ),
       }}
     >
+      <GrowthProvider>
       <View style={s.screen}>
         <AmbientBackground />
         <SafeAreaView
@@ -528,6 +541,7 @@ function Application() {
               <Text style={{ color: colors.accent }}>有 {pendingInputs} 条手机资料待接收 · 查看并确认</Text>
             </Pressable>
           )}
+          {session && <GrowthFeedbackBanner />}
           <KeyboardAvoidingView
             key={entry.key}
             style={s.fill}
@@ -591,6 +605,7 @@ function Application() {
           )}
         </SafeAreaView>
       </View>
+      </GrowthProvider>
     </AppProvider>
   );
 }

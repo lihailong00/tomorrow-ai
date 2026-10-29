@@ -79,7 +79,7 @@ pub(crate) async fn delete(
     Ok(Json(serde_json::json!({"ok":true})))
 }
 
-async fn configured_provider(state: &AppState) -> std::result::Result<ModelProvider, DomainError> {
+pub(crate) async fn configured_provider(state: &AppState) -> std::result::Result<ModelProvider, DomainError> {
     let provider = match &state.settings {
         Some(settings) => {
             let values = settings

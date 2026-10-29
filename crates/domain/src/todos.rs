@@ -374,7 +374,7 @@ impl Repository {
             todo.draft = v.map(|v| bounded(&v, 50000, "准备内容")).transpose()?;
         }
         if let Some(v) = input.progress_notes {
-            todo.progress_notes = v.map(|v| bounded(&v, 10000, "进展记录")).transpose()?;
+            todo.progress_notes = v.map(|v| bounded(&v, 12500, "进展记录")).transpose()?;
         }
         if let Some(v) = input.status {
             transition(&todo.status, &v)?;
@@ -396,25 +396,51 @@ impl Repository {
         todo.updated_at = timestamp(now());
         // Carry a live generation guard across independent progress/status edits.
         // A previously invalidated guard remains null; it must never be revived.
+        let mut tx = self.pool.begin().await?;
         let changed = sqlx::query("UPDATE todos SET body=$1,status=$2,due_at=$3,version=$4,prepare_version=CASE WHEN $9=1 AND prepare_version=$8 THEN $4 ELSE NULL END,updated_at=$5 WHERE user_id=$6 AND id=$7 AND version=$8")
-            .bind(encode(&todo)?).bind(&todo.status).bind(due_stamp(&todo)).bind(todo.version).bind(now()).bind(user).bind(id).bind(input.version).bind(if generation_changed { 0_i64 } else { 1_i64 }).execute(&self.pool).await?.rows_affected();
+            .bind(encode(&todo)?).bind(&todo.status).bind(due_stamp(&todo)).bind(todo.version).bind(now()).bind(user).bind(id).bind(input.version).bind(if generation_changed { 0_i64 } else { 1_i64 }).execute(&mut *tx).await?.rows_affected();
         if changed == 0 {
             return Err(conflict());
         }
+        if previous.status != todo.status {
+            // Only the explicit exercise action records actual minutes. Generic
+            // status edits cannot restore an old measurement or infer it from notes.
+            sqlx::query("UPDATE growth_todo_actions SET actual_minutes=NULL WHERE user_id=$1 AND todo_id=$2")
+                .bind(user).bind(id).execute(&mut *tx).await?;
+        }
+        let replied: i64 = sqlx::query_scalar("SELECT COALESCE((SELECT replied FROM growth_todo_actions WHERE user_id=$1 AND todo_id=$2),0)")
+            .bind(user).bind(id).fetch_one(&mut *tx).await?;
+        let event = if previous.status != "completed" && todo.status == "completed" { "completed" }
+            else if previous.status == "completed" && todo.status != "completed" { "restored" } else { "updated" };
+        crate::growth::rewards::reconcile_reward(&mut tx,user,&todo,todo.status=="completed" || replied!=0,event).await?;
+        tx.commit().await?;
         Ok(todo)
     }
 
     pub async fn delete_todo(&self, user: &str, id: &str) -> Result<(), DomainError> {
+        let todo = self.todo(user,id).await?;
+        let mut tx = self.pool.begin().await?;
+        // Serialize against concurrent action/version updates before correcting
+        // the fact ledger, and retain tombstones rather than resetting identity.
+        let locked = sqlx::query("UPDATE todos SET updated_at=updated_at WHERE user_id=$1 AND id=$2 AND version=$3")
+            .bind(user).bind(id).bind(todo.version).execute(&mut *tx).await?.rows_affected();
+        if locked==0 { return Err(conflict()); }
+        crate::growth::rewards::reconcile_reward(&mut tx,user,&todo,false,"deleted").await?;
+        sqlx::query("UPDATE growth_todo_actions SET replied=0,actual_minutes=NULL WHERE user_id=$1 AND todo_id=$2").bind(user).bind(id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE growth_commands SET response_body='' WHERE user_id=$1 AND todo_id=$2").bind(user).bind(id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE growth_plan_items SET status='deleted',body='{}',version=version+1 WHERE user_id=$1 AND todo_id=$2").bind(user).bind(id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE growth_daily_plans SET context='' WHERE user_id=$1 AND status IN ('queued','generating')").bind(user).execute(&mut *tx).await?;
         if sqlx::query("DELETE FROM todos WHERE user_id=$1 AND id=$2")
             .bind(user)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?
             .rows_affected()
             == 0
         {
             return Err(DomainError::NotFound);
         }
+        tx.commit().await?;
         // Candidate fingerprints deliberately survive deletion, preventing resurrection.
         Ok(())
     }
@@ -488,7 +514,7 @@ impl Repository {
     }
 }
 
-async fn insert(
+pub(crate) async fn insert(
     tx: &mut sqlx::Transaction<'_, sqlx::Any>,
     user: &str,
     todo: &Todo,

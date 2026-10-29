@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { useAction, useApp, useResource } from '../../app/context';
-import { newRequestId } from '../../api/client';
+import { ApiError, newRequestId } from '../../api/client';
 import type { Task } from '../../domain/types';
 import { taskStatuses } from '../../domain/types';
 import { platform } from '../../platform/ports';
@@ -18,6 +18,8 @@ import { todoKinds, validateMinutes } from './model';
 import { TodoEditor } from './TodoEditor';
 import type { Todo, UpdateTodo } from './types';
 import { todoStyles as s } from './ui';
+import { confirmTodoAction, getTodoActions } from '../growth/api';
+import { useGrowthData } from '../growth/context';
 
 const preparationPendingNotice = '妥啦正在准备内容。你可以稍后回来查看。';
 
@@ -109,6 +111,11 @@ function TodoContent({
 }) {
   const { api, user, navigate, invalidate, formatDate } = useApp();
   const action = useAction();
+  const growth = useGrowthData();
+  const prefetchReward = growth?.prefetchReward;
+  useEffect(() => {
+    void prefetchReward?.(todo.id);
+  }, [prefetchReward, todo.id, todo.version]);
   const [editing, setEditing] = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
   const [draft, setDraft] = useState(todo.draft ?? '');
@@ -116,6 +123,26 @@ function TodoContent({
   const [minutes, setMinutes] = useState('');
   const [notice, setNotice] = useState('');
   const [task, setTask] = useState<Task>();
+  const draftValue = useRef(draft);
+  const notesValue = useRef(notes);
+  const changeDraft = (value: string) => {
+    draftValue.current = value;
+    setDraft(value);
+  };
+  const changeNotes = (value: string) => {
+    notesValue.current = value;
+    setNotes(value);
+  };
+  const confirmedIntents = useRef(
+    new Map<string, Parameters<typeof confirmTodoAction>[2]>(),
+  );
+  const replyRecord = useResource(
+    () =>
+      todo.kind === 'communication'
+        ? getTodoActions(api, todo.id)
+        : Promise.resolve(null),
+    [api, user?.id, todo.id, todo.kind, todo.version],
+  );
   const prepareId = useRef('');
   const previous = useRef({ draft: todo.draft, notes: todo.progress_notes });
   useEffect(() => {
@@ -123,13 +150,25 @@ function TodoContent({
   }, [todo.draft, notice]);
   useEffect(() => {
     // A preparation result may arrive while the progress editor is open.
-    if (previous.current.draft !== todo.draft) setDraft(todo.draft ?? '');
-    if (previous.current.notes !== todo.progress_notes)
-      setNotes(todo.progress_notes ?? '');
+    if (
+      previous.current.draft !== todo.draft &&
+      draftValue.current === (previous.current.draft ?? '')
+    )
+      changeDraft(todo.draft ?? '');
+    if (
+      previous.current.notes !== todo.progress_notes &&
+      notesValue.current === (previous.current.notes ?? '')
+    )
+      changeNotes(todo.progress_notes ?? '');
     previous.current = { draft: todo.draft, notes: todo.progress_notes };
   }, [todo.draft, todo.progress_notes]);
   const save = (patch: Omit<UpdateTodo, 'version'>, message?: string) =>
     action.run(async guard => {
+      const observesCompletion =
+        patch.status === 'completed' ||
+        (todo.status === 'completed' && !!patch.status);
+      const observation = growth?.prepareReward(todo.id) ?? null;
+      if (!guard.isCurrent()) return;
       const updated = await updateTodo(api, todo.id, {
         ...patch,
         version: todo.version,
@@ -139,9 +178,89 @@ function TodoContent({
       invalidate();
       setEditing(false);
       setNotice(message ?? '已保存。');
+      if (observesCompletion) void growth?.confirmReward(observation);
+    });
+  const confirmedAction = (
+    kind: 'replied' | 'undo_replied' | 'exercise_completed',
+    patch:
+      | Pick<
+          Parameters<typeof confirmTodoAction>[2],
+          'draft' | 'actual_minutes' | 'progress_notes'
+        >
+      | (() => Pick<
+          Parameters<typeof confirmTodoAction>[2],
+          'draft' | 'actual_minutes' | 'progress_notes'
+        >),
+    message: string,
+  ) =>
+    action.run(async guard => {
+      let intent = confirmedIntents.current.get(kind);
+      if (!intent) {
+        const details = typeof patch === 'function' ? patch() : patch;
+        intent = {
+          kind,
+          version: todo.version,
+          client_request_id: newRequestId(),
+          ...details,
+        };
+        confirmedIntents.current.set(kind, intent);
+      }
+      const observation = growth?.prepareReward(todo.id) ?? null;
+      if (!guard.isCurrent()) return;
+      try {
+        let compatibility = false;
+        let result;
+        try {
+          result = await confirmTodoAction(api, todo.id, intent);
+        } catch (failure) {
+          // A definite missing method may use the old CAS endpoint. An uncertain
+          // outcome must keep the original intent and never send a second action.
+          if (
+            !(failure instanceof ApiError) ||
+            ![404, 405].includes(failure.status) ||
+            kind === 'undo_replied'
+          )
+            throw failure;
+          if (!guard.isCurrent()) return;
+          const legacy = await updateTodo(api, todo.id, {
+            version: intent.version,
+            ...(kind === 'replied'
+              ? { status: 'waiting' as const, draft: intent.draft }
+              : {
+                  status: 'completed' as const,
+                  progress_notes: intent.progress_notes,
+                }),
+          });
+          compatibility = true;
+          result = {
+            todo: legacy,
+            actions: { replied: false, replied_at: null },
+            reward: null,
+          };
+        }
+        if (!guard.isCurrent()) return;
+        confirmedIntents.current.delete(kind);
+        onUpdate(result.todo);
+        invalidate();
+        setNotice(
+          compatibility
+            ? '已按兼容方式保存。当前服务不支持成长动作记录，更新后端后可使用。'
+            : message,
+        );
+        if (!compatibility) void growth?.confirmReward(observation);
+      } catch (failure) {
+        if (
+          guard.isCurrent() &&
+          failure instanceof ApiError &&
+          [400, 409, 410, 422].includes(failure.status)
+        )
+          confirmedIntents.current.delete(kind);
+        throw failure;
+      }
     });
   const prepare = () =>
     action.run(async guard => {
+      growth?.prepareReward(todo.id);
       if (!prepareId.current) prepareId.current = newRequestId();
       const updated = await prepareTodo(api, todo.id, prepareId.current);
       if (!guard.isCurrent()) return;
@@ -171,25 +290,24 @@ function TodoContent({
       }
     });
   const completeExercise = () =>
-    action.run(async guard => {
-      const duration = validateMinutes(minutes);
-      const updated = await updateTodo(api, todo.id, {
-        version: todo.version,
-        status: 'completed',
-        progress_notes: [
-          notes.trim(),
-          duration
-            ? `实际运动 ${duration} 分钟（自行记录）`
-            : '已自行确认这次运动完成',
-        ]
-          .filter(Boolean)
-          .join('\n'),
-      });
-      if (!guard.isCurrent()) return;
-      onUpdate(updated);
-      invalidate();
-      setNotice('已记录这次运动完成。');
-    });
+    confirmedAction(
+      'exercise_completed',
+      () => {
+        const duration = validateMinutes(minutes);
+        return {
+          actual_minutes: duration,
+          progress_notes: [
+            notesValue.current.trim(),
+            duration
+              ? `实际运动 ${duration} 分钟（自行记录）`
+              : '已自行确认这次运动完成',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        };
+      },
+      '已记录这次运动完成。',
+    );
   const share = () =>
     action.run(async guard => {
       if (!draft.trim()) throw new Error('先写好回复草稿。');
@@ -270,6 +388,32 @@ function TodoContent({
       ) : todo.status === 'waiting' ? (
         <>
           <Notice>正在等待后续进展。你可以记录新消息，再决定是否结束。</Notice>
+          {todo.kind === 'communication' && replyRecord.value?.replied && (
+            <>
+              <Text style={s.small}>
+                你已明确确认回复，这一步已按服务端规则记录；整件事仍等待后续。
+              </Text>
+              <Button
+                variant="ghost"
+                loading={action.busy}
+                onPress={() => {
+                  void confirmedAction(
+                    'undo_replied',
+                    {},
+                    '已撤销回复确认，对应成长会同步修正。',
+                  );
+                }}
+              >
+                撤销已回复记录
+              </Button>
+            </>
+          )}
+          {todo.kind === 'communication' && replyRecord.error && (
+            <ErrorNotice
+              message="回复确认记录暂时无法读取。可以重试，原有事项仍然保留。"
+              retry={replyRecord.refresh}
+            />
+          )}
           <Button
             variant="secondary"
             loading={action.busy}
@@ -381,8 +525,9 @@ function TodoContent({
               variant="secondary"
               loading={action.busy}
               onPress={() => {
-                void save(
-                  { status: 'waiting', draft: draft || null },
+                void confirmedAction(
+                  'replied',
+                  { draft: draftValue.current || null },
                   '已按你的确认记录为等待后续。',
                 );
               }}
@@ -483,7 +628,7 @@ function TodoContent({
                 }
                 multiline
                 value={draft}
-                onChangeText={setDraft}
+                onChangeText={changeDraft}
                 maxLength={24000}
               />
               <Button
@@ -516,7 +661,7 @@ function TodoContent({
           <Field
             label="进展记录"
             value={notes}
-            onChangeText={setNotes}
+            onChangeText={changeNotes}
             multiline
             maxLength={12000}
             placeholder={

@@ -44,6 +44,7 @@ const importSourceNames: Record<string, string> = {
 };
 export function shortSourceLabel(todo: Todo): string {
   if (todo.source_kind === 'manual') return '你添加';
+  if (todo.source_kind === 'ai_daily') return 'AI 建议';
   if (todo.source_kind === 'conversation') return '对话';
   if (todo.source_kind === 'integration_import') {
     const id = /^已导入\s*·\s*([a-z0-9_]+)\s*·/.exec(todo.source_label)?.[1];

@@ -25,6 +25,13 @@ import { TodoEditor } from './TodoEditor';
 import { useTodoList } from './useTodoList';
 import type { CreateTodo, Todo, TodoScope } from './types';
 import { todoStyles as s } from './ui';
+import {
+  DailyRecommendations,
+  GrowthEntry,
+  useDailyGrowth,
+} from '../growth/DailyGrowth';
+import { useGrowth } from '../growth/context';
+import { localDateLabel } from '../growth/model';
 
 type Group = 'suggested' | 'waiting' | 'completed';
 type Row =
@@ -71,6 +78,8 @@ export function TodosScreen() {
   };
   const owner = useMemo(() => ({ api, userId: user?.id }), [api, user?.id]);
   const action = useAction();
+  const growth = useGrowth();
+  const daily = useDailyGrowth();
   const pendingIntent = useRef<
     | {
         owner: typeof owner;
@@ -106,9 +115,18 @@ export function TodosScreen() {
     suggested.refresh();
     waiting.refresh();
     completed.refresh();
+    growth?.refresh();
+    daily.refresh();
   };
   const rows = useMemo(() => {
-    const result: Row[] = active.items.map(todo => ({ key: todo.id, todo }));
+    const recommendedIds = new Set(
+      scope === 'today'
+        ? daily.items.flatMap(item => (item.todo_id ? [item.todo_id] : []))
+        : [],
+    );
+    const result: Row[] = active.items
+      .filter(todo => !recommendedIds.has(todo.id))
+      .map(todo => ({ key: todo.id, todo }));
     if (active.hasMore) result.push({ key: 'more-active', more: 'active' });
     (['suggested', 'waiting', 'completed'] as Group[]).forEach(group => {
       result.push({ key: 'group-' + group, group });
@@ -133,6 +151,8 @@ export function TodosScreen() {
     completed.items,
     completed.hasMore,
     open,
+    daily.items,
+    scope,
   ]);
   const add = (
     input: CreateTodo,
@@ -212,9 +232,12 @@ export function TodosScreen() {
             <View style={s.heading}>
               <Text style={s.title}>事项</Text>
               <Text style={s.small}>
-                {chineseDayLabel(new Date(), user?.timezone)}
+                {growth?.data?.summary.today.date
+                  ? localDateLabel(growth.data.summary.today.date, true)
+                  : chineseDayLabel(new Date(), user?.timezone)}
               </Text>
             </View>
+            <GrowthEntry />
             <View style={s.links}>
               <Pressable
                 accessibilityRole="button"
@@ -247,10 +270,13 @@ export function TodosScreen() {
                 </Pressable>
               ))}
             </View>
+            {scope === 'today' && <DailyRecommendations daily={daily} />}
             <ErrorNotice message={active.error} retry={active.refresh} />
             {active.loading && !active.items.length ? (
               <Loading />
-            ) : !active.items.length && !active.error ? (
+            ) : !active.items.length &&
+              !active.error &&
+              !(scope === 'today' && daily.items.length) ? (
               <Text style={s.empty}>
                 {scope === 'today'
                   ? '今天还没有待处理的事项。\n记下一件事，或从你确认过的资料里发现。'

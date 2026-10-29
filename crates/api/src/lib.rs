@@ -22,6 +22,7 @@ mod chat_stream;
 mod knowledge_api;
 mod phone_api;
 mod todo_api;
+mod growth_api;
 pub mod admin;
 mod live;
 use tomorrow_domain::agent::AgentClient;
@@ -190,6 +191,15 @@ pub fn app(state: AppState) -> Router {
         .route("/todos/extract", post(todo_api::extract))
         .route("/todos/{id}", get(todo_api::get).patch(todo_api::update).delete(todo_api::delete))
         .route("/todos/{id}/prepare", post(todo_api::prepare))
+        .route("/todos/{id}/actions", get(growth_api::actions).post(growth_api::confirm_action))
+        .route("/growth/preferences", get(growth_api::preferences).patch(growth_api::update_preferences))
+        .route("/growth/summary", get(growth_api::summary))
+        .route("/growth/todos/{id}", get(growth_api::reward))
+        .route("/daily-plan", get(growth_api::plan))
+        .route("/daily-plan/ensure", post(growth_api::ensure))
+        .route("/daily-plan/items/{id}/accept", post(growth_api::accept))
+        .route("/daily-plan/items/{id}/skip", post(growth_api::skip))
+        .route("/daily-plan/items/{id}/replace", post(growth_api::replace))
         .route("/tasks/{id}", get(task))
         .route("/tasks/{id}/cancel", post(cancel_task))
         .route("/tasks/{id}/approve", post(approve_task))
@@ -1174,6 +1184,17 @@ async fn download_artifact(
         todo_api::delete,
         todo_api::prepare,
         todo_api::extract,
+        growth_api::preferences,
+        growth_api::update_preferences,
+        growth_api::summary,
+        growth_api::reward,
+        growth_api::actions,
+        growth_api::confirm_action,
+        growth_api::plan,
+        growth_api::ensure,
+        growth_api::accept,
+        growth_api::skip,
+        growth_api::replace,
         tasks,
         create_task,
         task,
@@ -1210,6 +1231,24 @@ async fn download_artifact(
         PrepareTodo,
         ExtractTodos,
         ExtractedTodos,
+        GrowthGoal,
+        GrowthPreferences,
+        UpdateGrowthPreferences,
+        GrowthReward,
+        GrowthRewardState,
+        GrowthDay,
+        GrowthToday,
+        GrowthWeek,
+        GrowthMilestone,
+        GrowthSummary,
+        TodoActions,
+        ConfirmTodoAction,
+        TodoActionResult,
+        EnsureDailyPlan,
+        DailyItemCommand,
+        DailyPlanItem,
+        DailyPlan,
+        AcceptDailyItem,
         Task,
         Step,
         Schedule,

@@ -1106,6 +1106,8 @@ impl Repository {
             .execute(&pool).await?;
         sqlx::raw_sql(include_str!("../../../migrations/sqlite/013_todos.sql"))
             .execute(&pool).await?;
+        sqlx::raw_sql(include_str!("../../../migrations/sqlite/014_daily_growth.sql"))
+            .execute(&pool).await?;
         // Authentication checks this table even in non-admin processes such as
         // attachment and connector services; it must exist before any login.
         sqlx::query("CREATE TABLE IF NOT EXISTS admin_user_controls(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,disabled BIGINT NOT NULL DEFAULT 0,updated_at BIGINT NOT NULL)")

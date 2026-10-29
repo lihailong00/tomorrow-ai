@@ -45,6 +45,7 @@ async fn run_local(engine: WorkerEngine) -> Result<()> {
         "持久队列 Worker 已启动；当前使用数据库轮询，可在 API 退出后独立工作"
     );
     let mut poll = tokio::time::interval(Duration::from_secs(2));
+    let mut growth_sweep = tokio::time::interval(Duration::from_secs(15));
     loop {
         tokio::select! {
             signal = tokio::signal::ctrl_c() => {
@@ -64,6 +65,11 @@ async fn run_local(engine: WorkerEngine) -> Result<()> {
                     }
                     Ok(None) => {}
                     Err(error) => tracing::error!(%error, "读取任务失败，下轮重试"),
+                }
+            }
+            _ = growth_sweep.tick() => {
+                if let Err(error) = engine.repository().tick_daily_growth().await {
+                    tracing::error!(%error, "每日成长检查失败，下轮继续");
                 }
             }
         }

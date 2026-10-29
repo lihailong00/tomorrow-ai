@@ -349,9 +349,28 @@ it('accepts source candidates explicitly and retains evidence when dismissing or
 });
 it('shares a real draft without recording sent or waiting, then requires actual reply confirmation', async () => {
   const current = todo({ kind: 'communication', draft: '依据真实目标的草稿' });
-  const request = jest.fn(async (_path: string, method: string, patch: any) =>
-    method === 'PATCH' ? { ...current, ...patch, version: 2 } : current,
-  );
+  let saved = current;
+  let replied = false;
+  const request = jest.fn(async (path: string, method: string, patch: any) => {
+    if (path.endsWith('/actions')) {
+      if (method === 'POST') {
+        replied = true;
+        saved = {
+          ...current,
+          status: 'waiting',
+          draft: patch.draft,
+          version: 2,
+        };
+        return {
+          todo: saved,
+          actions: { replied, replied_at: '2026-10-30T00:00:00Z' },
+          reward: null,
+        };
+      }
+      return { replied, replied_at: replied ? '2026-10-30T00:00:00Z' : null };
+    }
+    return method === 'PATCH' ? { ...saved, ...patch, version: 2 } : saved;
+  });
   const tree = await mount(
     <TodoDetail id="one" />,
     context({ request, baseUrl: 'https://api.example.com' }),
@@ -361,19 +380,34 @@ it('shares a real draft without recording sent or waiting, then requires actual 
   expect(request.mock.calls.filter(call => call[1] === 'PATCH')).toHaveLength(
     0,
   );
+  expect(request.mock.calls.filter(call => call[1] === 'POST')).toHaveLength(0);
   await act(async () => button(tree, '我已实际回复 → 等待').props.onPress());
-  expect(request).toHaveBeenLastCalledWith('/todos/one', 'PATCH', {
+  expect(request).toHaveBeenCalledWith('/todos/one/actions', 'POST', {
     version: 1,
-    status: 'waiting',
+    kind: 'replied',
     draft: current.draft,
+    client_request_id: expect.any(String),
   });
+  expect(texts(tree)).toContain('正在等待后续进展');
+  expect(request.mock.calls.filter(call => call[1] === 'POST')).toHaveLength(1);
   await act(async () => tree.unmount());
 });
 it('requires validated user-entered minutes before completing exercise', async () => {
   const current = todo({ kind: 'exercise', status: 'in_progress' });
-  const request = jest.fn(async (_path: string, method: string, patch: any) =>
-    method === 'PATCH' ? { ...current, ...patch, version: 2 } : current,
-  );
+  const request = jest.fn(async (path: string, method: string, patch: any) => {
+    if (path.endsWith('/actions') && method === 'POST')
+      return {
+        todo: {
+          ...current,
+          status: 'completed',
+          progress_notes: patch.progress_notes,
+          version: 2,
+        },
+        actions: { replied: false, replied_at: null },
+        reward: null,
+      };
+    return method === 'PATCH' ? { ...current, ...patch, version: 2 } : current;
+  });
   const tree = await mount(
     <TodoDetail id="one" />,
     context({ request, baseUrl: 'https://api.example.com' }),
@@ -386,6 +420,7 @@ it('requires validated user-entered minutes before completing exercise', async (
   expect(request.mock.calls.filter(call => call[1] === 'PATCH')).toHaveLength(
     0,
   );
+  expect(request.mock.calls.filter(call => call[1] === 'POST')).toHaveLength(0);
   expect(
     tree.root
       .findAllByType(ErrorNotice)
@@ -394,11 +429,14 @@ it('requires validated user-entered minutes before completing exercise', async (
   ).toContain('1–360');
   await act(async () => input.props.onChangeText('20'));
   await act(async () => button(tree, '我已完成这次运动').props.onPress());
-  expect(request).toHaveBeenLastCalledWith('/todos/one', 'PATCH', {
+  expect(request).toHaveBeenCalledWith('/todos/one/actions', 'POST', {
     version: 1,
-    status: 'completed',
+    kind: 'exercise_completed',
+    actual_minutes: 20,
     progress_notes: '实际运动 20 分钟（自行记录）',
+    client_request_id: expect.any(String),
   });
+  expect(texts(tree)).toContain('你已确认这件事完成');
   await act(async () => tree.unmount());
 });
 it('extracts only a selected persisted conversation and leaves results as candidates', async () => {

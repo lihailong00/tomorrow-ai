@@ -22,6 +22,9 @@ export type Route =
   | { name: 'todos' }
   | { name: 'todo'; id: string }
   | { name: 'todoSources'; conversationId?: string }
+  | { name: 'growth' }
+  | { name: 'growthSettings' }
+  | { name: 'growthWeek' }
   | { name: 'assistantTasks' }
   | { name: 'memory'; memory?: Memory }
   | { name: 'schedule'; schedule?: Schedule }

@@ -33,12 +33,14 @@ pub struct TaskActivities {
 impl TaskActivities {
     #[activity]
     pub async fn tick(self: Arc<Self>, _ctx: ActivityContext) -> Result<u64, ActivityError> {
-        Ok(self
+        let scheduled = self
             .engine
             .repository()
             .tick_schedules()
             .await
-            .map_err(activity_error)? as u64)
+            .map_err(activity_error)? as u64;
+        let growth = self.engine.repository().tick_daily_growth().await.map_err(activity_error)? as u64;
+        Ok(scheduled + growth)
     }
 
     #[activity]
