@@ -19,6 +19,8 @@ import { TodoEditor } from './TodoEditor';
 import type { Todo, UpdateTodo } from './types';
 import { todoStyles as s } from './ui';
 
+const preparationPendingNotice = '妥啦正在准备内容。你可以稍后回来查看。';
+
 export function TodoDetail({ id }: { id: string }) {
   const { api, user } = useApp();
   const owner = useMemo(
@@ -117,6 +119,9 @@ function TodoContent({
   const prepareId = useRef('');
   const previous = useRef({ draft: todo.draft, notes: todo.progress_notes });
   useEffect(() => {
+    if (todo.draft && notice === preparationPendingNotice) setNotice('');
+  }, [todo.draft, notice]);
+  useEffect(() => {
     // A preparation result may arrive while the progress editor is open.
     if (previous.current.draft !== todo.draft) setDraft(todo.draft ?? '');
     if (previous.current.notes !== todo.progress_notes)
@@ -143,7 +148,7 @@ function TodoContent({
       onUpdate(updated);
       invalidate();
       setTask(undefined);
-      setNotice('妥啦正在准备内容。你可以稍后回来查看。');
+      setNotice(preparationPendingNotice);
       prepareId.current = '';
       refresh();
     });

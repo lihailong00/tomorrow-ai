@@ -432,42 +432,75 @@ it('extracts only a selected persisted conversation and leaves results as candid
   await act(async () => tree.unmount());
 });
 
-it('polls a real preparation result without auto-completing the personal todo', async () => {
-  jest.useFakeTimers();
-  try {
-    let current = todo({ kind: 'learning', title: '学懂用户自己的目标' });
-    const request = jest.fn(async (path: string) => {
-      if (path.endsWith('/prepare'))
-        current = { ...current, linked_task_id: 'real-task', version: 2 };
-      return current;
-    });
-    const tree = await mount(
-      <TodoDetail id="one" />,
-      context({ request, baseUrl: 'https://api.example.com' }),
-    );
-    await act(async () => button(tree, '准备讲解与练习').props.onPress());
-    expect(request).toHaveBeenCalledWith('/todos/one/prepare', 'POST', {
-      client_request_id: expect.any(String),
-    });
-    current = {
-      ...current,
-      draft: '依据用户目标生成的真实讲解和练习',
-      version: 3,
-    };
-    await act(async () => {
-      await jest.advanceTimersByTimeAsync(4000);
-    });
-    expect(texts(tree)).toContain(current.draft!);
-    expect(request.mock.calls.some(call => (call as any)[1] === 'PATCH')).toBe(
-      false,
-    );
-    expect(texts(tree)).toContain('我已完成这次学习');
-    await act(async () => tree.unmount());
-  } finally {
-    jest.clearAllTimers();
-    jest.useRealTimers();
-  }
-});
+it.each([false, true])(
+  'polls a real preparation result, retires only its pending notice and preserves progress feedback (%s)',
+  async saveDuringPreparation => {
+    jest.useFakeTimers();
+    try {
+      let current = todo({ kind: 'learning', title: '学懂用户自己的目标' });
+      const request = jest.fn(
+        async (path: string, method: string, patch: any) => {
+          if (path.endsWith('/prepare'))
+            current = {
+              ...current,
+              linked_task_id: 'real-task',
+              version: current.version + 1,
+            };
+          if (method === 'PATCH')
+            current = { ...current, ...patch, version: current.version + 1 };
+          return current;
+        },
+      );
+      const tree = await mount(
+        <TodoDetail id="one" />,
+        context({ request, baseUrl: 'https://api.example.com' }),
+      );
+      const progress = () => byLabel(tree, '进展记录');
+      await act(async () =>
+        progress().props.onChangeText('已学完第一课，下一步练习口语'),
+      );
+      await act(async () => button(tree, '保存进展').props.onPress());
+      await act(async () => button(tree, '准备讲解与练习').props.onPress());
+      expect(request).toHaveBeenCalledWith('/todos/one/prepare', 'POST', {
+        client_request_id: expect.any(String),
+      });
+      expect(texts(tree)).toContain('妥啦正在准备内容。你可以稍后回来查看。');
+      if (saveDuringPreparation) {
+        await act(async () =>
+          progress().props.onChangeText('补充真实学习笔记'),
+        );
+        await act(async () => button(tree, '保存进展').props.onPress());
+        expect(texts(tree)).toContain('进展已保存。');
+      }
+      current = {
+        ...current,
+        draft: '依据用户目标生成的真实讲解和练习',
+        version: current.version + 1,
+      };
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(4000);
+      });
+      expect(texts(tree)).toContain(current.draft!);
+      expect(texts(tree)).not.toContain(
+        '妥啦正在准备内容。你可以稍后回来查看。',
+      );
+      if (saveDuringPreparation) expect(texts(tree)).toContain('进展已保存。');
+      expect(progress().props.value).toBe(
+        saveDuringPreparation
+          ? '补充真实学习笔记'
+          : '已学完第一课，下一步练习口语',
+      );
+      const patches = request.mock.calls.filter(call => call[1] === 'PATCH');
+      expect(patches).toHaveLength(saveDuringPreparation ? 2 : 1);
+      expect(patches.some(call => call[2].status !== undefined)).toBe(false);
+      expect(texts(tree)).toContain('我已完成这次学习');
+      await act(async () => tree.unmount());
+    } finally {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    }
+  },
+);
 
 it('retains the personal item and user progress when content preparation is unavailable', async () => {
   const current = todo({ kind: 'learning', progress_notes: '真实学习进度' });
