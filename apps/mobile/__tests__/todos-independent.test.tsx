@@ -44,15 +44,15 @@ function storedApi(value:Todo) {
 it('keeps independent source/kind rows and truthful loaded group counts, then paginates overlaps',async()=>{
   const request=jest.fn(async(path:string)=>{
     const q=query(path),filter=q.filter,offset=q.offset;
-    if(filter==='active')return offset==='0'?{items:[todo('learn',{kind:'learning',source_label:'你添加'}),todo('errand',{kind:'errand',source_label:'短信导入'})],next_offset:50}:{items:[todo('learn',{kind:'learning',source_label:'你添加'}),todo('older')],next_offset:null};
+    if(filter==='active')return offset==='0'?{items:[todo('learn',{kind:'learning'}),todo('errand',{kind:'errand',source_kind:'integration_import',source_label:'已导入 · shared · 测试来源',source_id:'owned-import'})],next_offset:50}:{items:[todo('learn',{kind:'learning'}),todo('older',{source_kind:'conversation',source_label:'对话 · 测试来源',source_id:'owned-conversation'})],next_offset:null};
     if(filter==='waiting')return {items:[todo('waiting',{status:'waiting'})],next_offset:50};
-    if(filter==='suggested')return {items:[todo('candidate',{status:'suggested'})],next_offset:null};
+    if(filter==='suggested')return {items:[todo('candidate',{status:'suggested',source_kind:'conversation',source_label:'对话 · 测试候选',source_id:'owned-candidate-conversation',source_excerpt:'我会处理这件事'})],next_offset:null};
     return {items:[],next_offset:null};
   });
   const app=await mount(<TodosScreen/>,{request,baseUrl:'https://fixture.invalid'});
-  expect(texts(app.tree)).toContain('事项learn');expect(texts(app.tree)).toContain('短信导入');expect(texts(app.tree)).toContain('等待后续 · 1+');expect(texts(app.tree)).not.toContain('事项waiting');
+  expect(texts(app.tree)).toContain('事项learn');expect(texts(app.tree)).toContain('你添加');expect(texts(app.tree)).toContain('分享资料');expect(texts(app.tree)).toContain('等待后续 · 1+');expect(texts(app.tree)).not.toContain('事项waiting');
   await press(app.tree,'加载更多事项');
-  expect(app.tree.root.findAllByType(Text).filter(n=>n.props.children==='事项learn')).toHaveLength(1);expect(texts(app.tree)).toContain('事项older');
+  expect(app.tree.root.findAllByType(Text).filter(n=>n.props.children==='事项learn')).toHaveLength(1);expect(texts(app.tree)).toContain('事项older');expect(texts(app.tree)).toContain('对话');
   await act(async()=>{app.tree.root.findAll(n=>n.props.accessibilityRole==='tab'&&childText(n.props.children)==='全部'&&typeof n.props.onPress==='function')[0].props.onPress();});
   expect(request.mock.calls.some(([path])=>path.includes('filter=active')&&path.includes('scope=all'))).toBe(true);
   await app.close();
@@ -99,7 +99,7 @@ it('exercise only starts and ends from user actions; 1000 minutes is not truncat
 });
 
 it('suggested items cannot prepare or run work before the user admits them',async()=>{
-  const api=storedApi(todo('candidate',{status:'suggested',kind:'communication',source_kind:'integration_import',source_label:'已导入资料',source_excerpt:'我会回复客户'}));const app=await mount(<TodoDetail id="candidate"/>,api);
+  const api=storedApi(todo('candidate',{status:'suggested',kind:'communication',source_kind:'integration_import',source_label:'已导入 · shared · 测试资料',source_id:'owned-import-candidate',source_excerpt:'我会回复客户'}));const app=await mount(<TodoDetail id="candidate"/>,api);
   expect(texts(app.tree)).toContain('候选事项，请确认后加入');expect(app.tree.root.findAllByType(Button).some(n=>n.props.children==='准备回复草稿')).toBe(false);expect(platform.share).not.toHaveBeenCalled();await press(app.tree,'确认加入');expect(api.saved().status).toBe('pending');expect(app.tree.root.findAllByType(Button).some(n=>n.props.children==='准备回复草稿')).toBe(true);await app.close();
 });
 
