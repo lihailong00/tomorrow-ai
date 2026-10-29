@@ -338,7 +338,8 @@ async fn agent_writes_use_existing_transaction_replay_and_scope_rules() {
     assert!(tomorrow_domain::agent::tool_definitions("task")
         .iter()
         .any(|t| t.name == "search_knowledge_graph"));
-    assert!(tomorrow_domain::agent::tool_definitions("chat").len() <= 20);
+    // Include the released connection and knowledge tools in the catalog budget.
+    assert!(tomorrow_domain::agent::tool_definitions("chat").len() <= 26);
 }
 
 #[tokio::test]

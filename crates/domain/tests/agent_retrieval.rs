@@ -246,7 +246,7 @@ async fn retrieval_contract(repo: Repository) {
         .await
         .is_err()
     );
-    // The released personal-connection baseline adds six connector tools.
+    // The released connection and knowledge baseline extends the tool catalog.
     assert_eq!(tool_definitions("chat").len(), 26);
     repo.cancel_agent_run(&owner.id, &run.id).await.unwrap();
     assert!(matches!(
