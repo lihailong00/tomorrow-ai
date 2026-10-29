@@ -308,6 +308,21 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
   const data = useResource(() => api.today(), [api, revision]);
   const action = useAction();
   const [briefExpanded, setBriefExpanded] = useState(false);
+  const refreshHome = data.refresh;
+  // A foreground identity check may cancel the initial read. Let all synchronous
+  // guard invalidation listeners run before queuing another guarded GET.
+  useEffect(() => {
+    let active = true;
+    const unsubscribe = platform.onForeground?.(() => {
+      Promise.resolve().then(() => {
+        if (active) refreshHome();
+      });
+    });
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [api, user?.id, refreshHome]);
   // Preview and totals can straddle a completion; refresh until both settle.
   const hasActiveTasks = Boolean(
     data.value && (
