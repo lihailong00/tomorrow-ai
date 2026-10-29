@@ -5,6 +5,7 @@ mod reads;
 pub mod domestic;
 pub mod personal_mcp;
 pub mod personal_wallet;
+pub mod health;
 
 use std::sync::Arc;
 

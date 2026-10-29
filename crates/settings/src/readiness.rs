@@ -222,6 +222,24 @@ pub(crate) fn evaluate(revision: i64, values: &HashMap<String, String>) -> Confi
         missing(google),
     ));
     groups.push(group("amap", "高德地图", has("AMAP_WEB_API_KEY"), vec![]));
+    for (id, label, keys) in [
+        ("huawei_health", "华为运动健康", ["HUAWEI_HEALTH_CLIENT_ID", "HUAWEI_HEALTH_CLIENT_SECRET", "HUAWEI_HEALTH_REDIRECT_URI"]),
+        ("xiaomi_health", "小米运动健康", ["XIAOMI_HEALTH_CLIENT_ID", "XIAOMI_HEALTH_CLIENT_SECRET", "XIAOMI_HEALTH_REDIRECT_URI"]),
+    ] {
+        let mut fields = missing(&keys[..2]);
+        if !has(keys[2]) && !get("INSTANCE_PUBLIC_URL").is_some_and(|value| {
+            reqwest::Url::parse(value).is_ok_and(|url| url.scheme() == "https"
+                && url.host_str().is_some() && url.username().is_empty()
+                && url.password().is_none() && url.query().is_none()
+                && url.fragment().is_none() && url.path().trim_end_matches('/').is_empty())
+        }) {
+            fields.push(keys[2]);
+        }
+        if !has("CONNECTOR_ENCRYPTION_KEY") {
+            fields.push("CONNECTOR_ENCRYPTION_KEY");
+        }
+        groups.push(group(id, label, keys.iter().any(|key| has(key)), fields));
+    }
     ConfigReadiness { revision, groups }
 }
 

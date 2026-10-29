@@ -100,6 +100,8 @@ const groupNames: Record<string, string> = {
   "connections:DINGTALK": "钉钉",
   "connections:AMAP": "高德地图",
   "connections:BAIDU_NETDISK": "百度网盘个人体验",
+  "connections:HUAWEI_HEALTH": "华为运动健康",
+  "connections:XIAOMI_HEALTH": "小米运动健康",
   "connections:OTHER": "授权凭证保护",
 };
 const niceGroup = (group: string) => groupNames[group] ?? group;
@@ -781,7 +783,7 @@ export function App() {
                     <div>
                       <strong>手机应用接入，不需要用户申请 Key</strong>
                       <p>
-                        通知、主动分享和图片识字由手机端授权。地图等公共服务的 Key 在这里配置；麦当劳、滴滴、腾讯文档、印象笔记等个人凭证由每位用户在客户端“我的连接”中添加，不在此处配置或共用。百度网盘个人体验默认关闭，仅限测试，正式接入需按百度开放平台要求申请。企业应用配置完成后，用户仍需按实际权限授权。
+                        通知、主动分享和图片识字由手机端授权。地图等公共服务的 Key 在这里配置；麦当劳、滴滴、腾讯文档、印象笔记等个人凭证由每位用户在客户端“我的连接”中添加，不在此处配置或共用。华为、小米健康服务的应用 ID 与 Secret 在这里配置，每位用户再单独授权自己的健康数据。百度网盘个人体验默认关闭，仅限测试，正式接入需按百度开放平台要求申请。企业应用配置完成后，用户仍需按实际权限授权。
                       </p>
                     </div>
                   </div>
@@ -1762,6 +1764,8 @@ function ReadinessPanel({
             "dingtalk",
             "google",
             "amap",
+            "huawei_health",
+            "xiaomi_health",
           ].includes(item.id) && item.id !== "sms"
     ) ?? [];
   if (!groups.length) return null;
@@ -1823,6 +1827,8 @@ function SettingsPanel({
         "DINGTALK",
         "AMAP",
         "BAIDU_NETDISK",
+        "HUAWEI_HEALTH",
+        "XIAOMI_HEALTH",
       ].find((prefix) => item.key.startsWith(`${prefix}_`));
       const group =
         item.group === "connections"
@@ -1852,7 +1858,11 @@ function SettingsPanel({
             <div>
               <h2>{niceGroup(group)}</h2>
               <p>
-                {items.some((item) => item.secret)
+                {group === "connections:HUAWEI_HEALTH"
+                  ? "官方接口地址已内置。请先申请运动健康服务及读取权限；只需配置应用 ID、Secret 和授权凭证加密密钥。回调留空时使用服务器公开地址加 /v1/health/oauth/huawei/callback，并须在华为平台登记同一地址。当前仅开放已核实的步数读取。"
+                  : group === "connections:XIAOMI_HEALTH"
+                  ? "官方接口地址已内置。请先开通小米账号与运动健康服务并通过数据权限审批。回调留空时使用服务器公开地址加 /v1/health/oauth/xiaomi/callback，并须在小米平台登记同一地址。用户在 App 内分别授权。"
+                  : items.some((item) => item.secret)
                   ? "密钥加密保存在服务器，保存后不再回显。"
                   : "按需要调整，保存后对新请求生效。"}
               </p>

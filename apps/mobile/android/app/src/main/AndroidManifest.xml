@@ -6,9 +6,16 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <!-- Read-only foreground Health Connect import; no sensor/background/history/write grants. -->
+    <uses-permission android:name="android.permission.health.READ_STEPS" />
+    <uses-permission android:name="android.permission.health.READ_HEART_RATE" />
+    <uses-permission android:name="android.permission.health.READ_SLEEP" />
+    <uses-permission android:name="android.permission.health.READ_EXERCISE" />
+    <uses-permission android:name="android.permission.health.READ_WEIGHT" />
 
     <!-- Fixed integration targets only; no broad installed-app visibility. -->
     <queries>
+      <package android:name="com.google.android.apps.healthdata" />
       <package android:name="com.tencent.mm" />
       <package android:name="com.tencent.mobileqq" />
       <package android:name="com.xingin.xhs" />
@@ -37,6 +44,21 @@
       android:theme="@style/AppTheme"
       android:usesCleartextTraffic="${usesCleartextTraffic}"
       android:supportsRtl="true">
+      <activity android:name=".HealthPermissionsActivity" android:exported="true">
+        <intent-filter>
+          <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
+        </intent-filter>
+      </activity>
+      <activity-alias
+        android:name=".HealthPermissionUsageActivity"
+        android:exported="true"
+        android:targetActivity=".HealthPermissionsActivity"
+        android:permission="android.permission.START_VIEW_PERMISSION_USAGE">
+        <intent-filter>
+          <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+          <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+        </intent-filter>
+      </activity-alias>
       <service
         android:name=".AppNotificationListener"
         android:label="妥啦 · 已选择应用的通知"
@@ -76,6 +98,12 @@
             <category android:name="android.intent.category.DEFAULT" />
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="tada" android:host="connect" />
+        </intent-filter>
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="tada" android:host="health" android:path="/complete" />
         </intent-filter>
       </activity>
     </application>

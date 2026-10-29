@@ -117,10 +117,13 @@ export class ApiClient {
       typeof FormData !== 'undefined' && body instanceof FormData;
     const smsCodeRequest = path === '/auth/phone/code';
     const personalMcpRequest = path.startsWith('/personal-mcp/');
+    const healthReadRequest = /^\/health\/connections\/(huawei|xiaomi)\/(sync|finalize)$/.test(path);
     const timeout = setTimeout(
       () => controller.abort(),
       smsCodeRequest
         ? 45000 // The SMS provider may take up to 30 seconds; allow return-path margin.
+        : healthReadRequest
+        ? 85000 // Health refresh + paged reads have an 80s total server deadline.
         : personalMcpRequest
         ? 50000 // Includes MCP initialization, tool discovery and the bounded provider call.
         : path === '/chat' || path === '/todos/extract' || path.endsWith('/transcribe')

@@ -10,6 +10,7 @@ import React, {
 import { ApiClient, errorMessage } from '../api/client';
 import type { AuthSession, Memory, Schedule, User } from '../domain/types';
 import type { Preferences } from '../platform/ports';
+import type { HealthReceipt } from '../domain/healthLink';
 
 export type MainTab = 'today' | 'tasks' | 'memories' | 'capabilities';
 export type Route =
@@ -28,6 +29,7 @@ export type Route =
   | { name: 'artifacts' }
   | { name: 'uploads' }
   | { name: 'integrations' }
+  | { name: 'health'; receipt?: HealthReceipt }
   | { name: 'aiHistory' }
   | { name: 'conversations' };
 export interface AppContextValue {

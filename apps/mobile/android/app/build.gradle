@@ -111,8 +111,8 @@ android {
         applicationId "com.tomorrowai"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 19
-        versionName "0.1.18"
+        versionCode 20
+        versionName "0.1.19"
         buildConfigField "boolean", "OFFLINE_BUNDLE", offlineBundle.toString()
     }
     signingConfigs {
@@ -142,6 +142,7 @@ dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
     implementation("androidx.work:work-runtime:2.10.5")
+    implementation("androidx.health.connect:connect-client:1.1.0")
     // Retain OCR for explicit shared-image import; photo indexing uses cloud vision.
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
 

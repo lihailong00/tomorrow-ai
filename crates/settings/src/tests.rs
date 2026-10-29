@@ -43,6 +43,32 @@ fn changes(pairs: &[(&str, Option<&str>)]) -> HashMap<String, Option<String>> {
 }
 
 #[tokio::test]
+async fn health_provider_configuration_hides_secrets_and_derives_callback_readiness() {
+    let fixture = Fixture::new().await;
+    let store = fixture.store().await;
+    store.update(0, changes(&[
+        ("INSTANCE_PUBLIC_URL", Some("https://health.example.test")),
+        ("HUAWEI_HEALTH_CLIENT_ID", Some("fixture-huawei-app")),
+        ("HUAWEI_HEALTH_CLIENT_SECRET", Some("fixture-health-private-secret")),
+    ])).await.unwrap();
+    let snapshot = store.snapshot().await.unwrap();
+    assert!(!serde_json::to_string(&snapshot).unwrap().contains("fixture-health-private-secret"));
+    let effective = store.effective_values().await.unwrap();
+    assert_eq!(effective["HUAWEI_HEALTH_CLIENT_SECRET"], "fixture-health-private-secret");
+    let ready = crate::readiness::evaluate(snapshot.revision, &effective);
+    let huawei = ready.groups.iter().find(|g| g.id == "huawei_health").unwrap();
+    assert_eq!(huawei.status, "configured");
+    assert!(!huawei.verified);
+    assert_eq!(ready.groups.iter().find(|g| g.id == "xiaomi_health").unwrap().status, "not_configured");
+    store.update(snapshot.revision, changes(&[("INSTANCE_PUBLIC_URL", Some(""))])).await.unwrap();
+    let values = store.effective_values().await.unwrap();
+    let missing = crate::readiness::evaluate(0, &values);
+    let huawei = missing.groups.iter().find(|g| g.id == "huawei_health").unwrap();
+    assert_eq!(huawei.status, "incomplete");
+    assert!(huawei.missing.contains(&"HUAWEI_HEALTH_REDIRECT_URI"));
+}
+
+#[tokio::test]
 async fn credential_probe_preview_is_atomic_validated_and_never_persisted() {
     let fixture = Fixture::new().await;
     let store = fixture.store().await;

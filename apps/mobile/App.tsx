@@ -19,6 +19,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { ApiClient, normalizeServerUrl } from './src/api/client';
 import { createInstanceIdentityGuard, inspectInstance } from './src/api/instance';
 import { connectionFromLink } from './src/domain/instance';
+import { healthReceiptFromLink } from './src/domain/healthLink';
 import { AppProvider, MainTab } from './src/app/context';
 import { useRouteStack } from './src/app/navigation';
 import { useForegroundNotifications } from './src/app/notifications';
@@ -38,6 +39,7 @@ import { IntegrationsScreen } from './src/features/integrations/IntegrationsScre
 import { TodosScreen } from './src/features/todos/TodosScreen';
 import { TodoDetail } from './src/features/todos/TodoDetail';
 import { TodoSources } from './src/features/todos/TodoSources';
+import { HealthScreen } from './src/features/health/HealthScreen';
 import { AiHistoryScreen } from './src/features/ai-history/AiHistoryScreen';
 import { appInputs } from './src/platform/appInputs';
 import { photoIndex } from './src/platform/photoIndex';
@@ -216,11 +218,25 @@ function Application() {
   }, [identityGuard]);
   useEffect(() => () => api.dispose(), [api]);
   useForegroundNotifications(api, session?.user.id);
+  const linkContext = useRef({ api, session });
+  linkContext.current = { api, session };
+  const seenHealthLinks = useRef(new Set<string>());
   useEffect(() => {
     if (booting) return;
     let alive = true;
     const acceptLink = (link: string) => {
       try {
+        if (!alive) return;
+        const current = linkContext.current;
+        const healthReceipt = healthReceiptFromLink(link, current.api.baseUrl);
+        if (healthReceipt) {
+          // No saved drafts, account switches or automatic network requests.
+          if (!current.session || seenHealthLinks.current.has(link)) return;
+          seenHealthLinks.current.add(link);
+          if (seenHealthLinks.current.size > 20) seenHealthLinks.current.delete(seenHealthLinks.current.values().next().value!);
+          resetRoutes([{ name: 'main' }, { name: 'health', receipt: healthReceipt }]);
+          return;
+        }
         const pendingConnection = connectionFromLink(link);
         if (!alive) return;
         // A scanned link opens a review form; it never switches or signs in.
@@ -390,6 +406,9 @@ function Application() {
       case 'integrations':
         page = <IntegrationsScreen />;
         break;
+      case 'health':
+        page = <HealthScreen key={session.user.id + preferences.serverUrl} initialReceipt={route.receipt} />;
+        break;
       case 'aiHistory':
         page = <AiHistoryScreen key={session.user.id + preferences.serverUrl} />;
         break;
@@ -465,7 +484,7 @@ function Application() {
             barStyle="dark-content"
             backgroundColor={colors.background}
           />
-          <View
+          {route.name !== 'health' && <View
             testID="application-header"
             style={[s.header, compactChatHeader && shell.hiddenHeader]}
           >
@@ -501,7 +520,7 @@ function Application() {
                 onPress={() => navigate({ name: 'settings' })}
               />
             )}
-          </View>
+          </View>}
           {session && pendingInputs > 0 && route.name !== 'integrations' && (
             <Pressable accessibilityRole="button" accessibilityLabel="查看待接收的手机资料"
               onPress={() => navigate({ name: 'integrations' })}
@@ -516,7 +535,7 @@ function Application() {
           >
             {page}
           </KeyboardAvoidingView>
-          {session && main && (
+          {session && main && tab !== 'tasks' && (
             <View style={shell.dockArea}>
               <View style={shell.dock}>
                 <Pressable

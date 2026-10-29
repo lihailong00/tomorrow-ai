@@ -13,6 +13,7 @@ use tomorrow_connectors::ConnectorState;
 use tomorrow_connectors::domestic::IntegrationState;
 use tomorrow_connectors::personal_mcp::PersonalMcpState;
 use tomorrow_connectors::personal_wallet::PersonalWalletState;
+use tomorrow_connectors::health::HealthState;
 use tomorrow_domain::*;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use utoipa::{OpenApi, ToSchema};
@@ -36,6 +37,7 @@ pub struct AppState {
     pub integrations: Option<IntegrationState>,
     pub personal_mcp: Option<PersonalMcpState>,
     pub personal_wallet: Option<PersonalWalletState>,
+    pub health: Option<HealthState>,
     pub agent: Option<AgentClient>,
     pub phone_auth: phone::PhoneAuth,
     pub settings: Option<tomorrow_settings::ConfigStore>,
@@ -58,6 +60,7 @@ impl AppState {
             integrations: None,
             personal_mcp: None,
             personal_wallet: None,
+            health: None,
             agent: None,
             phone_auth: phone::PhoneAuth::disabled(),
             settings: None,
@@ -108,12 +111,14 @@ pub async fn serve() -> anyhow::Result<()> {
     let integrations = IntegrationState::new(repository.clone()).await?;
     let personal_mcp = PersonalMcpState::new(repository.clone()).await?;
     let personal_wallet = PersonalWalletState::new(repository.clone()).await?;
+    let health = HealthState::new(repository.clone()).await?;
     let mut state = AppState::new(repository, ModelProvider::from_env(), &database);
     state.attachments = Some(attachments);
     state.connectors = Some(connectors);
     state.integrations = Some(integrations);
     state.personal_mcp = Some(personal_mcp);
     state.personal_wallet = Some(personal_wallet);
+    state.health = Some(health);
     state.agent = AgentClient::from_env()?;
     state.phone_auth = phone::PhoneAuth::from_env().unwrap_or_else(|error| {
         tracing::warn!(error=%error,"SMS authentication disabled because configuration is unavailable");
@@ -132,6 +137,8 @@ pub async fn serve() -> anyhow::Result<()> {
     Ok(())
 }
 pub fn app(state: AppState) -> Router {
+    let health_router = state.health.clone()
+        .map(tomorrow_connectors::health::router).unwrap_or_else(Router::new);
     let personal_wallet_router = state.personal_wallet.clone()
         .map(tomorrow_connectors::personal_wallet::router).unwrap_or_else(Router::new);
     let personal_mcp_router = state.personal_mcp.clone()
@@ -204,9 +211,14 @@ pub fn app(state: AppState) -> Router {
         .merge(agent_api::public_router())
         .merge(knowledge_api::router());
     Router::new().nest("/v1",api).merge(agent_api::internal_router()).fallback(||async{(StatusCode::NOT_FOUND,Json(json!({"error":{"code":"not_found","message":"接口不存在"}})))})
-        .with_state(Arc::new(state)).layer(axum::extract::DefaultBodyLimit::max(1024*1024)).merge(attachment_router).merge(connector_router).merge(integration_router).merge(personal_mcp_router).merge(personal_wallet_router).layer(CorsLayer::permissive()).layer(TraceLayer::new_for_http().make_span_with(|request:&axum::http::Request<axum::body::Body>|tracing::info_span!("http_request",method=%request.method(),path=%request.uri().path()))).layer(axum::middleware::map_response(normalize_error))
+        .with_state(Arc::new(state)).layer(axum::extract::DefaultBodyLimit::max(1024*1024)).merge(attachment_router).merge(connector_router).merge(integration_router).merge(personal_mcp_router).merge(personal_wallet_router).merge(health_router).layer(CorsLayer::permissive()).layer(TraceLayer::new_for_http().make_span_with(|request:&axum::http::Request<axum::body::Body>|tracing::info_span!("http_request",method=%request.method(),path=%request.uri().path()))).layer(axum::middleware::map_response(normalize_error))
 }
 async fn normalize_error(response: Response) -> Response {
+    // OAuth callbacks intentionally return a safe, server-rendered browser page.
+    // A typed response extension cannot be forged by request headers.
+    if response.extensions().get::<tomorrow_connectors::health::OAuthPage>().is_some() {
+        return response;
+    }
     if response.status().is_client_error()
         && !response
             .headers()
@@ -215,7 +227,16 @@ async fn normalize_error(response: Response) -> Response {
             .is_some_and(|v| v.starts_with("application/json"))
     {
         let status = response.status();
-        return(status,Json(json!({"error":{"code":"invalid_request","message":format!("请求格式或地址无效（HTTP {}）",status.as_u16())}}))).into_response();
+        let mut normalized = (status,Json(json!({"error":{"code":"invalid_request","message":format!("请求格式或地址无效（HTTP {}）",status.as_u16())}}))).into_response();
+        // Preserve cache/privacy/CORS/retry policy when replacing an extractor's
+        // plain-text body. Body-specific headers belong to the new JSON body.
+        for (name, value) in response.headers() {
+            if ![header::CONTENT_TYPE, header::CONTENT_LENGTH,
+                header::CONTENT_ENCODING, header::TRANSFER_ENCODING].contains(name) {
+                normalized.headers_mut().append(name.clone(), value.clone());
+            }
+        }
+        return normalized;
     }
     response
 }

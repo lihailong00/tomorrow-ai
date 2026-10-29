@@ -468,6 +468,13 @@ export function IntegrationsScreen() {
     >
       <Text style={s.title}>我的连接</Text>
       <Text style={s.subtitle}>连接自己的账号，把日常里的重要信息带给妥啦。</Text>
+      <Card>
+        <Text style={s.cardTitle}>我的健康</Text>
+        <Text style={[s.small, { marginTop: 6, marginBottom: 12 }]}>
+          连接华为、小米或系统健康数据，按你的授权记录睡眠与运动。
+        </Text>
+        <Button onPress={() => navigate({ name: 'health' })}>健康与穿戴设备</Button>
+      </Card>
       <View style={v.tabs}>
         {(
           [

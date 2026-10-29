@@ -161,6 +161,12 @@ pub static DEFINITIONS: &[SettingDefinition] = &[
     ),
     item!(secret "AMAP_WEB_API_KEY","connections","高德 Web API Key"),
     item!("BAIDU_NETDISK_EXPERIENCE_ENABLED", "connections", "百度网盘个人体验（仅限测试，非正式环境）", "boolean", "false"),
+    item!("HUAWEI_HEALTH_CLIENT_ID", "connections", "华为运动健康应用 ID", "text", ""),
+    item!(secret "HUAWEI_HEALTH_CLIENT_SECRET", "connections", "华为运动健康应用 Secret"),
+    item!("HUAWEI_HEALTH_REDIRECT_URI", "connections", "华为授权回调（可留空使用服务器公开地址）", "url", ""),
+    item!("XIAOMI_HEALTH_CLIENT_ID", "connections", "小米运动健康应用 ID", "text", ""),
+    item!(secret "XIAOMI_HEALTH_CLIENT_SECRET", "connections", "小米运动健康应用 Secret"),
+    item!("XIAOMI_HEALTH_REDIRECT_URI", "connections", "小米授权回调（可留空使用服务器公开地址）", "url", ""),
     item!(
         "TENCENT_DOCS_CLIENT_ID",
         "connections",

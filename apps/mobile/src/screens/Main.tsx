@@ -882,7 +882,7 @@ export function CapabilitiesScreen() {
         <View style={v.flex}>
           <Text style={v.assistantTitle}>我的连接</Text>
           <Text style={v.assistantDescription}>
-            连接个人账号 · 管理手机通知与分享资料
+            连接个人账号 · 健康设备 · 手机通知与分享资料
           </Text>
           <View style={v.assistantLink}>
             <Text style={v.primaryText}>管理我的连接</Text>
