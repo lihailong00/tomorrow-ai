@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@shopify/flash-list@2.3.3': b141b8ae710c02e8482df152db2c89d8b8af7526d79c75c4549e4956f08f7c9d
+
 importers:
 
   .:
@@ -13,7 +16,7 @@ importers:
         version: 2.2.0(react-native@0.82.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.82.1(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.3.0)(react@19.1.1)(supports-color@8.1.1))
       '@shopify/flash-list':
         specifier: 2.3.3
-        version: 2.3.3(@babel/runtime@7.29.10)(react-native@0.82.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.82.1(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.3.0)(react@19.1.1)(supports-color@8.1.1))(react@19.1.1)
+        version: 2.3.3(patch_hash=b141b8ae710c02e8482df152db2c89d8b8af7526d79c75c4549e4956f08f7c9d)(@babel/runtime@7.29.10)(react-native@0.82.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.82.1(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.3.0)(react@19.1.1)(supports-color@8.1.1))(react@19.1.1)
       react:
         specifier: 19.1.1
         version: 19.1.1
@@ -4938,7 +4941,7 @@ snapshots:
     optionalDependencies:
       '@types/react': 19.3.0
 
-  '@shopify/flash-list@2.3.3(@babel/runtime@7.29.10)(react-native@0.82.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.82.1(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.3.0)(react@19.1.1)(supports-color@8.1.1))(react@19.1.1)':
+  '@shopify/flash-list@2.3.3(patch_hash=b141b8ae710c02e8482df152db2c89d8b8af7526d79c75c4549e4956f08f7c9d)(@babel/runtime@7.29.10)(react-native@0.82.1(@babel/core@7.29.7(supports-color@8.1.1))(@react-native-community/cli@20.0.0(supports-color@8.1.1)(typescript@5.9.3))(@react-native/metro-config@0.82.1(@babel/core@7.29.7(supports-color@8.1.1))(supports-color@8.1.1))(@types/react@19.3.0)(react@19.1.1)(supports-color@8.1.1))(react@19.1.1)':
     dependencies:
       '@babel/runtime': 7.29.10
       react: 19.1.1
