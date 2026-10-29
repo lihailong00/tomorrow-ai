@@ -1,5 +1,7 @@
 package com.tomorrowai
 
+import androidx.health.connect.client.records.SleepSessionRecord
+
 /** Shared bounds for the foreground-only, read-only native health bridge. */
 internal object HealthReadPolicy {
   const val MAX_DAYS = 30
@@ -18,4 +20,24 @@ internal object HealthReadPolicy {
   }
 
   fun perMetricLimit(count: Int): Int = MAX_RECORDS / count.coerceIn(1, metrics.size)
+
+  data class SleepStageDuration(val type: Int, val durationMillis: Long)
+  data class SleepSummary(val minutes: Double, val basis: String)
+
+  /** Unknown stages are missing knowledge, never evidence of zero sleep. */
+  fun summarizeSleep(sessionDurationMillis: Long, stages: List<SleepStageDuration>): SleepSummary {
+    require(sessionDurationMillis > 0 && stages.all { it.durationMillis > 0 }) { "睡眠记录时间区间无效" }
+    val asleep = setOf(
+      SleepSessionRecord.STAGE_TYPE_SLEEPING, SleepSessionRecord.STAGE_TYPE_LIGHT,
+      SleepSessionRecord.STAGE_TYPE_DEEP, SleepSessionRecord.STAGE_TYPE_REM,
+    )
+    val awake = setOf(
+      SleepSessionRecord.STAGE_TYPE_AWAKE, SleepSessionRecord.STAGE_TYPE_AWAKE_IN_BED,
+      SleepSessionRecord.STAGE_TYPE_OUT_OF_BED,
+    )
+    if (stages.isEmpty() || stages.any { it.type !in asleep && it.type !in awake }) {
+      return SleepSummary(sessionDurationMillis / 60_000.0, "session_duration")
+    }
+    return SleepSummary(stages.filter { it.type in asleep }.sumOf { it.durationMillis.toDouble() } / 60_000.0, "asleep_stages")
+  }
 }

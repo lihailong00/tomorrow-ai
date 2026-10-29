@@ -312,14 +312,12 @@ class HealthDataModule(private val context: ReactApplicationContext) : ReactCont
         .take(remaining)
         .map { row(it.time, it.time, it.beatsPerMinute.toDouble(), "bpm", ":${it.time}") }.toList()
       is SleepSessionRecord -> {
-        val asleep = record.stages.filter { it.stage in setOf(
-          SleepSessionRecord.STAGE_TYPE_SLEEPING, SleepSessionRecord.STAGE_TYPE_LIGHT,
-          SleepSessionRecord.STAGE_TYPE_DEEP, SleepSessionRecord.STAGE_TYPE_REM,
-        ) }
-        val minutes = if (record.stages.isNotEmpty()) asleep.sumOf { Duration.between(it.startTime, it.endTime).toMillis() } / 60_000.0
-          else Duration.between(record.startTime, record.endTime).toMillis() / 60_000.0
-        listOf(row(record.startTime, record.endTime, minutes, "min").apply {
-          putString("sleep_basis", if (record.stages.isNotEmpty()) "asleep_stages" else "session_duration")
+        val summary = HealthReadPolicy.summarizeSleep(
+          Duration.between(record.startTime, record.endTime).toMillis(),
+          record.stages.map { HealthReadPolicy.SleepStageDuration(it.stage, Duration.between(it.startTime, it.endTime).toMillis()) },
+        )
+        listOf(row(record.startTime, record.endTime, summary.minutes, "min").apply {
+          putString("sleep_basis", summary.basis)
         })
       }
       is ExerciseSessionRecord -> listOf(row(record.startTime, record.endTime, Duration.between(record.startTime, record.endTime).toMillis() / 60_000.0, "min").apply {
