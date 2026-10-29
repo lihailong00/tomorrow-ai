@@ -46,9 +46,18 @@ function rememberHeight(viewport: MessageViewport, item: Message, height: number
 
 export const ChatMessageList = memo(function ChatMessageListView(props: Props) {
   const { width, fontScale } = useWindowDimensions();
-  const owner = useRef({ viewport: props.viewport, epoch: 0 });
-  if (owner.current.viewport !== props.viewport)
-    owner.current = { viewport: props.viewport, epoch: owner.current.epoch + 1 };
+  const owner = useRef({ viewport: props.viewport, latestVersion: props.latestVersion, epoch: 0 });
+  if (owner.current.viewport !== props.viewport || owner.current.latestVersion !== props.latestVersion) {
+    if (owner.current.viewport === props.viewport) {
+      // Own-send starts a fresh latest window. Retire the old recycler before
+      // cleanup so its MVCP projection cannot compete with a native-only jump.
+      props.viewport.anchor = null;
+      props.viewport.pendingAppendAnchor = null;
+      props.viewport.followTail = true;
+    }
+    owner.current = { viewport: props.viewport, latestVersion: props.latestVersion,
+      epoch: owner.current.epoch + 1 };
+  }
   const token = owner.current;
   const isCurrent = useCallback(() => owner.current === token, [token]);
   const messages = useMemo(() => props.messages.slice().reverse(), [props.messages]);
@@ -71,8 +80,6 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
   const initialIndex = useRef(messageInitialIndex(messages, initial)).current;
   const target = useRef<Destination | null>(initial ? { anchor: initial } : { latest: true });
   const followTail = useRef(!initial);
-  const followingOwnSend = useRef(false);
-  const ownSendContentHeight = useRef<number | null>(null);
   const interacting = useRef(false);
   const metrics = useRef({ width: 0, height: 0, contentHeight: 0 });
   // Only real scroll callbacks establish native arrival. Engine offsets can be
@@ -88,7 +95,6 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     viewport.pendingAppendAnchor = null;
   }
   const current = useRef({ messages, layoutKey, latestVersion });
-  const previous = current.current;
   current.current = { messages, layoutKey, latestVersion };
   if (viewport.layoutKey !== layoutKey) {
     if (viewport.layoutKey) list.current?.clearLayoutCacheOnUpdate();
@@ -99,21 +105,6 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     observed.current = null;
     observedAnchor.current = null;
     command.current = null;
-  }
-  if (previous.latestVersion !== latestVersion) {
-    // An own-send is explicit latest intent, even while reading old history.
-    // Keep this recycler mounted; offset zero needs no unknown older heights.
-    followTail.current = true;
-    followingOwnSend.current = true;
-    ownSendContentHeight.current = metrics.current.contentHeight;
-    interacting.current = false;
-    viewport.followTail = true;
-    viewport.anchor = null;
-    viewport.pendingAppendAnchor = null;
-    target.current = { latest: true };
-    command.current = null;
-    observed.current = null;
-    observedAnchor.current = null;
   }
   const valid = useCallback(() => active.current && isCurrent() &&
     current.current.layoutKey === layoutKey &&
@@ -227,14 +218,6 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     const bounds = event.nativeEvent.layoutMeasurement;
     if (bounds && (Math.abs(bounds.width - metrics.current.width) > 1 ||
       Math.abs(bounds.height - metrics.current.height) > 1)) return;
-    // A completed zero command does not cancel explicit send intent. Native
-    // MVCP can still move the previous row after fast accepted/partial layouts.
-    if (followingOwnSend.current && !interacting.current && y > 2) {
-      target.current = { latest: true };
-      command.current = null;
-      restore();
-      return;
-    }
     const contentHeight = event.nativeEvent.contentSize?.height;
     // FlashList's progressive total size and RN's content-size callback are
     // independent of a real user's measured visible row. A lagging callback
@@ -242,10 +225,6 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     // still required to acknowledge our own pending programmatic destination.
     if (target.current && Number.isFinite(contentHeight) &&
       Math.abs(contentHeight - metrics.current.contentHeight) > 1)
-      return;
-    // A zero packet from the previous content can precede native prepend/MVCP
-    // layout. It cannot acknowledge the newly submitted local turn yet.
-    if (target.current && 'latest' in target.current && ownSendContentHeight.current !== null)
       return;
     const preferred = observed.current !== null && Math.abs(observed.current - y) <= 2
       ? viewport.anchor?.id : undefined;
@@ -264,7 +243,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
       command.current = null;
       capture(y, anchor?.id);
     } else capture(y, preferred);
-  }, [capture, destinationOffset, measuredAnchor, restore, valid, viewport]);
+  }, [capture, destinationOffset, measuredAnchor, valid, viewport]);
 
   const takeControl = useCallback((event?: ScrollPacket) => {
     if (!valid()) return;
@@ -274,8 +253,6 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     interacting.current = true;
     // A gesture without a packet still cancels pending tail/restore work.
     followTail.current = viewport.followTail = false;
-    followingOwnSend.current = false;
-    ownSendContentHeight.current = null;
     if (event?.nativeEvent?.contentOffset) scroll(event);
   }, [scroll, valid, viewport]);
   const finishInteraction = useCallback((event?: ScrollPacket) => {
@@ -308,15 +285,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
       active.current = false;
     };
   }, [isCurrent, viewport]);
-  useEffect(() => {
-    // Recycler layout/MVCP runs before this effect and can suppress its native
-    // scroll packets. Reapply own-send intent after accepted/partial renders too.
-    if (followingOwnSend.current && !interacting.current) {
-      target.current = { latest: true };
-      command.current = null;
-    }
-    restore();
-  }, [latestVersion, messages, restore]);
+  useEffect(() => { restore(); }, [latestVersion, restore]);
 
   const renderMessage = useCallback<FlashRenderItem<Message>>(({ item, index }) =>
     renderItem({ item, index, separators }), [renderItem]);
@@ -357,12 +326,6 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     }}
     onContentSizeChange={(_width, height) => {
       if (!valid()) return;
-      if (ownSendContentHeight.current !== null && height !== ownSendContentHeight.current) {
-        // Reapply explicit send intent after the inverted prepend changed the
-        // native content. MVCP may have moved the old row after our first zero.
-        ownSendContentHeight.current = null;
-        command.current = null;
-      }
       metrics.current.contentHeight = height;
       commitLayout();
     }}

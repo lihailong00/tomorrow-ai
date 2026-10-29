@@ -27,11 +27,11 @@ const layoutEvent = (width = 360, height = 640) => ({
 });
 
 async function setup(initial = allMessages(), anchor: { id: string; offset: number } | null = null,
-  savedViewport?: MessageViewport) {
+  savedViewport?: MessageViewport, initialVersion = 0) {
   let messages = initial;
   let viewport = savedViewport ?? createMessageViewport();
   if (!savedViewport) viewport.anchor = anchor;
-  let latestVersion = 0;
+  let latestVersion = initialVersion;
   let header = <Text testID="history">Load older</Text>;
   let footer = <Text testID="tail">Tail spacing</Text>;
   const rowRender = jest.fn((item: Message) =>
@@ -372,41 +372,49 @@ test('streaming a different row while reading leaves MVCP in charge without a se
   expect(app.engine().scrollToOffset).not.toHaveBeenCalled();
 });
 
-test('own send changes latestVersion to explicit offset zero without remounting the recycler or rows', async () => {
+test('own send retires the old reading window and starts a coherent latest window', async () => {
   const data = [message(0), message(1)];
   const app = await setup(data, { id: 'message-0', offset: 15 });
   await app.bounds(); app.measure('message-0', 900, 900); await app.commit();
   await app.native(939);
-  const engine = app.engine(); const row = app.rows()[0];
+  const engine = app.engine(); const heights = app.viewport.heights;
+  const callbacks = app.list().props;
   await app.update([...data, message(2)], 1);
-  expect(app.engine()).toBe(engine);
-  expect(app.rows().find(item => item.props.testID === row.props.testID)).toBe(row);
-  expect(engine.scrollToOffset).toHaveBeenLastCalledWith({ offset: 0, animated: false });
+  expect(app.engine() === engine).toBe(false);
+  expect(app.list().props.initialScrollIndex).toBe(0);
   expect(app.viewport.anchor).toBeNull();
   expect(app.viewport.followTail).toBe(true);
+  expect(app.viewport.heights).toBe(heights);
+  expect(heights.get('message-0')?.height).toBe(900);
+  await act(async () => {
+    callbacks.onScrollBeginDrag(); callbacks.onContentSizeChange(360, 100);
+    callbacks.onCommitLayoutEffect();
+  });
+  expect(app.viewport.anchor).toBeNull();
+  expect(app.viewport.followTail).toBe(true);
+  await app.bounds(); app.measure('message-2', 0, 88); await app.native(0);
+  expect(app.viewport.anchor?.id).toBe('message-2');
 });
 
-test('own send survives old-size zero arrival and reapplies latest after native prepend layout', async () => {
+test('retired own-send geometry and scroll callbacks cannot overwrite a newer window', async () => {
   const old = { ...message(0), role: 'assistant' as const };
   const app = await setup([old]);
   await app.bounds(360, 640, 924); app.measure(old.id, 0, 900); await app.native(0);
   const user = { ...message(1), delivery: 'sending' as const };
   const assistant = { ...message(2), role: 'assistant' as const, content: '', stream_status: '发送中…' };
+  const retired = app.list().props;
   await app.update([old, user, assistant], 1);
   app.measure(assistant.id, 0, 88); app.measure(user.id, 88, 88); app.measure(old.id, 176, 900);
-  // The first zero can arrive before the changed native content, followed by
-  // MVCP's delayed old-row correction. Neither retires this local send intent.
-  await app.native(0); await app.native(176);
-  app.engine().scrollToOffset.mockClear();
-  await app.bounds(360, 640, 924);
-  expect(app.engine().scrollToOffset).not.toHaveBeenCalled();
-  expect(app.viewport.anchor).toBeNull();
+  await app.bounds(360, 640, 1100); await app.native(0);
+  const latest = { ...app.viewport.anchor! };
+  await act(async () => {
+    retired.onContentSizeChange(360, 924);
+    retired.onScroll({ nativeEvent: { contentOffset: { y: 176 },
+      contentSize: { height: 924 }, layoutMeasurement: { width: 360, height: 640 } } });
+    retired.onCommitLayoutEffect();
+  });
   expect(app.viewport.followTail).toBe(true);
-  await app.bounds(360, 640, 1100);
-  expect(app.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 0, animated: false });
-  await app.native(0);
-  expect(app.viewport.followTail).toBe(true);
-  expect(app.viewport.anchor?.id).toBe(assistant.id);
+  expect(app.viewport.anchor).toEqual(latest);
 });
 
 test('a real reading gesture cancels pending local-send layout intent before streaming continues', async () => {
@@ -417,6 +425,7 @@ test('a real reading gesture cancels pending local-send layout intent before str
   const assistant = { ...message(2), role: 'assistant' as const, content: '', stream_status: '发送中…' };
   await app.update([old, user, assistant], 1);
   app.measure(assistant.id, 0, 88); app.measure(user.id, 88, 88); app.measure(old.id, 176, 900);
+  await app.bounds(360, 640, 1100);
   await app.native(400, true); await app.end(400);
   const reading = { ...app.viewport.anchor! };
   app.engine().scrollToOffset.mockClear();
@@ -429,20 +438,19 @@ test('a real reading gesture cancels pending local-send layout intent before str
   expect(app.viewport.anchor).toEqual(reading);
 });
 
-test('own-send latest intent survives a changed-size zero acknowledgment followed by late MVCP movement', async () => {
+test('a gesture before the new send window first lays out cancels pending latest work', async () => {
   const old = { ...message(0), role: 'assistant' as const };
   const app = await setup([old]);
   await app.bounds(360, 640, 924); app.measure(old.id, 0, 900); await app.native(0);
   const user = message(1);
   const assistant = { ...message(2), role: 'assistant' as const, content: '' };
   await app.update([old, user, assistant], 1);
-  app.measure(assistant.id, 0, 88); app.measure(user.id, 88, 88); app.measure(old.id, 176, 900);
-  await app.bounds(360, 640, 1100); await app.native(0);
+  await act(async () => app.list().props.onScrollBeginDrag());
   app.engine().scrollToOffset.mockClear();
-  await app.native(176);
-  expect(app.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 0, animated: false });
-  expect(app.viewport.followTail).toBe(true);
-  await app.native(0);
+  app.measure(assistant.id, 0, 88); app.measure(user.id, 88, 88); app.measure(old.id, 176, 900);
+  await app.bounds(360, 640, 1100); await app.commit();
+  expect(app.engine().scrollToOffset).not.toHaveBeenCalled();
+  expect(app.engine().scrollToIndex).not.toHaveBeenCalled();
   await app.native(400, true); await app.end(400);
   const reading = { ...app.viewport.anchor! };
   app.engine().scrollToOffset.mockClear();
@@ -452,6 +460,37 @@ test('own-send latest intent survives a changed-size zero acknowledgment followe
   expect(app.engine().scrollToOffset).not.toHaveBeenCalled();
   expect(app.viewport.followTail).toBe(false);
   expect(app.viewport.anchor).toEqual(reading);
+});
+
+test('rapid consecutive sends fence every retired owner without clearing measured history', async () => {
+  const app = await setup([message(0)]);
+  await app.bounds(); app.measure('message-0', 0, 900); await app.native(400, true); await app.end(400);
+  const first = app.list().props;
+  await app.update([message(0), message(1)], 1);
+  const second = app.list().props;
+  const retiredEngine = app.engine();
+  await app.update([message(0), message(1), message(2)], 3);
+  expect(app.engine() === retiredEngine).toBe(false);
+  await act(async () => [first, second].forEach(callbacks => {
+    callbacks.onScrollBeginDrag(); callbacks.onMomentumScrollEnd();
+    callbacks.onContentSizeChange(360, 100); callbacks.onCommitLayoutEffect();
+  }));
+  expect(app.viewport.followTail).toBe(true);
+  expect(app.viewport.anchor).toBeNull();
+  expect(app.viewport.heights.get('message-0')?.height).toBe(900);
+  await app.bounds(); app.measure('message-2', 0, 88); await app.native(0);
+  expect(app.viewport.anchor?.id).toBe('message-2');
+});
+
+test('History reopening at a nonzero send version retains its actual saved reading anchor', async () => {
+  const app = await setup([message(0)], { id: 'message-0', offset: 175 }, undefined, 7);
+  await app.bounds(); app.measure('message-0', 0, 900); await app.commit(); await app.native(199);
+  const saved = app.viewport;
+  await act(async () => app.tree.unmount());
+  const returned = await setup([message(0)], null, saved, 7);
+  expect(returned.list().props.initialScrollIndexParams).toEqual({ viewOffset: 175 });
+  expect(saved.anchor).toEqual({ id: 'message-0', offset: 175 });
+  expect(saved.followTail).toBe(false);
 });
 
 test.each(['drag', 'momentum', 'end-drag'])('%s immediately cancels a pending retained destination', async interaction => {
@@ -615,12 +654,12 @@ test('all 26 pages remain in reversed stable data; final and empty-final control
   expect(instance.scrollToOffset).not.toHaveBeenCalled();
 });
 
-test('empty conversation keeps header/footer roles and transitions to inverted first turn without remount', async () => {
+test('empty conversation keeps header/footer roles and starts a fresh inverted first-turn window', async () => {
   const app = await setup([]); const instance = app.engine();
   expect(app.list().props.inverted).toBe(false);
   expect(app.list().props.ListHeaderComponent.props.children.props.testID).toBe('history');
   await app.update([message(0)], 1);
-  expect(app.engine()).toBe(instance);
+  expect(app.engine() === instance).toBe(false);
   expect(app.list().props.inverted).toBe(true);
   expect(app.list().props.ListFooterComponent.props.testID).toBe('history');
   expect(app.list().props.ListHeaderComponent.props.children.props.testID).toBe('tail');
