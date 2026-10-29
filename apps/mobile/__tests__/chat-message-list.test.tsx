@@ -429,6 +429,31 @@ test('a real reading gesture cancels pending local-send layout intent before str
   expect(app.viewport.anchor).toEqual(reading);
 });
 
+test('own-send latest intent survives a changed-size zero acknowledgment followed by late MVCP movement', async () => {
+  const old = { ...message(0), role: 'assistant' as const };
+  const app = await setup([old]);
+  await app.bounds(360, 640, 924); app.measure(old.id, 0, 900); await app.native(0);
+  const user = message(1);
+  const assistant = { ...message(2), role: 'assistant' as const, content: '' };
+  await app.update([old, user, assistant], 1);
+  app.measure(assistant.id, 0, 88); app.measure(user.id, 88, 88); app.measure(old.id, 176, 900);
+  await app.bounds(360, 640, 1100); await app.native(0);
+  app.engine().scrollToOffset.mockClear();
+  await app.native(176);
+  expect(app.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 0, animated: false });
+  expect(app.viewport.followTail).toBe(true);
+  await app.native(0);
+  await app.native(400, true); await app.end(400);
+  const reading = { ...app.viewport.anchor! };
+  app.engine().scrollToOffset.mockClear();
+  await app.update([old, user, { ...assistant, content: 'A partial while reading older text' }]);
+  app.measure(assistant.id, 0, 188); app.measure(user.id, 188, 88); app.measure(old.id, 276, 900);
+  await app.bounds(360, 640, 1200); await app.native(500);
+  expect(app.engine().scrollToOffset).not.toHaveBeenCalled();
+  expect(app.viewport.followTail).toBe(false);
+  expect(app.viewport.anchor).toEqual(reading);
+});
+
 test.each(['drag', 'momentum', 'end-drag'])('%s immediately cancels a pending retained destination', async interaction => {
   const app = await setup(allMessages(), { id: 'message-6', offset: 175 });
   await app.bounds(); app.measure('message-6', 6000, 900); await app.commit();

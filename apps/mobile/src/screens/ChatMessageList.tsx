@@ -71,6 +71,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
   const initialIndex = useRef(messageInitialIndex(messages, initial)).current;
   const target = useRef<Destination | null>(initial ? { anchor: initial } : { latest: true });
   const followTail = useRef(!initial);
+  const followingOwnSend = useRef(false);
   const ownSendContentHeight = useRef<number | null>(null);
   const interacting = useRef(false);
   const metrics = useRef({ width: 0, height: 0, contentHeight: 0 });
@@ -103,6 +104,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     // An own-send is explicit latest intent, even while reading old history.
     // Keep this recycler mounted; offset zero needs no unknown older heights.
     followTail.current = true;
+    followingOwnSend.current = true;
     ownSendContentHeight.current = metrics.current.contentHeight;
     interacting.current = false;
     viewport.followTail = true;
@@ -225,6 +227,14 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     const bounds = event.nativeEvent.layoutMeasurement;
     if (bounds && (Math.abs(bounds.width - metrics.current.width) > 1 ||
       Math.abs(bounds.height - metrics.current.height) > 1)) return;
+    // A completed zero command does not cancel explicit send intent. Native
+    // MVCP can still move the previous row after fast accepted/partial layouts.
+    if (followingOwnSend.current && !interacting.current && y > 2) {
+      target.current = { latest: true };
+      command.current = null;
+      restore();
+      return;
+    }
     const contentHeight = event.nativeEvent.contentSize?.height;
     // FlashList's progressive total size and RN's content-size callback are
     // independent of a real user's measured visible row. A lagging callback
@@ -254,7 +264,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
       command.current = null;
       capture(y, anchor?.id);
     } else capture(y, preferred);
-  }, [capture, destinationOffset, measuredAnchor, valid, viewport]);
+  }, [capture, destinationOffset, measuredAnchor, restore, valid, viewport]);
 
   const takeControl = useCallback((event?: ScrollPacket) => {
     if (!valid()) return;
@@ -264,6 +274,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     interacting.current = true;
     // A gesture without a packet still cancels pending tail/restore work.
     followTail.current = viewport.followTail = false;
+    followingOwnSend.current = false;
     ownSendContentHeight.current = null;
     if (event?.nativeEvent?.contentOffset) scroll(event);
   }, [scroll, valid, viewport]);
@@ -297,7 +308,15 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
       active.current = false;
     };
   }, [isCurrent, viewport]);
-  useEffect(() => { restore(); }, [latestVersion, restore]);
+  useEffect(() => {
+    // Recycler layout/MVCP runs before this effect and can suppress its native
+    // scroll packets. Reapply own-send intent after accepted/partial renders too.
+    if (followingOwnSend.current && !interacting.current) {
+      target.current = { latest: true };
+      command.current = null;
+    }
+    restore();
+  }, [latestVersion, messages, restore]);
 
   const renderMessage = useCallback<FlashRenderItem<Message>>(({ item, index }) =>
     renderItem({ item, index, separators }), [renderItem]);
