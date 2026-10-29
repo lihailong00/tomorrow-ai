@@ -68,6 +68,61 @@ function bridge(fail = false) {
 const call: AssistantMessage['content'] = [{ type: 'toolCall', id: 'call-1', name: 'save_memory', arguments: { content: '喜欢简洁回答' } }];
 const final: AssistantMessage['content'] = [{ type: 'text', text: '已保存你的回答偏好。' }];
 
+test('personal MCP bridge can discover tools at runtime and preserves user confirmation boundary', async () => {
+  const request = input();
+  request.messages = [{ role: 'user', content: '查看我的滴滴车型，并准备叫车。' }];
+  request.tools = ['list_mcp_connections', 'list_mcp_tools', 'call_mcp_tool', 'get_mcp_action'].map(name => ({
+    name, description: name, parameters: { type: 'object', properties: {
+      provider: { type: 'string' }, tool: { type: 'string' }, arguments: { type: 'object' }, id: { type: 'string' },
+    } },
+  }));
+  validateRun(request);
+  const called: { name: string; args: unknown }[] = [];
+  const contexts: string[] = [];
+  const fixture = bridge();
+  fixture.value.tool = async (name, args) => {
+    called.push({ name, args });
+    if (name === 'list_mcp_connections') return { items: [{ id: 'didi', status: 'connected' }] };
+    if (name === 'list_mcp_tools') return { items: [{ name: 'taxi_estimate', inputSchema: { type: 'object' } },
+      { name: 'taxi_create_order', inputSchema: { type: 'object' } }] };
+    if ((args as { tool?: string }).tool === 'taxi_estimate') return { content: [{ type: 'text', text: '快车预估 30 元' }] };
+    return { status: 'confirmation_required', action: { id: 'pending-operation', status: 'pending', tool: 'taxi_create_order' } };
+  };
+  const toolCall = (name: string, args: Extract<AssistantMessage['content'][number], { type: 'toolCall' }>['arguments'], id: number): AssistantMessage['content'] =>
+    [{ type: 'toolCall', id: `mcp-${id}`, name, arguments: args }];
+  const result = await executeRun(request, settings, fixture.value, undefined, undefined, fakeStream([
+    toolCall('list_mcp_connections', {}, 1),
+    toolCall('list_mcp_tools', { provider: 'didi' }, 2),
+    toolCall('call_mcp_tool', { provider: 'didi', tool: 'taxi_estimate', arguments: {} }, 3),
+    toolCall('call_mcp_tool', { provider: 'didi', tool: 'taxi_create_order', arguments: { estimate_trace_id: 'estimate-id' } }, 4),
+    [{ type: 'text', text: '快车预估 30 元。叫车请求尚未执行，请到“我的连接”检查并确认。' }],
+  ], context => contexts.push(JSON.stringify(context))));
+  assert.equal(called.length, 4);
+  assert.deepEqual(called.map(item => item.name), ['list_mcp_connections', 'list_mcp_tools', 'call_mcp_tool', 'call_mcp_tool']);
+  assert.ok(contexts.at(-1)?.includes('confirmation_required'));
+  assert.ok(contexts[0]?.includes('不能代替用户确认'));
+  assert.ok(result.content.includes('尚未执行'));
+  assert.ok(!request.tools.some(tool => /confirm|credential|token/.test(tool.name)));
+});
+
+test('run validation permits the integrated MCP tool set and retains a bounded tool budget', () => {
+  const request = input();
+  request.tools = Array.from({ length: 64 }, () => ({ ...request.tools[0]! }));
+  assert.doesNotThrow(() => validateRun(request));
+  request.tools.push({ ...request.tools[0]! });
+  assert.throws(() => validateRun(request), (error: unknown) => error instanceof RunError && error.code === 'invalid_request');
+});
+
+test('oversized MCP reads report omitted content instead of claiming the whole document was read', () => {
+  const result = JSON.parse(safeToolResult({ status: 'completed', result: {
+    content: [{ type: 'text', text: 'x'.repeat(60000) }],
+  } }, 'call_mcp_tool'));
+  assert.equal(result.error.code, 'tool_result_too_large');
+  assert.equal(result.truncated, true);
+  assert.equal(result.operation_succeeded, undefined);
+  assert.ok(!JSON.stringify(result).includes('x'.repeat(100)));
+});
+
 test('large read pages remain valid JSON with continuation at the first omitted item', () => {
   const value = { items: Array.from({ length: 30 }, (_, id) => ({ id: `id-${id}`, content: '中文😀\\\"\n'.repeat(200) })),
     offset: 500, next_offset: 530, has_more: true, detail_tool: 'get_memory' };

@@ -1,6 +1,6 @@
 {
   "name": "@tomorrow-ai/mobile",
-  "version": "0.1.15",
+  "version": "0.1.17",
   "private": true,
   "scripts": {
     "android": "react-native run-android",

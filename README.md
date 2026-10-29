@@ -1,5 +1,7 @@
 # 妥啦（Tada）
 
+支持导入 ChatGPT、Claude、DeepSeek 的官方对话 ZIP / JSON：手机「能力 → 导入 AI 对话」，电脑打开服务地址下的 `/ai-import`。先预览再确认，支持检索、去重更新与删除；导入不会自动写入长期记忆。范围与限制见 [对话导入说明](docs/ai-history-import.md)。
+
 GitHub 仓库：[lihailong00/Tada](https://github.com/lihailong00/Tada)。App 显示名称为“妥啦”，现有安装可覆盖升级。
 
 ### 管理后台与自建服务
@@ -205,5 +207,6 @@ OpenAPI：运行中的 `GET /v1/openapi.json`；也可用 `cargo run -p tomorrow
 - [Today.ai 功能梳理与对标范围](docs/01-today-ai-功能梳理与对标范围.md)
 - [妥啦（Tada）技术路线与实施计划](docs/02-tomorrow-ai-技术路线与实施计划.md)
 - [首版接口协作契约](docs/implementation-contract.md)
+- [轻量图记忆首版：使用方式、来源校验与验证边界](docs/knowledge-graph.md)
 
 路线文档中的浏览器执行、跨外部服务的多步工具调用、语义检索、完整离线队列、远程推送、正式渠道发布与三端验证仍需后续实现和验收；当前 Pi 工具限于本产品的记忆、任务、计划和文本附件。

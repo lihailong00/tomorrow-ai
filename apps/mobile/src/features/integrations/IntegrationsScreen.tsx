@@ -35,6 +35,7 @@ import { Icon } from '../../ui/visuals';
 import { importDraft, integrationsApi } from './api';
 import type { ImportedContent, Integration, IntegrationResult } from './types';
 import { extractTodos } from '../todos/api';
+import { PersonalMcpConnections } from '../personal-mcp/PersonalMcpConnections';
 
 type Tab = 'apps' | 'inbox' | 'library';
 const sourceNames: Record<string, string> = Object.fromEntries([
@@ -465,8 +466,8 @@ export function IntegrationsScreen() {
         />
       }
     >
-      <Text style={s.title}>连接我的应用</Text>
-      <Text style={s.subtitle}>把日常里的重要信息，带给妥啦。</Text>
+      <Text style={s.title}>我的连接</Text>
+      <Text style={s.subtitle}>连接自己的账号，把日常里的重要信息带给妥啦。</Text>
       <View style={v.tabs}>
         {(
           [
@@ -537,6 +538,8 @@ export function IntegrationsScreen() {
       )}
       {tab === 'apps' && !composer && (
         <>
+          <PersonalMcpConnections />
+          <Section title="手机通知与分享" />
           <Card style={v.hero}>
             <View style={s.row}>
               <View style={v.heroIcon}>

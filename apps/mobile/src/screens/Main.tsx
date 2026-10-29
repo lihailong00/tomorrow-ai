@@ -875,17 +875,17 @@ export function CapabilitiesScreen() {
       </Pressable>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="连接手机应用"
+        accessibilityLabel="我的连接"
         onPress={() => navigate({ name: 'integrations' })}
         style={v.assistantCard}
       >
         <View style={v.flex}>
-          <Text style={v.assistantTitle}>连接手机应用</Text>
+          <Text style={v.assistantTitle}>我的连接</Text>
           <Text style={v.assistantDescription}>
-            微信、QQ、办公与生活应用 · 选择通知或分享资料给妥啦
+            连接个人账号 · 管理手机通知与分享资料
           </Text>
           <View style={v.assistantLink}>
-            <Text style={v.primaryText}>管理手机资料</Text>
+            <Text style={v.primaryText}>管理我的连接</Text>
             <Icon name="arrowRight" size={15} color={accent} />
           </View>
         </View>

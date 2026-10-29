@@ -11,11 +11,14 @@ use std::sync::Arc;
 use tomorrow_attachments::AttachmentsState;
 use tomorrow_connectors::ConnectorState;
 use tomorrow_connectors::domestic::IntegrationState;
+use tomorrow_connectors::personal_mcp::PersonalMcpState;
+use tomorrow_connectors::personal_wallet::PersonalWalletState;
 use tomorrow_domain::*;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use utoipa::{OpenApi, ToSchema};
 mod agent_api;
 mod chat_stream;
+mod knowledge_api;
 mod phone_api;
 mod todo_api;
 pub mod admin;
@@ -31,6 +34,8 @@ pub struct AppState {
     pub attachments: Option<AttachmentsState>,
     pub connectors: Option<ConnectorState>,
     pub integrations: Option<IntegrationState>,
+    pub personal_mcp: Option<PersonalMcpState>,
+    pub personal_wallet: Option<PersonalWalletState>,
     pub agent: Option<AgentClient>,
     pub phone_auth: phone::PhoneAuth,
     pub settings: Option<tomorrow_settings::ConfigStore>,
@@ -51,6 +56,8 @@ impl AppState {
             attachments: None,
             connectors: None,
             integrations: None,
+            personal_mcp: None,
+            personal_wallet: None,
             agent: None,
             phone_auth: phone::PhoneAuth::disabled(),
             settings: None,
@@ -99,10 +106,14 @@ pub async fn serve() -> anyhow::Result<()> {
     let attachments = AttachmentsState::new(repository.clone()).await?;
     let connectors = ConnectorState::new(repository.clone()).await?;
     let integrations = IntegrationState::new(repository.clone()).await?;
+    let personal_mcp = PersonalMcpState::new(repository.clone()).await?;
+    let personal_wallet = PersonalWalletState::new(repository.clone()).await?;
     let mut state = AppState::new(repository, ModelProvider::from_env(), &database);
     state.attachments = Some(attachments);
     state.connectors = Some(connectors);
     state.integrations = Some(integrations);
+    state.personal_mcp = Some(personal_mcp);
+    state.personal_wallet = Some(personal_wallet);
     state.agent = AgentClient::from_env()?;
     state.phone_auth = phone::PhoneAuth::from_env().unwrap_or_else(|error| {
         tracing::warn!(error=%error,"SMS authentication disabled because configuration is unavailable");
@@ -121,6 +132,10 @@ pub async fn serve() -> anyhow::Result<()> {
     Ok(())
 }
 pub fn app(state: AppState) -> Router {
+    let personal_wallet_router = state.personal_wallet.clone()
+        .map(tomorrow_connectors::personal_wallet::router).unwrap_or_else(Router::new);
+    let personal_mcp_router = state.personal_mcp.clone()
+        .map(tomorrow_connectors::personal_mcp::router).unwrap_or_else(Router::new);
     let integration_router = state.integrations.clone()
         .map(tomorrow_connectors::domestic::router).unwrap_or_else(Router::new);
     let connector_router = state
@@ -186,9 +201,10 @@ pub fn app(state: AppState) -> Router {
         .route("/artifacts", get(artifacts))
         .route("/artifacts/{id}", get(artifact))
         .route("/artifacts/{id}/download", get(download_artifact))
-        .merge(agent_api::public_router());
+        .merge(agent_api::public_router())
+        .merge(knowledge_api::router());
     Router::new().nest("/v1",api).merge(agent_api::internal_router()).fallback(||async{(StatusCode::NOT_FOUND,Json(json!({"error":{"code":"not_found","message":"接口不存在"}})))})
-        .with_state(Arc::new(state)).layer(axum::extract::DefaultBodyLimit::max(1024*1024)).merge(attachment_router).merge(connector_router).merge(integration_router).layer(CorsLayer::permissive()).layer(TraceLayer::new_for_http().make_span_with(|request:&axum::http::Request<axum::body::Body>|tracing::info_span!("http_request",method=%request.method(),path=%request.uri().path()))).layer(axum::middleware::map_response(normalize_error))
+        .with_state(Arc::new(state)).layer(axum::extract::DefaultBodyLimit::max(1024*1024)).merge(attachment_router).merge(connector_router).merge(integration_router).merge(personal_mcp_router).merge(personal_wallet_router).layer(CorsLayer::permissive()).layer(TraceLayer::new_for_http().make_span_with(|request:&axum::http::Request<axum::body::Body>|tracing::info_span!("http_request",method=%request.method(),path=%request.uri().path()))).layer(axum::middleware::map_response(normalize_error))
 }
 async fn normalize_error(response: Response) -> Response {
     if response.status().is_client_error()
@@ -974,6 +990,23 @@ async fn capabilities(State(state): State<Arc<AppState>>, auth: Auth) -> Result<
         items.extend(integrations.capabilities(&auth.user_id).await
             .map_err(tomorrow_connectors::ConnectorError::into_domain)?);
     }
+    if let Some(mcp) = &state.personal_mcp {
+        for connection in mcp.statuses(&auth.user_id).await
+            .map_err(tomorrow_connectors::ConnectorError::into_domain)? {
+            items.push(Capability {
+                id: format!("personal_mcp_{}", connection["id"].as_str().unwrap_or("unknown")),
+                name: format!("{} · 我的连接", connection["name"].as_str().unwrap_or("MCP")),
+                description: "使用你本人授权的账号，按实际开放的 MCP 工具查询或申请操作".into(),
+                category: "personal_mcp".into(),
+                status: match connection["status"].as_str() {
+                    Some("connected") => "available",
+                    Some("not_configured") => "not_configured",
+                    _ => "not_connected",
+                }.into(),
+                detail: connection["description"].as_str().unwrap_or("在我的连接中管理授权").into(),
+            });
+        }
+    }
     if let Some(connectors) = &state.connectors {
         items.extend(
             connectors
@@ -1141,7 +1174,10 @@ async fn download_artifact(
         download_artifact,
         agent_api::list_runs,
         agent_api::get_run,
-        agent_api::cancel_run
+        agent_api::cancel_run,
+        knowledge_api::index,
+        knowledge_api::search,
+        knowledge_api::remove
     ),
     components(schemas(
         User,
@@ -1169,7 +1205,11 @@ async fn download_artifact(
         UpdateMemory,
         CreateTask,
         CreateSchedule,
-        UpdateSchedule
+        UpdateSchedule,
+        knowledge::GraphIndexInput,
+        knowledge::GraphEntityInput,
+        knowledge::GraphFactInput,
+        knowledge::GraphSearch
     ))
 )]
 struct ApiDoc;

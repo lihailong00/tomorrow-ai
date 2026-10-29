@@ -79,7 +79,9 @@ const server = createServer(async (request, response) => {
     const settings = snapshot.model;
     const webProvider = snapshot.web ? createDeepSeekWeb(snapshot.web) : undefined;
     const callback = async (path: string, body?: unknown, signal?: AbortSignal) => {
-      const combined = AbortSignal.any([controller.signal, AbortSignal.timeout(15000), ...(signal ? [signal] : [])]);
+      const mcpCall = path === '/tools' && body && typeof body === 'object' &&
+        ['list_mcp_tools', 'call_mcp_tool'].includes(String((body as { name?: unknown }).name));
+      const combined = AbortSignal.any([controller.signal, AbortSignal.timeout(mcpCall ? 50000 : 15000), ...(signal ? [signal] : [])]);
       const result = await fetch(`${apiUrl}/internal/agent/runs/${encodeURIComponent(input.run_id)}${path}`, {
         method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: combined,
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${input.run_token}`, 'X-Agent-Service': secret },
@@ -93,7 +95,7 @@ const server = createServer(async (request, response) => {
       state: async signal => await callback('/state', undefined, signal) as { next_sequence: number },
       event: async (event, signal) => { await callback('/events', event, signal); },
       tool: (name, args, signal, operationIndex, operationSlot) => callback('/tools', {
-        name, arguments: args, operation_index: operationIndex,
+        name, arguments: args, operation_index: operationIndex, client_model: settings.model.id,
         ...(operationSlot === undefined ? {} : { operation_slot: operationSlot }),
       }, signal),
     };

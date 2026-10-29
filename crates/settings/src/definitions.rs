@@ -160,6 +160,7 @@ pub static DEFINITIONS: &[SettingDefinition] = &[
         ""
     ),
     item!(secret "AMAP_WEB_API_KEY","connections","高德 Web API Key"),
+    item!("BAIDU_NETDISK_EXPERIENCE_ENABLED", "connections", "百度网盘个人体验（仅限测试，非正式环境）", "boolean", "false"),
     item!(
         "TENCENT_DOCS_CLIENT_ID",
         "connections",

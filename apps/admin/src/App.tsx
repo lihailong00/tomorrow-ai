@@ -99,6 +99,7 @@ const groupNames: Record<string, string> = {
   "connections:FEISHU": "飞书",
   "connections:DINGTALK": "钉钉",
   "connections:AMAP": "高德地图",
+  "connections:BAIDU_NETDISK": "百度网盘个人体验",
   "connections:OTHER": "授权凭证保护",
 };
 const niceGroup = (group: string) => groupNames[group] ?? group;
@@ -780,7 +781,7 @@ export function App() {
                     <div>
                       <strong>手机应用接入，不需要用户申请 Key</strong>
                       <p>
-                        通知、主动分享和图片识字由手机端授权。这里的配置用于可选的云端同步；配置后，用户仍需连接自己的账号。
+                        通知、主动分享和图片识字由手机端授权。地图等公共服务的 Key 在这里配置；麦当劳、滴滴、腾讯文档、印象笔记等个人凭证由每位用户在客户端“我的连接”中添加，不在此处配置或共用。百度网盘个人体验默认关闭，仅限测试，正式接入需按百度开放平台要求申请。企业应用配置完成后，用户仍需按实际权限授权。
                       </p>
                     </div>
                   </div>
@@ -1821,6 +1822,7 @@ function SettingsPanel({
         "FEISHU",
         "DINGTALK",
         "AMAP",
+        "BAIDU_NETDISK",
       ].find((prefix) => item.key.startsWith(`${prefix}_`));
       const group =
         item.group === "connections"

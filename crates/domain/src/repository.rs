@@ -1079,6 +1079,9 @@ impl Repository {
         ))
         .execute(&pool)
         .await?;
+        sqlx::raw_sql(include_str!("../../../migrations/sqlite/007_knowledge_graph.sql"))
+            .execute(&pool)
+            .await?;
         sqlx::raw_sql(include_str!(
             "../../../migrations/sqlite/008_chat_request_inputs.sql"
         ))

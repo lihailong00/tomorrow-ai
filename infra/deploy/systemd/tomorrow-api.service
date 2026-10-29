@@ -14,6 +14,8 @@ EnvironmentFile=/etc/tomorrow/runtime.env
 EnvironmentFile=/etc/tomorrow/database.env
 EnvironmentFile=-/etc/tomorrow/sms.env
 EnvironmentFile=-/etc/tomorrow/asr.env
+Environment=PERSONAL_MCP_NODE=/opt/tomorrow/bin/node
+Environment=PERSONAL_MCP_YUQUE_SCRIPT=/opt/tomorrow/services/agent/node_modules/yuque-mcp/dist/cli.js
 # The administration UI must start even before a model has been configured.
 ExecStart=/opt/tomorrow/bin/tomorrow-api
 TimeoutStartSec=120

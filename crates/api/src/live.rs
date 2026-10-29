@@ -104,6 +104,12 @@ fn reconfigure(base: &AppState, values: &HashMap<String, String>) -> anyhow::Res
     if let Some(integrations) = &base.integrations {
         next.integrations = Some(integrations.reconfigured(values));
     }
+    if let Some(personal_mcp) = &base.personal_mcp {
+        next.personal_mcp = Some(personal_mcp.reconfigured(values));
+    }
+    if let Some(wallet) = &base.personal_wallet {
+        next.personal_wallet = Some(wallet.reconfigured(values));
+    }
     next.phone_auth =
         tomorrow_domain::phone::PhoneAuth::from_settings(|key| values.get(key).cloned())
             .unwrap_or_else(|_| tomorrow_domain::phone::PhoneAuth::disabled());

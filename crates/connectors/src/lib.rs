@@ -3,6 +3,8 @@ mod config;
 mod crypto;
 mod reads;
 pub mod domestic;
+pub mod personal_mcp;
+pub mod personal_wallet;
 
 use std::sync::Arc;
 

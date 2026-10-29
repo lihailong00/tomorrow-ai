@@ -116,10 +116,13 @@ export class ApiClient {
     const multipart =
       typeof FormData !== 'undefined' && body instanceof FormData;
     const smsCodeRequest = path === '/auth/phone/code';
+    const personalMcpRequest = path.startsWith('/personal-mcp/');
     const timeout = setTimeout(
       () => controller.abort(),
       smsCodeRequest
         ? 45000 // The SMS provider may take up to 30 seconds; allow return-path margin.
+        : personalMcpRequest
+        ? 50000 // Includes MCP initialization, tool discovery and the bounded provider call.
         : path === '/chat' || path === '/todos/extract' || path.endsWith('/transcribe')
         ? 120000
         : multipart
