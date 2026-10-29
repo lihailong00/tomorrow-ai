@@ -246,7 +246,8 @@ async fn retrieval_contract(repo: Repository) {
         .await
         .is_err()
     );
-    assert_eq!(tool_definitions("chat").len(), 20);
+    // The released personal-connection baseline adds six connector tools.
+    assert_eq!(tool_definitions("chat").len(), 26);
     repo.cancel_agent_run(&owner.id, &run.id).await.unwrap();
     assert!(matches!(
         call("get_memory", json!({"id":oldest})).await,
