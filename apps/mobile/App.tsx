@@ -35,6 +35,9 @@ import {
 import { ChatScreen, ConversationsScreen, createChatEntryState } from './src/screens/Chat';
 import { UploadsScreen } from './src/screens/Uploads';
 import { IntegrationsScreen } from './src/features/integrations/IntegrationsScreen';
+import { TodosScreen } from './src/features/todos/TodosScreen';
+import { TodoDetail } from './src/features/todos/TodoDetail';
+import { TodoSources } from './src/features/todos/TodoSources';
 import { AiHistoryScreen } from './src/features/ai-history/AiHistoryScreen';
 import { appInputs } from './src/platform/appInputs';
 import { photoIndex } from './src/platform/photoIndex';
@@ -354,6 +357,18 @@ function Application() {
       case 'task':
         page = <TaskDetailScreen id={route.id} />;
         break;
+      case 'todos':
+        page = <TodosScreen />;
+        break;
+      case 'todo':
+        page = <TodoDetail id={route.id} />;
+        break;
+      case 'todoSources':
+        page = <TodoSources conversationId={route.conversationId} />;
+        break;
+      case 'assistantTasks':
+        page = <TasksScreen />;
+        break;
       case 'newTask':
         page = <NewTaskScreen />;
         break;
@@ -386,7 +401,7 @@ function Application() {
           tab === 'today' ? (
             <HomeScreen onTasks={() => setTab('tasks')} />
           ) : tab === 'tasks' ? (
-            <TasksScreen />
+            <TodosScreen />
           ) : tab === 'memories' ? (
             <MemoriesScreen />
           ) : (
@@ -401,7 +416,7 @@ function Application() {
     icon: React.ComponentProps<typeof Icon>['name'];
   }> = [
     { id: 'today', label: '今日', icon: 'today' },
-    { id: 'tasks', label: '任务', icon: 'tasks' },
+    { id: 'tasks', label: '事项', icon: 'tasks' },
     { id: 'memories', label: '记忆', icon: 'memory' },
     { id: 'capabilities', label: '能力', icon: 'sparkles' },
   ];

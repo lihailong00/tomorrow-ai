@@ -18,6 +18,10 @@ export type Route =
   | { name: 'chat'; conversationId?: string; prompt?: string }
   | { name: 'task'; id: string }
   | { name: 'newTask' }
+  | { name: 'todos' }
+  | { name: 'todo'; id: string }
+  | { name: 'todoSources'; conversationId?: string }
+  | { name: 'assistantTasks' }
   | { name: 'memory'; memory?: Memory }
   | { name: 'schedule'; schedule?: Schedule }
   | { name: 'notifications' }

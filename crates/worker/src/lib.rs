@@ -86,6 +86,23 @@ impl WorkerEngine {
     }
 
     async fn generate(&self, claim: &ClaimedTask) -> Result<(String, String)> {
+        if claim.task.kind == "todo_prepare" {
+            // Preparation is text-only even when the general worker has a tool-enabled agent.
+            let provider = match &self.settings {
+                Some(settings) => {
+                    let values = settings.effective_values().await?;
+                    Arc::new(ModelProvider::from_lookup(|key| values.get(key).cloned()))
+                }
+                None => self.provider.clone(),
+            };
+            if !provider.is_configured() { anyhow::bail!("请配置可用模型后重试待办内容准备"); }
+            if !self.repository.record_task_model_mode(claim, "llm").await? { anyhow::bail!("任务已取消或执行权已失效"); }
+            let reply = provider.complete(&[
+                message("system", "你只准备待办文本草稿。不得执行用户行动、发送消息、调用工具或声称待办已完成。".into()),
+                message("user", claim.task.instruction.clone()),
+            ]).await?;
+            return Ok((reply.content, reply.mode));
+        }
         let provider = match &self.settings {
             Some(settings) if self.agent.is_none() => {
                 let values = settings.effective_values().await?;

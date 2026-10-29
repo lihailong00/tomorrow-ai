@@ -10,7 +10,7 @@ import {
   View,
 } from 'react-native';
 import { Text } from '../../ui/Text';
-import { errorMessage } from '../../api/client';
+import { errorMessage, newRequestId } from '../../api/client';
 import type { ApiClient } from '../../api/client';
 import { useAction, useApp } from '../../app/context';
 import {
@@ -34,6 +34,7 @@ import { colors, styles as s } from '../../ui/theme';
 import { Icon } from '../../ui/visuals';
 import { importDraft, integrationsApi } from './api';
 import type { ImportedContent, Integration, IntegrationResult } from './types';
+import { extractTodos } from '../todos/api';
 
 type Tab = 'apps' | 'inbox' | 'library';
 const sourceNames: Record<string, string> = Object.fromEntries([
@@ -131,7 +132,55 @@ export function IntegrationsScreen() {
   const [text, setText] = useState('');
   const [url, setUrl] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
+  const discoveryRequests = useMemo(
+    () => ({ owner: scope, values: new Map<string, string>() }),
+    [scope],
+  );
+  const [discovery, setDiscovery] = useState<{
+    owner: typeof scope;
+    item: Pick<ImportedContent, 'id' | 'title'>;
+    result?: { created: number; suggested: number };
+    failed?: boolean;
+  } | null>(null);
+  const currentDiscovery = discovery?.owner === scope ? discovery : null;
   const action = useAction();
+
+  const discover = (item: Pick<ImportedContent, 'id' | 'title'>) => {
+    if (!scope.active || discoveryRequests.owner !== scope) return;
+    // Reuse the same operation after a timeout: the import is already saved,
+    // and a retry must not create another extraction run for it.
+    let requestId = discoveryRequests.values.get(item.id);
+    if (!requestId) {
+      requestId = newRequestId();
+      discoveryRequests.values.set(item.id, requestId);
+    }
+    const input = {
+      source_kind: 'integration_import' as const,
+      source_id: item.id,
+      client_request_id: requestId,
+    };
+    setDiscovery({ owner: scope, item });
+    return action.run(async ({ isCurrent }) => {
+      try {
+        const result = await extractTodos(api, input);
+        if (!scope.active || !isCurrent()) return;
+        setDiscovery({
+          owner: scope,
+          item,
+          result: {
+            created: result.created_count,
+            suggested: result.items.filter(todo => todo.status === 'suggested')
+              .length,
+          },
+        });
+      } catch (failure) {
+        if (scope.active && isCurrent()) {
+          setDiscovery({ owner: scope, item, failed: true });
+        }
+        throw failure;
+      }
+    });
+  };
 
   const refreshNative = useCallback(async () => {
     try {
@@ -283,10 +332,14 @@ export function IntegrationsScreen() {
         item.text,
         item.url,
       );
-      await client.importContent({ ...input, external_id: item.id });
+      const imported = await client.importContent({
+        ...input,
+        external_id: item.id,
+      });
       if (!scope.active) {
         return;
       }
+      setDiscovery({ owner: scope, item: imported });
       await appInputs.dismiss([item.id]);
       if (!scope.active) {
         return;
@@ -295,7 +348,7 @@ export function IntegrationsScreen() {
       if (!scope.active) {
         return;
       }
-      setNotice('已导入。现在可以让妥啦整理这条资料。');
+      setNotice('已导入。可以从这份资料发现待办，确认后再加入事项。');
     });
   const toggleApp = (id: string, enabled: boolean) =>
     action.run(async () => {
@@ -450,6 +503,38 @@ export function IntegrationsScreen() {
       />
       <ErrorNotice message={action.error} />
       {notice ? <Notice>{notice}</Notice> : null}
+      {currentDiscovery && (
+        <Card>
+          <Text style={s.cardTitle} numberOfLines={1}>
+            {currentDiscovery.item.title || '刚导入的资料'}
+          </Text>
+          <Text style={[s.small, { marginVertical: 10 }]}>
+            {currentDiscovery.result
+              ? `本次新增 ${currentDiscovery.result.created} 件；这份来源还有 ${currentDiscovery.result.suggested} 件待你确认。`
+              : currentDiscovery.failed
+              ? '资料已保存。发现待办暂未成功，可以重试。'
+              : '资料已保存。发现的待办会先放进“新发现”，等你确认。'}
+          </Text>
+          {currentDiscovery.result ? (
+            <Button
+              variant="secondary"
+              onPress={() => navigate({ name: 'todos' })}
+            >
+              查看新发现
+            </Button>
+          ) : (
+            <Button
+              variant="secondary"
+              loading={action.busy}
+              onPress={() => {
+                void discover(currentDiscovery.item);
+              }}
+            >
+              {currentDiscovery.failed ? '重试发现待办' : '发现待办'}
+            </Button>
+          )}
+        </Card>
+      )}
       {tab === 'apps' && !composer && (
         <>
           <Card style={v.hero}>
@@ -650,7 +735,7 @@ export function IntegrationsScreen() {
             loading={action.busy}
             onPress={() => {
               void action.run(async () => {
-                await client.importContent({
+                const imported = await client.importContent({
                   ...importDraft(source, title, text, url),
                   ...(pendingImageImport
                     ? { external_id: pendingImageImport + ':ocr' }
@@ -659,6 +744,7 @@ export function IntegrationsScreen() {
                 if (!scope.active) {
                   return;
                 }
+                setDiscovery({ owner: scope, item: imported });
                 if (pendingImageImport) {
                   await appInputs.dismiss([pendingImageImport]);
                   if (!scope.active) {
@@ -853,6 +939,16 @@ export function IntegrationsScreen() {
                   {item.url}
                 </Text>
               ) : null}
+              <Button
+                variant="secondary"
+                loading={action.busy}
+                accessibilityLabel={'从' + item.title + '发现待办'}
+                onPress={() => {
+                  void discover(item);
+                }}
+              >
+                发现待办
+              </Button>
               <Button variant="ghost" onPress={() => ask(item)}>
                 交给妥啦整理 ↗
               </Button>

@@ -6,7 +6,7 @@ import { IntegrationsScreen } from '../src/features/integrations/IntegrationsScr
 import { importDraft, integrationsApi } from '../src/features/integrations/api';
 import { appInputs } from '../src/platform/appInputs';
 import { platform } from '../src/platform/ports';
-import { Button } from '../src/ui/components';
+import { Button, Section } from '../src/ui/components';
 import type { ApiClient } from '../src/api/client';
 
 jest.mock('../src/platform/appInputs', () => ({
@@ -62,7 +62,7 @@ beforeEach(() => {
   ]);
 });
 
-async function setup(cloudAvailable = true) {
+async function setup(cloudAvailable = true, catalog: object[] = []) {
   const request = jest.fn(async (_path: string, method = 'GET') => {
     if (!cloudAvailable) {
       throw new Error('暂时无法连接云端');
@@ -70,6 +70,7 @@ async function setup(cloudAvailable = true) {
     if (method === 'POST') {
       return { id: 'import-a' };
     }
+    if (_path === '/integrations') return { items: catalog };
     return { items: [] };
   });
   const context = {
@@ -153,6 +154,181 @@ it('keeps incoming notification text on the phone until the user explicitly impo
     expect.anything(),
   );
   expect(appInputs.dismiss).toHaveBeenCalledWith(['notification-a']);
+  expect(
+    view.request.mock.calls.some(call => call[0] === '/todos/extract'),
+  ).toBe(false);
+  expect(
+    view.tree.root
+      .findAllByType(Button)
+      .some(n => n.props.children === '发现待办'),
+  ).toBe(true);
+  await view.unmount();
+});
+
+it('discovers candidates only from the confirmed notification import and shows server counts', async () => {
+  const view = await setup();
+  await view.tab('待接收');
+  await view.button('导入文字');
+  view.request.mockResolvedValueOnce({
+    items: [
+      { id: 'todo-a', status: 'suggested' },
+      { id: 'todo-b', status: 'pending' },
+    ],
+    created_count: 1,
+  } as any);
+  await view.button('发现待办');
+  expect(view.request).toHaveBeenLastCalledWith('/todos/extract', 'POST', {
+    source_kind: 'integration_import',
+    source_id: 'import-a',
+    client_request_id: expect.any(String),
+  });
+  expect(
+    view.tree.root
+      .findAllByType(Text)
+      .some(
+        n => n.props.children === '本次新增 1 件；这份来源还有 1 件待你确认。',
+      ),
+  ).toBe(true);
+  await view.button('查看新发现');
+  expect(view.context.navigate).toHaveBeenCalledWith({ name: 'todos' });
+  await view.unmount();
+});
+
+it('preserves a saved import after discovery failure and retries the same extraction request', async () => {
+  const view = await setup();
+  await view.button('粘贴文字 / 链接');
+  await view.field('文字内容', '明天去取包裹');
+  await view.button('确认导入');
+  view.request.mockRejectedValueOnce(new Error('服务暂时不可用'));
+  await view.button('发现待办');
+  const firstExtraction = view.request.mock.calls.find(
+    call => call[0] === '/todos/extract',
+  );
+  expect(
+    view.tree.root
+      .findAllByType(Text)
+      .some(
+        n => n.props.children === '资料已保存。发现待办暂未成功，可以重试。',
+      ),
+  ).toBe(true);
+  view.request.mockResolvedValueOnce({ items: [], created_count: 0 } as any);
+  await view.button('重试发现待办');
+  const extractions = view.request.mock.calls.filter(
+    call => call[0] === '/todos/extract',
+  );
+  expect(extractions).toHaveLength(2);
+  expect(extractions[1]).toEqual(firstExtraction);
+  expect(
+    view.request.mock.calls.filter(
+      call => call[0] === '/integrations/imports' && call[1] === 'POST',
+    ),
+  ).toHaveLength(1);
+  expect(view.request.mock.calls.some(call => call[1] === 'DELETE')).toBe(
+    false,
+  );
+  expect(
+    view.tree.root
+      .findAllByType(Text)
+      .some(
+        n => n.props.children === '本次新增 0 件；这份来源还有 0 件待你确认。',
+      ),
+  ).toBe(true);
+  await view.unmount();
+});
+
+it('hides the previous account discovery and ignores its late extraction response', async () => {
+  const view = await setup();
+  await view.tab('待接收');
+  await view.button('导入文字');
+  let complete!: (result: any) => void;
+  view.request.mockReturnValueOnce(
+    new Promise(resolve => {
+      complete = resolve;
+    }),
+  );
+  await view.button('发现待办');
+  await act(async () => {
+    view.tree.update(
+      <AppProvider
+        value={{ ...view.context, user: { id: 'user-b' } } as AppContextValue}
+      >
+        <IntegrationsScreen />
+      </AppProvider>,
+    );
+  });
+  expect(
+    view.tree.root
+      .findAllByType(Button)
+      .some(n => n.props.children === '发现待办'),
+  ).toBe(false);
+  await act(async () => {
+    complete({
+      items: [{ id: 'private-todo', status: 'suggested' }],
+      created_count: 1,
+    });
+  });
+  expect(
+    view.tree.root
+      .findAllByType(Button)
+      .some(n => n.props.children === '查看新发现'),
+  ).toBe(false);
+  expect(view.context.navigate).not.toHaveBeenCalled();
+  await view.unmount();
+});
+
+it('keeps mailbox results as an editable prefill until confirmed and only then offers discovery', async () => {
+  const view = await setup(true, [
+    {
+      id: 'qq_mail',
+      name: 'QQ 邮箱',
+      mode: 'mail',
+      status: 'connected',
+      detail: '读取已连接邮箱',
+    },
+  ]);
+  await act(async () => {
+    view.tree.root
+      .findAllByType(Section)
+      .find(n => n.props.title === '更多连接方式')!
+      .props.onAction();
+  });
+  await act(async () => {
+    view.tree.root
+      .findAll(n => n.props.accessibilityLabel === '设置QQ 邮箱')[0]
+      .props.onPress();
+  });
+  view.request.mockResolvedValueOnce({
+    items: [{ id: 'mail-a', title: '签字确认', text: '请周五前确认合同。' }],
+  } as any);
+  await view.button('读取资料');
+  await view.button('导入这条资料');
+  expect(
+    view.tree.root
+      .findAllByType(TextInput)
+      .find(n => n.props.accessibilityLabel === '文字内容')?.props.value,
+  ).toBe('请周五前确认合同。');
+  expect(
+    view.request.mock.calls.some(
+      call => call[0] === '/integrations/imports' && call[1] === 'POST',
+    ),
+  ).toBe(false);
+  expect(
+    view.request.mock.calls.some(call => call[0] === '/todos/extract'),
+  ).toBe(false);
+  expect(
+    view.tree.root
+      .findAllByType(Button)
+      .some(n => n.props.children === '发现待办'),
+  ).toBe(false);
+  await view.button('确认导入');
+  expect(
+    view.tree.root
+      .findAllByType(Button)
+      .some(n => n.props.children === '发现待办'),
+  ).toBe(true);
+  expect(
+    view.request.mock.calls.some(call => call[0] === '/todos/extract'),
+  ).toBe(false);
   await view.unmount();
 });
 

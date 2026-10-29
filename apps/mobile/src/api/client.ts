@@ -120,7 +120,7 @@ export class ApiClient {
       () => controller.abort(),
       smsCodeRequest
         ? 45000 // The SMS provider may take up to 30 seconds; allow return-path margin.
-        : path === '/chat' || path.endsWith('/transcribe')
+        : path === '/chat' || path === '/todos/extract' || path.endsWith('/transcribe')
         ? 120000
         : multipart
         ? 60000

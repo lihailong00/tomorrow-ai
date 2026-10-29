@@ -1101,6 +1101,8 @@ impl Repository {
         .await?;
         sqlx::raw_sql(include_str!("../../../migrations/sqlite/012_chat_streams.sql"))
             .execute(&pool).await?;
+        sqlx::raw_sql(include_str!("../../../migrations/sqlite/013_todos.sql"))
+            .execute(&pool).await?;
         // Authentication checks this table even in non-admin processes such as
         // attachment and connector services; it must exist before any login.
         sqlx::query("CREATE TABLE IF NOT EXISTS admin_user_controls(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,disabled BIGINT NOT NULL DEFAULT 0,updated_at BIGINT NOT NULL)")
@@ -1310,17 +1312,17 @@ impl Repository {
     }
 }
 
-fn creation_fingerprint(value: &impl Serialize) -> Result<String, DomainError> {
+pub(crate) fn creation_fingerprint(value: &impl Serialize) -> Result<String, DomainError> {
     serde_json::to_string(value)
         .map(|value| auth::hash_token(&value))
         .map_err(|error| DomainError::Internal(error.to_string()))
 }
-fn deleted_creation_conflict() -> DomainError {
+pub(crate) fn deleted_creation_conflict() -> DomainError {
     DomainError::Conflict(
         "上次保存的记录已被删除。请返回列表确认；需要再次创建时，请打开新的表单。".into(),
     )
 }
-async fn reserve_creation(
+pub(crate) async fn reserve_creation(
     transaction: &mut sqlx::Transaction<'_, sqlx::Any>,
     user_id: &str,
     kind: &str,

@@ -17,6 +17,7 @@ use utoipa::{OpenApi, ToSchema};
 mod agent_api;
 mod chat_stream;
 mod phone_api;
+mod todo_api;
 pub mod admin;
 mod live;
 use tomorrow_domain::agent::AgentClient;
@@ -163,6 +164,10 @@ pub fn app(state: AppState) -> Router {
             axum::routing::patch(update_memory).delete(delete_memory),
         )
         .route("/tasks", get(tasks).post(create_task))
+        .route("/todos", get(todo_api::list).post(todo_api::create))
+        .route("/todos/extract", post(todo_api::extract))
+        .route("/todos/{id}", get(todo_api::get).patch(todo_api::update).delete(todo_api::delete))
+        .route("/todos/{id}/prepare", post(todo_api::prepare))
         .route("/tasks/{id}", get(task))
         .route("/tasks/{id}/cancel", post(cancel_task))
         .route("/tasks/{id}/approve", post(approve_task))
@@ -1108,6 +1113,13 @@ async fn download_artifact(
         create_memory,
         update_memory,
         delete_memory,
+        todo_api::list,
+        todo_api::get,
+        todo_api::create,
+        todo_api::update,
+        todo_api::delete,
+        todo_api::prepare,
+        todo_api::extract,
         tasks,
         create_task,
         task,
@@ -1135,6 +1147,12 @@ async fn download_artifact(
         User,
         AuthSession,
         Memory,
+        Todo,
+        CreateTodo,
+        UpdateTodo,
+        PrepareTodo,
+        ExtractTodos,
+        ExtractedTodos,
         Task,
         Step,
         Schedule,

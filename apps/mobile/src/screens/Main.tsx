@@ -218,6 +218,9 @@ export function TaskCard({
 }) {
   const { navigate, formatDate } = useApp();
   const active = isActiveTask(task);
+  const executionStatus = task.status === 'succeeded'
+    ? task.kind === 'todo_prepare' ? '内容已准备' : '执行完成'
+    : taskStatuses[task.status];
   const waiting =
     task.status === 'waiting_approval' || task.status === 'uncertain';
   const statusColor = waiting
@@ -230,7 +233,7 @@ export function TaskCard({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={task.title + '，' + taskStatuses[task.status]}
+      accessibilityLabel={task.title + '，' + executionStatus}
       onPress={() => navigate({ name: 'task', id: task.id })}
       style={({ pressed }) => [v.taskCard, pressed && v.pressed]}
     >
@@ -266,7 +269,7 @@ export function TaskCard({
           <View style={v.statusRow}>
             <View style={[v.statusDot, { backgroundColor: statusColor }]} />
             <Text style={[v.statusText, { color: statusColor }]}>
-              {taskStatuses[task.status]}
+              {executionStatus}
             </Text>
             <Text style={v.metadata}>{formatDate(task.created_at)}</Text>
           </View>
@@ -410,7 +413,7 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
             )}
             <View style={v.briefSource}>
               <Icon name="file" size={12} color="#97A0B0" />
-              <Text style={v.sourceText}>来自已保存的任务、计划与记忆</Text>
+              <Text style={v.sourceText}>来自助手执行、计划与记忆</Text>
               {data.value.runtime.model_mode === 'local' && (
                 <Text style={v.localTag}>本地生成</Text>
               )}
@@ -422,7 +425,7 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
               <Text style={v.statNumber}>
                 {data.value.stats.tasks_completed}
               </Text>{' '}
-              项完成
+              次执行完成
             </Text>
             <View style={v.statDivider} />
             <Text style={v.statText}>
@@ -437,8 +440,8 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
               条记忆
             </Text>
           </View>
-          <SectionTitle action="全部" onAction={onTasks}>
-            任务进展
+          <SectionTitle action="全部" onAction={() => navigate({ name: 'assistantTasks' })}>
+            助手执行进展
           </SectionTitle>
           {data.value.tasks.length ? (
             data.value.tasks
@@ -447,15 +450,15 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
           ) : (
             <Pressable
               accessibilityRole="button"
-              onPress={() => navigate({ name: 'newTask' })}
+              onPress={onTasks}
               style={v.noTaskRow}
             >
               <View style={v.noTaskIcon}>
                 <Icon name="tasks" size={20} color="#9CA6BA" />
               </View>
               <View style={v.flex}>
-                <Text style={v.noTaskTitle}>还没有任务</Text>
-                <Text style={v.noTaskBody}>把想完成的事交给我</Text>
+                <Text style={v.noTaskTitle}>还没有助手执行</Text>
+                <Text style={v.noTaskBody}>先记件事，需要时请妥啦准备</Text>
               </View>
               <Icon name="plus" size={19} color={accent} />
             </Pressable>
@@ -536,8 +539,8 @@ export function TasksScreen() {
       contentContainerStyle={v.pageContent}
     >
       <PageHeader
-        title="任务"
-        subtitle="进度、结果，都在这里。"
+        title="助手执行记录"
+        subtitle="查看妥啦准备内容的进度与结果。"
         action={view === 'tasks' ? '新建任务' : '新建计划'}
         onAction={() =>
           navigate({ name: view === 'tasks' ? 'newTask' : 'schedule' })
@@ -545,7 +548,7 @@ export function TasksScreen() {
       />
       <View style={v.pageTabs}>
         {[
-          ['tasks', '我的任务'],
+          ['tasks', '执行记录'],
           ['schedules', '自动计划'],
         ].map(([id, label]) => (
           <Pressable

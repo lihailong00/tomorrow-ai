@@ -7,11 +7,13 @@ pub mod phone;
 pub mod phone_password;
 pub mod repository;
 pub mod sms;
+pub mod todos;
 
 pub use dto::*;
 pub use model::LlmProvider as ModelProvider;
 pub use model::{LlmProvider, ModelReply};
 pub use repository::Repository;
+pub use todos::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DomainError {

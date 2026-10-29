@@ -111,7 +111,7 @@ export function ChatScreen({
   navigationActions?: React.ReactNode;
   entryState?: ChatEntryState;
 }) {
-  const { api, invalidate, formatDate, user, preferences } = useApp();
+  const { api, invalidate, formatDate, user, preferences, navigate } = useApp();
   const { height: windowHeight, fontScale } = useWindowDimensions();
   const [availableHeight, setAvailableHeight] = useState(windowHeight);
   const localState = useRef<{ api: typeof api; value: ChatEntryState } | null>(null);
@@ -550,7 +550,23 @@ export function ChatScreen({
         </View>),
     [history.error, history.nextOffset, history.loading, refreshHistory, loadOlder,
       capabilities.error, capabilities.refresh, capabilities.value, messages.length, conversationId, setDraft]);
-  const messageFooter = useMemo(() => <View style={chat.messageFooter} />, []);
+  const messageFooter = useMemo(() => (
+    <View style={chat.messageFooter}>
+      {id && messages.length > 0 && (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="从这段对话发现待办"
+          disabled={sending}
+          style={[chat.todoDiscovery, sending && s.disabled]}
+          onPress={() => navigate({ name: 'todoSources', conversationId: id })}
+        >
+          <Icon name="tasks" size={15} color={colors.secondary} />
+          <Text style={chat.todoDiscoveryText}>从这段对话发现待办</Text>
+          <Icon name="chevronRight" size={14} color={colors.secondary} />
+        </Pressable>
+      )}
+    </View>
+  ), [id, messages.length, navigate, sending]);
   return (
     <View
       style={[s.fill, chat.chatRoot]}
@@ -1032,6 +1048,15 @@ const chat = StyleSheet.create({
   messagePane: { flex: 1, minHeight: 0 },
   messages: { paddingHorizontal: 24, flexGrow: 1 },
   messageFooter: { paddingBottom: 24 },
+  todoDiscovery: {
+    minHeight: 44,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+  },
+  todoDiscoveryText: { fontSize: 12, color: colors.secondary },
   welcome: { alignItems: 'center', paddingTop: 27, paddingBottom: 12 },
   welcomeOrb: { marginBottom: 19 },
   welcomeTitle: {
