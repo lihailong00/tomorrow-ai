@@ -8,10 +8,10 @@ import {
   View,
 } from 'react-native';
 import { useAction, useApp } from '../../app/context';
-import { newRequestId } from '../../api/client';
+import { ApiError, newRequestId } from '../../api/client';
 import { chineseDayLabel } from '../../domain/types';
 import { Text } from '../../ui/Text';
-import { Button, ErrorNotice, Loading } from '../../ui/components';
+import { Button, ErrorNotice, Loading, Notice } from '../../ui/components';
 import { colors } from '../../ui/theme';
 import { Icon } from '../../ui/visuals';
 import { createTodo, listTodos } from './api';
@@ -26,6 +26,21 @@ type Row =
   | { key: string; todo: Todo }
   | { key: string; group: Group }
   | { key: string; more: 'active' | Group };
+const sameInput = (left: CreateTodo, right: CreateTodo) =>
+  JSON.stringify([
+    left.title.trim(),
+    left.description ?? '',
+    left.kind ?? 'general',
+    left.due_at ?? null,
+    left.estimated_minutes ?? null,
+  ]) ===
+  JSON.stringify([
+    right.title.trim(),
+    right.description ?? '',
+    right.kind ?? 'general',
+    right.due_at ?? null,
+    right.estimated_minutes ?? null,
+  ]);
 export function TodosScreen() {
   const { api, user, revision, navigate, invalidate, formatDate } = useApp();
   const [scope, setScope] = useState<TodoScope>('today');
@@ -36,8 +51,29 @@ export function TodosScreen() {
   });
   const [capture, setCapture] = useState('');
   const [expanded, setExpanded] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [editorKey, setEditorKey] = useState(0);
+  const captureValue = useRef(capture);
+  const expandedValue = useRef(expanded);
+  const editorRevision = useRef(0);
+  const changeCapture = (value: string) => {
+    captureValue.current = value;
+    setCapture(value);
+  };
+  const changeExpanded = (value: boolean) => {
+    expandedValue.current = value;
+    setExpanded(value);
+  };
+  const owner = useMemo(() => ({ api, userId: user?.id }), [api, user?.id]);
   const action = useAction();
-  const request = useRef('');
+  const pendingIntent = useRef<
+    | {
+        owner: typeof owner;
+        input: Readonly<CreateTodo>;
+        id: string;
+      }
+    | undefined
+  >(undefined);
   const active = useTodoList(
     offset => listTodos(api, { filter: 'active', scope, offset }),
     [api, user?.id, scope, revision],
@@ -93,17 +129,65 @@ export function TodosScreen() {
     completed.hasMore,
     open,
   ]);
-  const add = (input: CreateTodo) =>
+  const add = (
+    input: CreateTodo,
+    surface: 'capture' | 'expanded' = 'capture',
+  ) =>
     action.run(async guard => {
-      if (!input.title.trim()) throw new Error('写下今天想做的一件事就好。');
-      // Keep this intent through unknown results, including edits before retry.
-      if (!request.current) request.current = newRequestId();
-      await createTodo(api, { ...input, client_request_id: request.current });
-      if (!guard.isCurrent()) return;
-      request.current = '';
-      setCapture('');
-      setExpanded(false);
-      invalidate();
+      if (pendingIntent.current?.owner !== owner)
+        pendingIntent.current = undefined;
+      if (!pendingIntent.current) {
+        if (!input.title.trim()) throw new Error('写下今天想做的一件事就好。');
+        // The id and payload form one immutable intent until its result is known.
+        pendingIntent.current = {
+          owner,
+          input: Object.freeze({ ...input }),
+          id: newRequestId(),
+        };
+      }
+      const intent = pendingIntent.current;
+      const attempt = {
+        capture: captureValue.current,
+        editorRevision: editorRevision.current,
+        input: { ...input },
+      };
+      setNotice('');
+      try {
+        await createTodo(api, {
+          ...intent.input,
+          client_request_id: intent.id,
+        });
+        if (!guard.isCurrent()) return;
+        pendingIntent.current = undefined;
+        const unchanged =
+          sameInput(attempt.input, intent.input) &&
+          captureValue.current === attempt.capture &&
+          (surface === 'expanded'
+            ? expandedValue.current &&
+              editorRevision.current === attempt.editorRevision
+            : !expandedValue.current);
+        if (unchanged) {
+          changeCapture('');
+          if (surface === 'expanded') {
+            changeExpanded(false);
+            setEditorKey(value => value + 1);
+          }
+          setNotice('已加入事项。');
+        } else {
+          setNotice('原事项已确认保存；当前草稿尚未提交，请再次点击添加。');
+        }
+        invalidate();
+      } catch (error) {
+        // A definite validation rejection created nothing; corrected input is a new intent.
+        if (
+          guard.isCurrent() &&
+          error instanceof ApiError &&
+          error.status === 400 &&
+          pendingIntent.current === intent
+        )
+          pendingIntent.current = undefined;
+        throw error;
+      }
     });
   return (
     <View style={s.fill}>
@@ -258,6 +342,7 @@ export function TodosScreen() {
         }}
       />
       <ErrorNotice message={action.error} />
+      {!!notice && <Notice>{notice}</Notice>}
       <View style={s.capture}>
         <TextInput
           accessibilityLabel="记件要做的事"
@@ -266,12 +351,16 @@ export function TodosScreen() {
           style={s.input}
           maxLength={200}
           value={capture}
-          onChangeText={setCapture}
+          onChangeText={changeCapture}
           onSubmitEditing={() => {
             void add({ title: capture });
           }}
         />
-        <Pressable accessibilityRole="button" onPress={() => setExpanded(true)}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="展开事项编辑"
+          onPress={() => changeExpanded(true)}
+        >
           <Text style={s.small}>更多</Text>
         </Pressable>
         <Pressable
@@ -289,7 +378,7 @@ export function TodosScreen() {
       <Modal
         visible={expanded}
         animationType="slide"
-        onRequestClose={() => setExpanded(false)}
+        onRequestClose={() => changeExpanded(false)}
       >
         <ScrollView
           contentContainerStyle={s.page}
@@ -300,18 +389,23 @@ export function TodosScreen() {
             <Text style={s.title}>记件事</Text>
             <Pressable
               accessibilityRole="button"
-              onPress={() => setExpanded(false)}
+              onPress={() => changeExpanded(false)}
             >
               <Text style={s.link}>收起</Text>
             </Pressable>
           </View>
           <ErrorNotice message={action.error} />
+          {!!notice && <Notice>{notice}</Notice>}
           <TodoEditor
+            key={editorKey}
             initialTitle={capture}
             timezone={user?.timezone ?? 'Asia/Shanghai'}
             busy={action.busy}
+            onEdit={() => {
+              editorRevision.current++;
+            }}
             onSave={input => {
-              void add(input);
+              void add(input, 'expanded');
             }}
           />
         </ScrollView>

@@ -1,4 +1,5 @@
-//! Independent acceptance uses isolated SQLite and synthetic accounts only.
+//! Independent acceptance uses isolated SQLite, an opt-in dedicated QA PostgreSQL,
+//! and synthetic accounts. Never uses application/production database settings.
 use axum::{
     body::{to_bytes, Body},
     extract::State,
@@ -550,5 +551,203 @@ async fn completed_preparation_is_only_a_draft_and_late_results_cannot_overwrite
     assert!(
         model.requests.lock().unwrap().is_empty(),
         "Preparation endpoint queues work; this test never runs a worker"
+    );
+}
+
+#[tokio::test]
+#[ignore = "Explicit QA container lease and TODOS_TEST_DATABASE_URL required; not a default pass"]
+async fn qa_postgres_todos_migrations_and_personal_state_contract() {
+    let database_url = std::env::var("TODOS_TEST_DATABASE_URL")
+        .expect("TODOS_TEST_DATABASE_URL must explicitly name the dedicated QA database");
+    let parsed = url::Url::parse(&database_url).expect("QA database URL must be valid");
+    assert!(
+        ["postgres", "postgresql"].contains(&parsed.scheme())
+            && parsed.host_str() == Some("127.0.0.1")
+            && parsed.port() == Some(55443)
+            && parsed.username() == "todos_qa"
+            && parsed.path() == "/todos_qa",
+        "Refusing a database outside Root's dedicated localhost:55443 QA lease"
+    );
+    let mut output = candidate("我会核对报销票据");
+    output["items"][0]["title"] = json!("核对报销票据");
+    let model = ModelStub::new(output).await;
+    // A new connection applies Repository's real PostgreSQL migrations.
+    let repo = Repository::connect(&database_url).await.unwrap();
+    let suffix = new_id();
+    let owner = repo
+        .create_user(
+            &format!("pg-owner-{suffix}@fixture.invalid"),
+            "unused",
+            "PG owner",
+            "Asia/Shanghai",
+        )
+        .await
+        .unwrap()
+        .id;
+    let other = repo
+        .create_user(
+            &format!("pg-other-{suffix}@fixture.invalid"),
+            "unused",
+            "PG other",
+            "UTC",
+        )
+        .await
+        .unwrap()
+        .id;
+    let token = repo.create_session(&owner).await.unwrap();
+    let foreign_token = repo.create_session(&other).await.unwrap();
+    let f = Fixture {
+        _dir: tempfile::tempdir().unwrap(),
+        url: database_url.clone(),
+        router: app(AppState::new(repo.clone(), model.provider(), &database_url)),
+        repo,
+        owner,
+        token,
+        other,
+        foreign_token,
+    };
+    let todo = create(
+        &f,
+        "PG 持久学习目标",
+        json!({"kind":"learning","client_request_id":new_id()}),
+    )
+    .await;
+    let path = route(&todo);
+    let (status, edited) = call(
+        &f,
+        &f.token,
+        "PATCH",
+        &path,
+        json!({"version":1,"title":"PG 修改后的学习目标","progress_notes":"用户自己的实际进展"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(edited["version"], 2);
+    assert_eq!(
+        call(
+            &f,
+            &f.token,
+            "PATCH",
+            &path,
+            json!({"version":1,"title":"过期覆盖"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    for (method, endpoint, body) in [
+        ("GET", path.clone(), Value::Null),
+        (
+            "PATCH",
+            path.clone(),
+            json!({"version":2,"title":"异账号覆盖"}),
+        ),
+        ("DELETE", path.clone(), Value::Null),
+        ("POST", format!("{path}/prepare"), json!({})),
+    ] {
+        assert_eq!(
+            call(&f, &f.foreign_token, method, &endpoint, body).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    let reopened = Repository::connect(&database_url).await.unwrap();
+    let persisted = reopened
+        .todo(&f.owner, todo["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(persisted.title, "PG 修改后的学习目标");
+    assert_eq!(
+        persisted.progress_notes.as_deref(),
+        Some("用户自己的实际进展")
+    );
+
+    let source = import(&f, "我会核对报销票据，核对后自行提交。").await;
+    let input =
+        json!({"source_kind":"integration_import","source_id":source,"client_request_id":new_id()});
+    assert_eq!(
+        call(
+            &f,
+            &f.foreign_token,
+            "POST",
+            "/v1/todos/extract",
+            input.clone()
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let (status, extracted) = call(&f, &f.token, "POST", "/v1/todos/extract", input.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{extracted}");
+    assert_eq!(extracted["created_count"], 1);
+    assert_eq!(extracted["items"][0]["status"], "suggested");
+    let (status, retry) = call(&f, &f.token, "POST", "/v1/todos/extract", input).await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(retry["created_count"], 0);
+    assert_eq!(retry["items"][0]["id"], extracted["items"][0]["id"]);
+    assert_eq!(
+        model.requests.lock().unwrap().len(),
+        1,
+        "Same source retry must not call the model twice"
+    );
+
+    let (status, prepared) = call(
+        &f,
+        &f.token,
+        "POST",
+        &format!("{path}/prepare"),
+        json!({"client_request_id":new_id()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    assert_eq!(prepared["status"], "pending");
+    let task_id = prepared["linked_task_id"].as_str().unwrap();
+    let task = reopened.task(&f.owner, task_id).await.unwrap();
+    assert_eq!(task.status, "queued");
+    assert_eq!(task.kind, "todo_prepare");
+    // Synthetic completion of this exact owned task, without a shared worker/claim.
+    assert_eq!(sqlx::query("UPDATE tasks SET status='succeeded',result=$1,progress=100,model_mode='fixture',updated_at=$2 WHERE id=$3 AND user_id=$4")
+        .bind("准备出的真实目标练习").bind(now()).bind(task_id).bind(&f.owner)
+        .execute(&f.repo.pool()).await.unwrap().rows_affected(), 1);
+    let completed_task = reopened.task(&f.owner, task_id).await.unwrap();
+    assert_eq!(completed_task.status, "succeeded");
+    let refreshed = reopened
+        .todo(&f.owner, todo["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(refreshed.status, "pending");
+    assert_eq!(refreshed.draft.as_deref(), Some("准备出的真实目标练习"));
+    assert_eq!(
+        refreshed.progress_notes.as_deref(),
+        Some("用户自己的实际进展")
+    );
+    assert!(refreshed.completed_at.is_none());
+    let (status, personal_done) = call(
+        &f,
+        &f.token,
+        "PATCH",
+        &path,
+        json!({"version":refreshed.version,"status":"completed"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{personal_done}");
+    assert_eq!(personal_done["status"], "completed");
+    assert!(personal_done["completed_at"].is_string());
+    let disposable = create(&f, "PG 可删除记录", json!({})).await;
+    assert_eq!(
+        call(&f, &f.token, "DELETE", &route(&disposable), Value::Null)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&f, &f.token, "GET", &route(&disposable), Value::Null)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        model.requests.lock().unwrap().len(),
+        1,
+        "No worker or real model execution in this test"
     );
 }

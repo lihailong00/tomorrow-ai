@@ -153,7 +153,11 @@ function TodoContent({
       const result = await api.task(todo.linked_task_id);
       if (guard.isCurrent()) {
         setTask(result);
-        if (['failed', 'cancelled', 'succeeded'].includes(result.status))
+        if (
+          ['failed', 'cancelled', 'succeeded', 'uncertain'].includes(
+            result.status,
+          )
+        )
           onPreparationStopped();
       }
     });
@@ -194,6 +198,10 @@ function TodoContent({
         setNotice('已打开系统分享。实际回复后，再确认进入等待。');
     });
   const terminal = todo.status === 'completed' || todo.status === 'dismissed';
+  const preparationStopped = Boolean(
+    task &&
+      ['succeeded', 'failed', 'cancelled', 'uncertain'].includes(task.status),
+  );
   return (
     <View style={s.gap}>
       <Text style={s.title}>{todo.title}</Text>
@@ -312,27 +320,25 @@ function TodoContent({
             ['communication', 'learning', 'reading', 'expense'] as string[]
           ).includes(todo.kind) && (
             <>
-              {!todo.draft &&
-                (!todo.linked_task_id ||
-                  (task && ['failed', 'cancelled'].includes(task.status))) && (
-                  <Button
-                    loading={action.busy}
-                    onPress={() => {
-                      void prepare();
-                    }}
-                  >
-                    {todo.linked_task_id
-                      ? '重新准备内容'
-                      : (
-                          {
-                            communication: '准备回复草稿',
-                            learning: '准备讲解与练习',
-                            reading: '整理阅读重点',
-                            expense: '整理材料清单',
-                          } as Record<string, string>
-                        )[todo.kind]}
-                  </Button>
-                )}
+              {!todo.draft && !todo.linked_task_id && (
+                <Button
+                  loading={action.busy}
+                  onPress={() => {
+                    void prepare();
+                  }}
+                >
+                  {
+                    (
+                      {
+                        communication: '准备回复草稿',
+                        learning: '准备讲解与练习',
+                        reading: '整理阅读重点',
+                        expense: '整理材料清单',
+                      } as Record<string, string>
+                    )[todo.kind]
+                  }
+                </Button>
+              )}
               <Text style={s.small}>
                 {todo.kind === 'learning'
                   ? '按你的目标和实际进度准备讲解、练习和笔记；学完后由你确认。'
@@ -395,11 +401,26 @@ function TodoContent({
         <>
           {!todo.draft && !terminal && (
             <Text style={s.small}>
-              {pollPaused
+              {preparationStopped
+                ? '尚无可用的准备内容。你可以重新准备，已记录的进度会保留。'
+                : pollPaused
                 ? '准备结果还未确认。可以刷新或查看准备进展。'
                 : '准备结果尚未确认，正在定时更新。'}
             </Text>
           )}
+          {!todo.draft &&
+            !terminal &&
+            todo.status !== 'suggested' &&
+            preparationStopped && (
+              <Button
+                loading={action.busy}
+                onPress={() => {
+                  void prepare();
+                }}
+              >
+                重新准备内容
+              </Button>
+            )}
           <Button
             variant="ghost"
             loading={action.busy}

@@ -15,6 +15,12 @@ CREATE TABLE IF NOT EXISTS todo_extractions (
  source_kind TEXT NOT NULL, source_id TEXT NOT NULL, content_hash TEXT NOT NULL,
  todo_ids TEXT NOT NULL, PRIMARY KEY(user_id,source_kind,source_id,content_hash)
 );
+CREATE TABLE IF NOT EXISTS todo_extraction_attempts (
+ user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ source_kind TEXT NOT NULL, source_id TEXT NOT NULL, content_hash TEXT NOT NULL,
+ attempt_token TEXT NOT NULL, lease_until BIGINT NOT NULL, updated_at BIGINT NOT NULL,
+ PRIMARY KEY(user_id,source_kind,source_id,content_hash)
+);
 -- Also initialized by IntegrationState. Rows only arrive through confirmed imports.
 CREATE TABLE IF NOT EXISTS integration_imports (
  id TEXT PRIMARY KEY,user_id TEXT NOT NULL,source_app TEXT NOT NULL,title TEXT NOT NULL,

@@ -12,12 +12,14 @@ export function TodoEditor({
   timezone,
   busy,
   onSave,
+  onEdit,
 }: {
   todo?: Todo;
   initialTitle?: string;
   timezone: string;
   busy: boolean;
   onSave: (value: CreateTodo) => void;
+  onEdit?: () => void;
 }) {
   const [title, setTitle] = useState(todo?.title ?? initialTitle);
   const [description, setDescription] = useState(todo?.description ?? '');
@@ -48,13 +50,19 @@ export function TodoEditor({
       <Field
         label="事项名称"
         value={title}
-        onChangeText={setTitle}
+        onChangeText={value => {
+          onEdit?.();
+          setTitle(value);
+        }}
         maxLength={200}
       />
       <Field
         label="补充说明"
         value={description}
-        onChangeText={setDescription}
+        onChangeText={value => {
+          onEdit?.();
+          setDescription(value);
+        }}
         multiline
         maxLength={8000}
       />
@@ -65,7 +73,10 @@ export function TodoEditor({
               key={id}
               accessibilityRole="radio"
               accessibilityState={{ checked: kind === id }}
-              onPress={() => setKind(id)}
+              onPress={() => {
+                if (kind !== id) onEdit?.();
+                setKind(id);
+              }}
               style={[s.chip, kind === id && s.chipSelected]}
             >
               <Text style={kind === id ? s.link : s.small}>{label}</Text>
@@ -77,7 +88,10 @@ export function TodoEditor({
         label="计划时间（可选）"
         placeholder="2026-10-29 19:00"
         value={due}
-        onChangeText={setDue}
+        onChangeText={value => {
+          onEdit?.();
+          setDue(value);
+        }}
         autoCapitalize="none"
       />
       <Text style={s.small}>
@@ -86,7 +100,10 @@ export function TodoEditor({
       <Field
         label="预计分钟数（可选）"
         value={minutes}
-        onChangeText={setMinutes}
+        onChangeText={value => {
+          onEdit?.();
+          setMinutes(value);
+        }}
         keyboardType="number-pad"
         maxLength={3}
       />

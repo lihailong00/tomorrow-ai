@@ -1,5 +1,5 @@
 import React from 'react';
-import { FlatList, Text, TextInput } from 'react-native';
+import { FlatList, Modal, Text, TextInput } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { AppContextValue, AppProvider } from '../src/app/context';
 import { ApiError } from '../src/api/client';
@@ -127,15 +127,34 @@ it('does not leak an old account list or its pending page into a new owner', asy
   expect(texts(tree)).not.toContain('旧账号');
   await act(async () => tree.unmount());
 });
-it('keeps one creation intent after timeout and edits, never injecting sample todos', async () => {
-  let creates = 0;
-  const request = jest.fn(async (path: string, method: string) => {
+it('reconciles a lost successful creation using its original input, preserves later edits and creates them only on the next explicit click', async () => {
+  const saved = new Map<string, { body: any; canonical: Todo }>();
+  let loseResponse = true;
+  const request = jest.fn(async (path: string, method: string, body: any) => {
     if (path === '/todos' && method === 'POST') {
-      creates++;
-      if (creates === 1) throw new ApiError('timeout', '结果未知');
-      return todo();
+      const previous = saved.get(body.client_request_id);
+      if (previous) {
+        if (JSON.stringify(previous.body) !== JSON.stringify(body))
+          throw new ApiError('conflict', '同一请求不能改变内容', 409);
+        return previous.canonical;
+      }
+      const canonical = todo({
+        id: 'canonical-' + saved.size,
+        title: body.title,
+      });
+      saved.set(body.client_request_id, { body: { ...body }, canonical });
+      if (loseResponse) {
+        loseResponse = false;
+        throw new ApiError('timeout', '结果未知');
+      }
+      return canonical;
     }
-    return { items: [], next_offset: null };
+    return {
+      items: path.includes('filter=active')
+        ? [...saved.values()].map(item => item.canonical)
+        : [],
+      next_offset: null,
+    };
   });
   const tree = await mount(<TodosScreen />, context({ request }));
   expect(texts(tree)).not.toContain('真实事项');
@@ -145,12 +164,124 @@ it('keeps one creation intent after timeout and edits, never injecting sample to
   const add = () => byLabel(tree, '添加事项');
   await act(async () => capture.props.onChangeText('自己的目标'));
   await act(async () => add().props.onPress());
+  expect(texts(tree)).toContain('结果未知');
+  await act(async () => tree.root.findByType(FlatList).props.onRefresh());
+  expect(texts(tree)).toContain('自己的目标');
   await act(async () => capture.props.onChangeText('修改后的目标'));
   await act(async () => add().props.onPress());
-  const calls = request.mock.calls.filter(call => call[0] === '/todos');
-  expect((calls[0] as any)[2].client_request_id).toBe(
-    (calls[1] as any)[2].client_request_id,
+  let calls = request.mock.calls.filter(call => call[0] === '/todos');
+  expect(calls[1][2]).toEqual(calls[0][2]);
+  expect(capture.props.value).toBe('修改后的目标');
+  expect(texts(tree)).toContain('尚未提交');
+  expect(saved.size).toBe(1);
+  await act(async () => add().props.onPress());
+  calls = request.mock.calls.filter(call => call[0] === '/todos');
+  expect(calls[2][2].client_request_id).not.toBe(calls[0][2].client_request_id);
+  expect(calls[2][2].title).toBe('修改后的目标');
+  expect(saved.size).toBe(2);
+  expect(capture.props.value).toBe('');
+  await act(async () => tree.unmount());
+});
+it('locks repeated add clicks and retains capture edits made while the original response is pending', async () => {
+  const late = deferred<Todo>();
+  const bodies: any[] = [];
+  const request = jest.fn(async (path: string, method: string, body: any) => {
+    if (path !== '/todos' || method !== 'POST')
+      return { items: [], next_offset: null };
+    bodies.push(body);
+    return bodies.length === 1 ? late.promise : todo({ title: body.title });
+  });
+  const tree = await mount(<TodosScreen />, context({ request }));
+  const capture = () => byLabel(tree, '记件要做的事');
+  await act(async () => capture().props.onChangeText('原事项'));
+  const press = byLabel(tree, '添加事项').props.onPress;
+  await act(async () => {
+    press();
+    press();
+  });
+  expect(bodies).toHaveLength(1);
+  expect(byLabel(tree, '添加事项').props.disabled).toBe(true);
+  await act(async () => capture().props.onChangeText('等待期间写的新事项'));
+  await act(async () => late.resolve(todo({ title: '原事项' })));
+  expect(capture().props.value).toBe('等待期间写的新事项');
+  expect(texts(tree)).toContain('当前草稿尚未提交');
+  await act(async () => byLabel(tree, '添加事项').props.onPress());
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1].title).toBe('等待期间写的新事项');
+  expect(bodies[1].client_request_id).not.toBe(bodies[0].client_request_id);
+  expect(capture().props.value).toBe('');
+  await act(async () => tree.unmount());
+});
+it('preserves expanded form edits after a late successful creation and uses a new intent only on the next save', async () => {
+  const late = deferred<Todo>();
+  const bodies: any[] = [];
+  const request = jest.fn(async (path: string, method: string, body: any) => {
+    if (path !== '/todos' || method !== 'POST')
+      return { items: [], next_offset: null };
+    bodies.push(body);
+    return bodies.length === 1
+      ? late.promise
+      : todo({ title: body.title, description: body.description });
+  });
+  const tree = await mount(<TodosScreen />, context({ request }));
+  await act(async () => byLabel(tree, '展开事项编辑').props.onPress());
+  await act(async () =>
+    byLabel(tree, '事项名称').props.onChangeText('原表单事项'),
   );
+  await act(async () => byLabel(tree, '补充说明').props.onChangeText('原说明'));
+  const save = button(tree, '加入事项').props.onPress;
+  await act(async () => {
+    save();
+    save();
+  });
+  expect(bodies).toHaveLength(1);
+  expect(button(tree, '加入事项').props.loading).toBe(true);
+  await act(async () =>
+    byLabel(tree, '事项名称').props.onChangeText('新表单事项'),
+  );
+  await act(async () =>
+    byLabel(tree, '补充说明').props.onChangeText('新说明仍要保留'),
+  );
+  await act(async () =>
+    late.resolve(todo({ title: '原表单事项', description: '原说明' })),
+  );
+  expect(tree.root.findByType(Modal).props.visible).toBe(true);
+  expect(byLabel(tree, '事项名称').props.value).toBe('新表单事项');
+  expect(byLabel(tree, '补充说明').props.value).toBe('新说明仍要保留');
+  expect(texts(tree)).toContain('当前草稿尚未提交');
+  expect(bodies).toHaveLength(1);
+  await act(async () => button(tree, '加入事项').props.onPress());
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]).toMatchObject({
+    title: '新表单事项',
+    description: '新说明仍要保留',
+  });
+  expect(bodies[1].client_request_id).not.toBe(bodies[0].client_request_id);
+  expect(tree.root.findByType(Modal).props.visible).toBe(false);
+  await act(async () => tree.unmount());
+});
+it('starts a corrected creation with a new intent after a definite validation rejection', async () => {
+  const bodies: any[] = [];
+  const request = jest.fn(async (path: string, method: string, body: any) => {
+    if (path !== '/todos' || method !== 'POST')
+      return { items: [], next_offset: null };
+    bodies.push(body);
+    if (bodies.length === 1)
+      throw new ApiError('validation', '内容需要修改', 400);
+    return todo({ title: body.title });
+  });
+  const tree = await mount(<TodosScreen />, context({ request }));
+  await act(async () =>
+    byLabel(tree, '记件要做的事').props.onChangeText('被拒绝的内容'),
+  );
+  await act(async () => byLabel(tree, '添加事项').props.onPress());
+  await act(async () =>
+    byLabel(tree, '记件要做的事').props.onChangeText('修正后的内容'),
+  );
+  await act(async () => byLabel(tree, '添加事项').props.onPress());
+  expect(bodies[1].title).toBe('修正后的内容');
+  expect(bodies[1].client_request_id).not.toBe(bodies[0].client_request_id);
+  expect(byLabel(tree, '记件要做的事').props.value).toBe('');
   await act(async () => tree.unmount());
 });
 it('accepts source candidates explicitly and retains evidence when dismissing or editing', async () => {
@@ -380,3 +511,71 @@ it('does not let an older in-flight preparation poll undo a successful user comp
     jest.useRealTimers();
   }
 });
+
+it.each([
+  ['succeeded', 'pending'],
+  ['failed', 'pending'],
+  ['cancelled', 'pending'],
+  ['uncertain', 'pending'],
+  ['succeeded', 'waiting'],
+] as const)(
+  'recovers a %s preparation on a %s todo with no draft while retaining saved and edited progress',
+  async (status, todoStatus) => {
+    jest.useFakeTimers();
+    try {
+      let current = todo({
+        kind: 'learning',
+        status: todoStatus,
+        linked_task_id: 'real-linked-task',
+        draft: null,
+        progress_notes: '实际已学到第二课',
+      });
+      const request = jest.fn(async (path: string) => {
+        if (path.endsWith('/prepare'))
+          current = { ...current, linked_task_id: 'new-real-task', version: 2 };
+        return current;
+      });
+      const task = jest
+        .fn()
+        .mockResolvedValue({ id: 'real-linked-task', status });
+      const tree = await mount(
+        <TodoDetail id="one" />,
+        context({ request, task, baseUrl: 'https://api.example.com' }),
+      );
+      const progress = () =>
+        tree.root
+          .findAllByType(TextInput)
+          .find(node => node.props.accessibilityLabel === '进展记录')!;
+      expect(progress().props.value).toBe('实际已学到第二课');
+      await act(async () =>
+        progress().props.onChangeText('实际已学到第二课，补充自己的笔记'),
+      );
+      expect(button(tree, '重新准备内容')).toBeUndefined();
+      await act(async () => button(tree, '查看准备进展').props.onPress());
+      expect(task).toHaveBeenCalledWith('real-linked-task');
+      expect(texts(tree)).toContain('尚无可用的准备内容');
+      expect(button(tree, '重新准备内容')).toBeDefined();
+      const callsBeforePause = request.mock.calls.length;
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(12000);
+      });
+      expect(request).toHaveBeenCalledTimes(callsBeforePause);
+      await act(async () => button(tree, '重新准备内容').props.onPress());
+      expect(request).toHaveBeenCalledWith('/todos/one/prepare', 'POST', {
+        client_request_id: expect.any(String),
+      });
+      expect(current.progress_notes).toBe('实际已学到第二课');
+      expect(progress().props.value).toBe('实际已学到第二课，补充自己的笔记');
+      expect(
+        request.mock.calls.some(call => (call as any)[1] === 'PATCH'),
+      ).toBe(false);
+      expect(texts(tree)).toContain(
+        todoStatus === 'waiting' ? '我已确认这件事结束' : '我已完成这次学习',
+      );
+      await act(async () => tree.unmount());
+    } finally {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    }
+  },
+);
