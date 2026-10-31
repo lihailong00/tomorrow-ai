@@ -223,8 +223,8 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
     let pendingText = '', pendingTurn = 0;
     // Reserve lifecycle/tool events, a first and final delta per turn, and enough
     // UTF-8 chunks for the entire bounded answer even if optional batching stops.
-    // A configured run is <=105s: at 60ms plus the 60000-character/512-char
-    // bound this stays below 2000 text updates, keeping the whole chat live.
+    // Optional live updates consume only the remaining event budget. Longer
+    // research runs still reserve room for lifecycle events and the full answer.
     let optionalTextEvents = Math.max(0, eventLimit - 2 - limits.tools * 2 - limits.turns * 4 - 64);
     const failEvents = (error: unknown) => stop(error instanceof RunError ? error :
       new RunError('event_failed', '执行记录暂时无法保存，请稍后重试'));
