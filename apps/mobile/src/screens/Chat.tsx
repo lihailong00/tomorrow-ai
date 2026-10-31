@@ -1,17 +1,20 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   ActivityIndicator,
+  AppState,
+  Keyboard,
   Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
-  Text,
   TextInput,
   useWindowDimensions,
   View,
 } from 'react-native';
-import { newRequestId } from '../api/client';
+import { Text } from '../ui/Text';
+import { errorMessage, newRequestId } from '../api/client';
 import { useAction, useApp, useResource } from '../app/context';
+import type { RetainedRouteScope } from '../app/navigation';
 import type { Message, Upload } from '../domain/types';
 import { LocalFile, platform } from '../platform/ports';
 import {
@@ -20,55 +23,250 @@ import {
   Empty,
   ErrorNotice,
   Loading,
-  Pill,
 } from '../ui/components';
 import { ResultText } from '../ui/ResultText';
-import { colors, styles as s } from '../ui/theme';
-import { AssistantOrb, Icon } from '../ui/visuals';
-import { ModeNotice } from './Main';
+import { ChatModeMotion, useChatReducedMotion } from '../ui/ChatMotion';
+import { ChatVoiceOverlay } from '../ui/ChatVoiceOverlay';
+import { chatAppearance as appearance } from '../ui/ChatAppearance';
+import { colors as historyColors, styles as s } from '../ui/theme';
+import { Icon } from '../ui/visuals';
+import { ModeNotice, usePagedList } from './Main';
+import { createMessageHistory, mergeMessageHistory } from './messageHistory';
+import { ChatMessageList } from './ChatMessageList';
+import { createChatStreamController, type ChatProgress, type ChatStreamController } from './chatStreamController';
 
 type Attachment = { file: LocalFile; upload?: Upload; transcript?: string };
-type VoiceInput = { file: LocalFile; upload?: Upload; text?: string };
+type VoiceInput = { key: string; file: LocalFile; upload?: Upload; text?: string };
+type HoldRecording = { held: boolean; cancelled: boolean; started: boolean; ended: boolean; lease: object; startY?: number };
+type VoiceRequest = { cancel: () => void; release: () => void };
+const INPUT_LINE_ALLOWANCE = 23;
+// The microphone is process-wide, including permission requests from an old route.
+let activeRecorder: object | null = null;
+const recorderStops = new WeakMap<object, Promise<LocalFile | null>>();
+function stopRecorder(lease: object | null): Promise<LocalFile | null> {
+  if (!lease) return platform.stopRecording();
+  let pending = recorderStops.get(lease);
+  if (!pending) {
+    pending = platform.stopRecording().catch(failure => { recorderStops.delete(lease); throw failure; });
+    recorderStops.set(lease, pending);
+  }
+  return pending;
+}
+const releaseRecorder = (lease: object | null) => { if (lease && activeRecorder === lease) activeRecorder = null; };
+type ChatSnapshot = {
+  id?: string;
+  draft: string;
+  attachment: Attachment | null;
+  voice: VoiceInput | null;
+  voicePhase: string;
+  voiceError: string | null;
+  voiceBusy: boolean;
+  messages: Message[];
+  messageVersion: number;
+  sending: boolean;
+  sendError: string | null;
+};
+
+/** Only the navigation entry owns this memory; no hidden screen stays mounted. */
+export function createChatEntryState(
+  conversationId?: string,
+  prompt?: string,
+  scope?: RetainedRouteScope,
+) {
+  let snapshot: ChatSnapshot = {
+    id: conversationId,
+    draft: prompt ?? '',
+    attachment: null,
+    voice: null,
+    voicePhase: '',
+    voiceError: null,
+    voiceBusy: false,
+    messages: [],
+    messageVersion: 0,
+    sending: false,
+    sendError: null,
+  };
+  const listeners = new Set<() => void>();
+  const history = createMessageHistory();
+  const streams = new Map<string, ChatStreamController>();
+  const disposeStreams = () => { streams.forEach(stream => stream.dispose()); streams.clear(); };
+  scope?.onDispose(history.dispose);
+  scope?.onDispose(disposeStreams);
+  return {
+    scope,
+    history,
+    voiceRequest: null as VoiceRequest | null,
+    streams,
+    disposeStreams,
+    getSnapshot: () => snapshot,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    update: (change: (previous: ChatSnapshot) => ChatSnapshot) => {
+      if (scope && !scope.isRetained()) return;
+      snapshot = change(snapshot);
+      listeners.forEach(listener => listener());
+    },
+  };
+}
+type ChatEntryState = ReturnType<typeof createChatEntryState>;
+
 const isTextFile = (file: LocalFile) =>
-  /\.(txt|md|csv|tsv|json|log)$/i.test(file.name);
+  /\.(txt|md|csv|tsv|json|log|docx|xlsx)$/i.test(file.name);
 const isAudioFile = (file: LocalFile) => file.mime_type.startsWith('audio/');
 
 export function ChatScreen({
   conversationId,
   prompt,
+  onConversationCreated,
+  navigationActions,
+  entryState,
 }: {
   conversationId?: string;
   prompt?: string;
+  onConversationCreated?: (id: string) => void;
+  navigationActions?: React.ReactNode;
+  entryState?: ChatEntryState;
 }) {
-  const { api, invalidate, formatDate } = useApp();
-  const { height: windowHeight } = useWindowDimensions();
+  const { api, invalidate, formatDate, user, preferences } = useApp();
+  const { height: windowHeight, fontScale } = useWindowDimensions();
+  const reducedMotion = useChatReducedMotion();
   const [availableHeight, setAvailableHeight] = useState(windowHeight);
-  const [id, setId] = useState(conversationId);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [draft, setDraft] = useState(prompt ?? '');
+  const [composerHeight, setComposerHeight] = useState(68);
+  const localState = useRef<{ api: typeof api; value: ChatEntryState } | null>(null);
+  if (!localState.current || localState.current.api !== api) {
+    localState.current = { api, value: createChatEntryState(conversationId, prompt) };
+  }
+  const state = entryState ?? localState.current.value;
+  const { id, messages, messageVersion, draft, attachment, voice, voicePhase, voiceError, voiceBusy, sending } =
+    useSyncExternalStore(state.subscribe, state.getSnapshot, state.getSnapshot);
+  const setDraft = useCallback((next: React.SetStateAction<string>) => state.update(old => ({
+    ...old,
+    draft: typeof next === 'function' ? next(old.draft) : next,
+  })), [state]);
+  const setAttachment = (next: React.SetStateAction<Attachment | null>) => state.update(old => ({
+    ...old,
+    attachment: typeof next === 'function' ? next(old.attachment) : next,
+  }));
+  const setVoice = (next: VoiceInput | null) => state.update(old => ({ ...old, voice: next }));
+  const setVoicePhase = (next: string) => state.update(old => ({ ...old, voicePhase: next }));
   const draftRef = useRef(draft);
   draftRef.current = draft;
-  const [attachment, setAttachment] = useState<Attachment | null>(null);
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
-  const [voice, setVoice] = useState<VoiceInput | null>(null);
-  const [voicePhase, setVoicePhase] = useState('');
-  const voiceGeneration = useRef(0);
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [holdActive, setHoldActive] = useState(false);
+  const [holdCancelled, setHoldCancelled] = useState(false);
+  const [captureBusy, setCaptureBusy] = useState(false);
+  const recorderLease = useRef<object | null>(null);
+  const holdOwner = useMemo(() => ({ active: true, gesture: null as HoldRecording | null }), [api, state]);
   const mounted = useRef(true);
-  const voiceAbort = useRef<AbortController | null>(null);
+  const voiceOwner = useRef({ api, state });
+  voiceOwner.current = { api, state };
+  const attachmentAbort = useRef<AbortController | null>(null);
   const recordingRef = useRef(false);
-  const scroll = useRef<ScrollView>(null);
-  const request = useRef({ key: '', id: newRequestId() });
-  const history = useResource(
-    () =>
-      conversationId
-        ? api.messages(conversationId)
-        : Promise.resolve({ items: [] as Message[] }),
-    [api, conversationId],
-  );
+  const composerScroll = useRef<ScrollView>(null);
+  const composerTop = useRef(0);
+  const inputFocused = useRef(false);
+  const inputRef = useRef<TextInput>(null);
+  const focusAfterModeChange = useRef(false);
+  useEffect(() => {
+    // Wait until display:none is removed before focusing the native EditText.
+    if (!voiceMode && focusAfterModeChange.current) {
+      focusAfterModeChange.current = false;
+      inputRef.current?.focus();
+    }
+  }, [voiceMode]);
+  const toggleInputMode = () => {
+    if (voiceMode) {
+      focusAfterModeChange.current = true;
+      setVoiceMode(false);
+    } else {
+      focusAfterModeChange.current = false;
+      inputRef.current?.blur();
+      inputFocused.current = false;
+      Keyboard.dismiss();
+      setVoiceMode(true);
+    }
+  };
+  const [nativeFontScale, setNativeFontScale] = useState<number | null>(null);
+  const inputScaleOwner = useMemo(() => ({ active: true, running: false, pending: false }), [api, state]);
+  const currentInputScaleOwner = useRef(inputScaleOwner);
+  currentInputScaleOwner.current = inputScaleOwner;
+  const refreshInputFontScale = useCallback(() => {
+    if (!inputScaleOwner.active || currentInputScaleOwner.current !== inputScaleOwner ||
+      !platform.getSystemFontScale) return;
+    inputScaleOwner.pending = true;
+    if (inputScaleOwner.running) return;
+    inputScaleOwner.running = true;
+    void (async () => {
+      do {
+        inputScaleOwner.pending = false;
+        const value = await platform.getSystemFontScale().catch(() => null);
+        if (!inputScaleOwner.active || currentInputScaleOwner.current !== inputScaleOwner) return;
+        const scale = typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+        setNativeFontScale(previous => previous === scale ? previous : scale);
+      } while (inputScaleOwner.pending);
+    })().finally(() => { inputScaleOwner.running = false; });
+  }, [inputScaleOwner]);
+  useEffect(() => {
+    inputScaleOwner.active = true;
+    return () => { inputScaleOwner.active = false; };
+  }, [inputScaleOwner]);
+  useEffect(() => {
+    refreshInputFontScale();
+  }, [refreshInputFontScale, windowHeight, availableHeight, fontScale]);
+  // Rotation and keyboard reflow can move a field that already has focus.
+  const revealFocusedInput = () => {
+    if (inputFocused.current) {
+      composerScroll.current?.scrollTo({
+        y: composerTop.current,
+        animated: false,
+      });
+    }
+  };
+  // A newly created thread already has its messages locally. Updating its route
+  // identity must not trigger a history request that could overwrite a later reply.
+  const initialConversationId = useRef(id).current;
+  const history = useSyncExternalStore(state.history.subscribe,
+    state.history.getSnapshot, state.history.getSnapshot);
+  const canApplyHistory = useCallback(() => state.scope ? state.scope.isRetained() :
+    mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state, [api, state]);
+  const applyHistory = useCallback((items: Message[]) => state.update(old => ({
+    ...old, messages: mergeMessageHistory(items, old.messages),
+  })), [state]);
+  const refreshHistory = useCallback(() => state.history.refresh(api, initialConversationId, applyHistory, canApplyHistory),
+    [state, api, initialConversationId, applyHistory, canApplyHistory]);
+  const loadOlder = useCallback(() => state.history.older(api, id, applyHistory, canApplyHistory),
+    [state, api, id, applyHistory, canApplyHistory]);
   const capabilities = useResource(() => api.capabilities(), [api]);
-  const sendAction = useAction();
   const fileAction = useAction();
+  const fileActionRef = useRef(fileAction);
+  fileActionRef.current = fileAction;
+  const shareOwner = useMemo(() => ({ api, state, userId: user?.id,
+    serverUrl: preferences?.serverUrl, instanceId: preferences?.instance?.id }),
+    [api, state, user?.id, preferences?.serverUrl, preferences?.instance?.id]);
+  const currentShareOwner = useRef(shareOwner);
+  currentShareOwner.current = shareOwner;
+  useEffect(() => () => {
+    if (currentShareOwner.current !== shareOwner) state.disposeStreams();
+  }, [shareOwner, state]);
+  const shareMessage = useCallback((content: string) => {
+    // A previously rendered row must keep its original owner's action fence.
+    if (!mounted.current || currentShareOwner.current !== shareOwner ||
+      voiceOwner.current.api !== api || voiceOwner.current.state !== state) return;
+    return fileActionRef.current.run(() => platform.share(content));
+  }, [api, state, shareOwner]);
+  const retryMessage = useCallback((key: string) => {
+    if (!mounted.current || currentShareOwner.current !== shareOwner ||
+      voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
+      state.getSnapshot().sending || (state.scope && !state.scope.isRetained())) return;
+    return state.streams.get(key)?.retry();
+  }, [api, state, shareOwner]);
+  const renderMessage = useCallback(({ item }: { item: Message }) =>
+    <ChatMessage message={item} formatDate={formatDate} share={shareMessage} retry={retryMessage} />,
+    [formatDate, shareMessage, retryMessage]);
   const attachmentReady =
     !attachment ||
     Boolean(
@@ -76,21 +274,33 @@ export function ChatScreen({
         (isTextFile(attachment.file) || attachment.transcript),
     );
   useEffect(() => {
-    if (history.value) {
-      setMessages(history.value.items);
-    }
-  }, [history.value]);
+    void state.history.ensure(api, initialConversationId, applyHistory, canApplyHistory);
+    // History belongs to this entry; draft/recording updates must not restart it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, initialConversationId, state]);
   useEffect(() => {
     mounted.current = true;
+    holdOwner.active = true;
+    recordingRef.current = false;
+    setRecording(false); setHoldActive(false); setHoldCancelled(false); setCaptureBusy(false);
     return () => {
       mounted.current = false;
-      voiceGeneration.current += 1;
-      voiceAbort.current?.abort();
+      holdOwner.active = false;
+      if (holdOwner.gesture) {
+        holdOwner.gesture.held = false;
+        holdOwner.gesture.cancelled = true;
+        if (recordingRef.current) holdOwner.gesture.ended = true;
+      }
+      attachmentAbort.current?.abort();
+      // An authorized conversion belongs to the retained route, not this mount.
+      if (!state.scope?.isRetained()) { state.voiceRequest?.cancel(); state.disposeStreams(); }
+      state.history.dispose();
       if (recordingRef.current) {
-        platform.stopRecording().catch(() => {});
+        const lease = recorderLease.current;
+        stopRecorder(lease).finally(() => releaseRecorder(lease)).catch(() => {});
       }
     };
-  }, []);
+  }, [api, state, holdOwner]);
   useEffect(() => {
     if (!recording) {
       return;
@@ -99,37 +309,72 @@ export function ChatScreen({
     return () => clearInterval(timer);
   }, [recording]);
   const insertVoiceText = (text: string) => {
-    if (draftRef.current.length + text.length + 1 > 20000) {
+    const previous = state.getSnapshot().draft;
+    const separator = previous && !/\s$/.test(previous) ? '\n' : '';
+    if (previous.length + separator.length + text.length > 20000) {
       throw new Error('文字已识别，请先缩短输入框中的内容，再点“填入文字”。');
     }
-    setDraft(previous =>
-      previous ? `${previous}${/\s$/.test(previous) ? '' : '\n'}${text}` : text,
-    );
-    setVoice(null);
-    setVoicePhase('');
+    state.update(old => ({ ...old, draft: `${previous}${separator}${text}`,
+      voice: null, voicePhase: '', voiceError: null, voiceBusy: false }));
+  };
+  const deleteUnreferencedVoiceUpload = (uploadId: string) => {
+    const retained = state.scope
+      ? state.scope.isRetained()
+      : mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state;
+    if (retained && state.getSnapshot().voice?.upload?.id === uploadId) return;
+    api.deleteUpload(uploadId).catch(() => {});
   };
   const convertVoice = async (input: VoiceInput) => {
-    const generation = ++voiceGeneration.current;
-    const current = () =>
-      mounted.current && voiceGeneration.current === generation;
+    const existing = state.getSnapshot();
+    if (existing.voiceBusy || (existing.voice && existing.voice.key !== input.key) ||
+      (state.scope && !state.scope.isRetained())) return;
+    state.voiceRequest?.release();
     const controller = new AbortController();
-    voiceAbort.current = controller;
+    let active = true;
+    let detach = () => {};
+    const release = () => {
+      active = false;
+      detach();
+      if (state.voiceRequest === operation) state.voiceRequest = null;
+    };
+    const operation: VoiceRequest = {
+      release,
+      cancel: () => {
+        if (!active) return;
+        release();
+        controller.abort();
+        const pending = state.getSnapshot().voice;
+        if (pending?.key === input.key) {
+          state.update(old => ({ ...old, voice: null, voicePhase: '', voiceError: null, voiceBusy: false }));
+          if (pending.upload) deleteUnreferencedVoiceUpload(pending.upload.id);
+        }
+      },
+    };
+    state.voiceRequest = operation;
+    const current = () => active && state.voiceRequest === operation &&
+      state.getSnapshot().voice?.key === input.key &&
+      (state.scope ? state.scope.isRetained() :
+        mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state);
     let upload = input.upload;
     let recognized = input.text;
-    setVoice(input);
+    state.update(old => ({ ...old, voice: input, voiceError: null, voiceBusy: true }));
+    detach = state.scope?.onDispose(operation.cancel) ?? (() => {});
+    fileAction.setError(null);
+    if (!current()) return;
     try {
       if (input.text) {
         insertVoiceText(input.text);
         if (upload) {
-          api.deleteUpload(upload.id).catch(() => {});
+          deleteUnreferencedVoiceUpload(upload.id);
         }
+        release();
         return;
       }
       if (!upload) {
         setVoicePhase('正在识别语音…');
         upload = await api.upload(input.file, controller.signal);
         if (!current()) {
-          api.deleteUpload(upload.id).catch(() => {});
+          deleteUnreferencedVoiceUpload(upload.id);
           return;
         }
         setVoice({ ...input, upload });
@@ -137,7 +382,7 @@ export function ChatScreen({
       setVoicePhase('正在转成文字…');
       const transcript = await api.transcribe(upload.id, controller.signal);
       if (!current()) {
-        api.deleteUpload(upload.id).catch(() => {});
+        deleteUnreferencedVoiceUpload(upload.id);
         return;
       }
       const text = transcript.text.trim();
@@ -147,7 +392,8 @@ export function ChatScreen({
       recognized = text;
       insertVoiceText(text);
       // Chat dictation is plain editable text; do not attach its audio to chat.
-      api.deleteUpload(upload.id).catch(() => {});
+      deleteUnreferencedVoiceUpload(upload.id);
+      release();
     } catch (error) {
       if (current()) {
         setVoice({ ...input, upload, text: recognized });
@@ -156,110 +402,269 @@ export function ChatScreen({
             ? '文字已识别，请整理输入框后再填入。'
             : '转写未完成，录音已保留，可重试或重新录制。',
         );
+        state.update(old => ({ ...old, voiceError: errorMessage(error) }));
         throw error;
       }
     } finally {
-      if (voiceAbort.current === controller) {
-        voiceAbort.current = null;
-      }
+      if (current()) state.update(old => ({ ...old, voiceBusy: false }));
     }
   };
   const finishRecording = async () => {
-    const file = await platform.stopRecording();
-    recordingRef.current = false;
-    setRecording(false);
-    if (file && mounted.current) {
-      await convertVoice({ file });
+    if (holdOwner.gesture?.started) {
+      holdOwner.gesture.held = false; holdOwner.gesture.ended = true;
+      setHoldActive(false);
+    }
+    const lease = recorderLease.current;
+    let file: LocalFile | null;
+    try {
+      file = await stopRecorder(lease);
+    } finally {
+      // Native adapters release their recorder even if finalizing a short clip fails.
+      releaseRecorder(lease);
+      recordingRef.current = false;
+      if (mounted.current) setRecording(false);
+    }
+    if (file && mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state) {
+      setVoiceMode(false);
+      await convertVoice({ key: newRequestId(), file });
     }
   };
+  const reportVoiceFailure = (failure: unknown) => {
+    if (holdOwner.active && mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state)
+      state.update(old => ({ ...old, voiceError: errorMessage(failure) }));
+  };
+  const endHold = async (gesture: HoldRecording) => {
+    if (!gesture.started || gesture.ended) return;
+    gesture.ended = true; gesture.held = false;
+    try {
+      if (holdOwner.active && mounted.current) setHoldActive(false);
+      if (gesture.cancelled || !holdOwner.active || !mounted.current ||
+          voiceOwner.current.api !== api || voiceOwner.current.state !== state) {
+        try {
+          await stopRecorder(gesture.lease);
+        } finally {
+          releaseRecorder(gesture.lease);
+          recordingRef.current = false;
+          if (holdOwner.active && mounted.current) setRecording(false);
+        }
+      } else {
+        await finishRecording();
+      }
+    } finally {
+      if (holdOwner.active && mounted.current) setCaptureBusy(false);
+    }
+  };
+  const beginHold = (pageY?: number) => {
+    if (activeRecorder || !holdOwner.active || recordingRef.current || (holdOwner.gesture && !holdOwner.gesture.ended) ||
+        fileAction.busy || sending || voice) return;
+    const lease = {}; activeRecorder = lease; recorderLease.current = lease;
+    const gesture: HoldRecording = { held: true, cancelled: false, started: false, ended: false, lease, startY: pageY };
+    holdOwner.gesture = gesture;
+    setHoldActive(true); setHoldCancelled(false); setCaptureBusy(true);
+    state.update(old => ({ ...old, voiceError: null }));
+    void (async () => {
+      try {
+        await platform.startRecording();
+        gesture.started = true;
+        // A permission dialog may resolve after release or after this route leaves.
+        if (!holdOwner.active || !mounted.current || voiceOwner.current.api !== api || voiceOwner.current.state !== state)
+          gesture.cancelled = true;
+        if (holdOwner.active && mounted.current) {
+          recordingRef.current = true; setSeconds(0); setRecording(true);
+        }
+        if (!gesture.held || gesture.cancelled) await endHold(gesture);
+      } catch (failure) {
+        gesture.ended = true;
+        if (holdOwner.active && mounted.current) {
+          setHoldActive(false);
+          if (!gesture.started) { setRecording(false); recordingRef.current = false; }
+          setCaptureBusy(false);
+        }
+        if (!gesture.started) releaseRecorder(lease);
+        reportVoiceFailure(failure);
+      }
+    })();
+  };
+  const releaseHold = (cancel = false) => {
+    const gesture = holdOwner.gesture;
+    if (!gesture || gesture.ended) return;
+    gesture.held = false; gesture.cancelled = gesture.cancelled || cancel;
+    setHoldActive(false);
+    if (gesture.started) void endHold(gesture).catch(reportVoiceFailure);
+  };
+  useEffect(() => {
+    const subscription = AppState?.addEventListener('change', next => {
+      if (next !== 'active') releaseHold(true);
+    });
+    return () => subscription?.remove();
+    // The listener is bound to the recording owner; gesture state lives in its ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holdOwner]);
   useEffect(() => {
     if (!recording || seconds < 115) {
       return;
     }
-    fileAction.run(finishRecording);
+    const gesture = holdOwner.gesture;
+    fileAction.run(() => gesture?.started && !gesture.ended ? endHold(gesture) : finishRecording());
     // Recording is deliberately bounded; native adapter has its own hard limit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording, seconds]);
-  const send = () =>
-    sendAction.run(async () => {
-      const text = draft.trim();
-      if (!text || recording || fileAction.busy || voice || !attachmentReady) {
-        return;
-      }
-      const uploadIds =
-        attachment?.upload &&
-        (isTextFile(attachment.file) || attachment.transcript)
-          ? [attachment.upload.id]
-          : [];
-      const key = JSON.stringify({ text, id, uploadIds });
-      if (request.current.key !== key) {
-        request.current = { key, id: newRequestId() };
-      }
-      const result = await api.chat(text, id, request.current.id, uploadIds);
-      setMessages(old => [
-        ...old,
-        {
-          id: request.current.id,
-          conversation_id: result.conversation_id,
-          role: 'user',
-          content:
-            text +
-            (uploadIds.length ? '\n\n附件：' + attachment?.file.name : ''),
-          created_at: new Date().toISOString(),
-        },
-        result.message,
-      ]);
-      setId(result.conversation_id);
-      setDraft('');
-      setAttachment(null);
-      request.current = { key: '', id: newRequestId() };
-      invalidate();
+  const awaitingInitialConversation = () => !state.getSnapshot().id &&
+    Array.from(state.streams.values()).some(stream => stream.intent.conversation_id === null &&
+      stream.getSnapshot().phase === 'failed' && !stream.getSnapshot().conversationId);
+  const send = () => {
+    const before = state.getSnapshot();
+    const text = before.draft.trim();
+    const selected = before.attachment;
+    const ready = !selected || Boolean(selected.upload &&
+      (isTextFile(selected.file) || selected.transcript));
+    if (!mounted.current || currentShareOwner.current !== shareOwner ||
+      voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
+      (state.scope && !state.scope.isRetained()) ||
+      !text || before.sending || awaitingInitialConversation() ||
+      recording || captureBusy || activeRecorder || fileAction.busy || voice || !ready) return;
+    const requestId = newRequestId();
+    const userKey = `${requestId}:user`;
+    const assistantKey = `${requestId}:assistant`;
+    const uploadIds = selected?.upload && (isTextFile(selected.file) || selected.transcript)
+      ? [selected.upload.id] : [];
+    const now = Date.now();
+    const userMessage: Message = {
+      id: userKey, client_key: userKey, conversation_id: before.id ?? '', role: 'user',
+      content: text, created_at: new Date(now).toISOString(), delivery: 'sending',
+      attachments: selected?.upload && uploadIds.length ? [{
+        upload_id: selected.upload.id, name: selected.upload.name,
+        mime_type: selected.upload.mime_type, size: selected.upload.size, unavailable: false,
+      }] : [],
+    };
+    const assistantMessage: Message = {
+      id: assistantKey, client_key: assistantKey, conversation_id: before.id ?? '', role: 'assistant',
+      content: '', created_at: new Date(now + 1).toISOString(), stream_status: '发送中…',
+    };
+    const canApply = () => currentShareOwner.current === shareOwner &&
+      (state.scope ? state.scope.isRetained() :
+        mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state);
+    const applyProgress = (progress: ChatProgress) => {
+      if (!canApply()) return;
+      const conversationChanged = Boolean(progress.conversationId &&
+        progress.conversationId !== state.getSnapshot().id);
+      state.update(old => {
+        const next = old.messages.map(message => {
+          if (message.client_key === userKey) {
+            const canonical = progress.userMessage;
+            const error = progress.error && !before.id && !progress.conversationId
+              ? `${progress.error}\n请先重试这条消息，再继续发送新消息。`
+              : progress.error;
+            const delivery = progress.phase === 'failed' ? 'failed' as const :
+              canonical || progress.phase === 'complete' ? 'sent' as const : 'sending' as const;
+            if (message.delivery === delivery && message.stream_error === error &&
+              (!canonical || (message.id === canonical.id && message.content === canonical.content &&
+                message.attachments === canonical.attachments))) return message;
+            return { ...message, ...(canonical ?? {}), client_key: userKey,
+              delivery, stream_error: error,
+              attachments: canonical ? canonical.attachments : message.attachments };
+          }
+          if (message.client_key === assistantKey) {
+            const error = progress.phase === 'failed' ? '回复中断，收到的内容已保留。' : undefined;
+            if (!progress.response && message.content === progress.content &&
+              message.stream_status === progress.status && message.stream_error === error &&
+              (!progress.assistantId || message.id === progress.assistantId) &&
+              (!progress.conversationId || message.conversation_id === progress.conversationId)) return message;
+            return {
+            ...message, ...(progress.response?.message ?? {}),
+            id: progress.assistantId ?? message.id, client_key: assistantKey,
+            conversation_id: progress.conversationId ?? message.conversation_id,
+            content: progress.content, stream_status: progress.status,
+            stream_error: error,
+          };
+          }
+          return message;
+        });
+        const reconciled = next.some((message, index) => message.id !== old.messages[index].id);
+        const localIds = reconciled ? new Set(next.filter(message => message.client_key).map(message => message.id)) : null;
+        const seen = new Set<string>();
+        return { ...old, id: progress.conversationId ?? old.id,
+          // Preserve the submitted turn's order while removing any server row
+          // that a history refresh returned before the accepted event arrived.
+          messages: reconciled ? next.filter(message => {
+            if (!message.client_key && localIds?.has(message.id)) return false;
+            if (seen.has(message.id)) return false;
+            seen.add(message.id);
+            return true;
+          }) : next,
+          sending: progress.phase !== 'complete' && progress.phase !== 'failed',
+          sendError: progress.error ?? null };
+      });
+      if (conversationChanged && progress.conversationId) state.scope?.updateRoute(route => route.name === 'chat'
+        ? { ...route, conversationId: progress.conversationId, prompt: undefined } : route);
+    };
+    const operation: ChatStreamController = createChatStreamController({ api,
+      intent: { message: text, conversation_id: before.id ?? null,
+        client_request_id: requestId, upload_ids: uploadIds, remember: false },
+      isCurrent: () => canApply() && state.streams.get(userKey) === operation,
+      onChange: applyProgress,
+      onComplete: result => {
+        if (!canApply()) return;
+        if (mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state)
+          onConversationCreated?.(result.conversation_id);
+        invalidate();
+        state.streams.delete(userKey);
+      },
     });
+    state.streams.set(userKey, operation);
+    // Publish before the first identity probe or HTTP request can yield.
+    state.history.viewport.anchor = null;
+    state.history.viewport.followTail = true;
+    state.update(old => ({ ...old, draft: '', attachment: null, sending: true, sendError: null,
+      messages: [...old.messages, userMessage, assistantMessage],
+      messageVersion: old.messageVersion + 1 }));
+    return operation.start();
+  };
   const sendDisabled =
     !draft.trim() ||
-    sendAction.busy ||
-    recording ||
+    awaitingInitialConversation() ||
+    sending ||
+    recording || captureBusy ||
     Boolean(voice) ||
     fileAction.busy ||
     !attachmentReady;
   const supportMaxHeight = Math.max(64, Math.min(130, availableHeight * 0.28));
-  const inputMaxHeight = Math.max(51, Math.min(110, availableHeight * 0.22));
-  return (
-    <View
-      style={[s.fill, chat.chatRoot]}
-      onLayout={event => setAvailableHeight(event.nativeEvent.layout.height)}
-    >
-      <ScrollView
-        ref={scroll}
-        style={chat.messagePane}
-        keyboardShouldPersistTaps="handled"
-        contentContainerStyle={chat.messages}
-        onContentSizeChange={() =>
-          messages.length > 0 && scroll.current?.scrollToEnd({ animated: true })
-        }
-      >
-        <ErrorNotice message={history.error} retry={history.refresh} />
+  // Keep one scaled line visible even when the keyboard reduces the viewport.
+  // Live Android font changes can precede DeviceInfo's next host-resume event.
+  // Read the actual scale for layout while leaving glyph metrics to EditText.
+  const inputMinHeight = Math.max(
+    chat.input.minHeight,
+    Math.ceil(
+      INPUT_LINE_ALLOWANCE * (nativeFontScale ?? fontScale) +
+        chat.input.paddingTop +
+        chat.input.paddingBottom,
+    ),
+  );
+  const inputMaxHeight = Math.max(
+    inputMinHeight,
+    Math.min(110, availableHeight * 0.22),
+  );
+  const messageHeader = useMemo(() => (<View key="history-header" testID="chat-history-header" collapsable={false}>
+        <ErrorNotice message={history.error} retry={refreshHistory} />
+        {history.nextOffset !== null && <Button variant="ghost" disabled={history.loading}
+          onPress={loadOlder}>{history.loading ? '正在加载…' : '加载更早消息'}</Button>}
         <ErrorNotice
           message={capabilities.error}
           retry={capabilities.refresh}
         />
-        {history.loading && conversationId && (
+        {history.loading && !messages.length && conversationId && (
           <Loading label="正在找回这段对话…" />
         )}
         {messages.length === 0 && !history.loading && (
           <View style={chat.welcome}>
-            <View style={chat.welcomeOrb}>
-              <AssistantOrb size={76} />
-            </View>
-            <Text style={chat.welcomeTitle}>有什么想聊的？</Text>
+            <Text style={chat.welcomeTitle}>今天想聊点什么？</Text>
             <Text style={chat.welcomeBody}>
-              一个问题、一个想法，都可以从这里开始。
+              一个问题，一个想法，都可以。
             </Text>
             <View style={chat.suggestions}>
               {[
-                '帮我梳理今天的重点',
-                '把一个目标拆成小步骤',
-                '结合我的记忆给点建议',
+                '帮我安排一下明天',
+                '帮我写一封简短回复',
               ].map(value => (
                 <Pressable
                   accessibilityRole="button"
@@ -268,7 +673,6 @@ export function ChatScreen({
                   style={chat.suggestion}
                 >
                   <Text style={chat.suggestionText}>{value}</Text>
-                  <Icon name="arrowUp" size={14} color={colors.secondary} />
                 </Pressable>
               ))}
             </View>
@@ -279,107 +683,54 @@ export function ChatScreen({
             <ModeNotice runtime={capabilities.value.runtime} />
           </View>
         )}
-        {messages.map(message =>
-          message.role === 'user' ? (
-            <View key={message.id} style={chat.userBubble}>
-              <Text selectable style={[s.body, { color: colors.ink }]}>
-                {message.content}
-              </Text>
-            </View>
-          ) : (
-            <View key={message.id} style={chat.assistantMessage}>
-              <View style={chat.messageIdentity}>
-                <AssistantOrb size={22} />
-                <Text style={chat.assistantName}>Tomorrow</Text>
-                {message.model_mode === 'local' && (
-                  <Pill tone="neutral">本地生成</Pill>
-                )}
-              </View>
-              <View style={chat.answer}>
-                <ResultText content={message.content} />
-                <View style={chat.answerFooter}>
-                  <Text style={chat.timestamp}>
-                    {formatDate(message.created_at)}
-                  </Text>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="分享这条回复"
-                    style={chat.shareButton}
-                    onPress={() =>
-                      fileAction.run(() => platform.share(message.content))
-                    }
-                  >
-                    <Text style={chat.shareText}>分享</Text>
-                    <Icon
-                      name="arrowRight"
-                      size={14}
-                      color={colors.secondary}
-                    />
-                  </Pressable>
-                </View>
-              </View>
-            </View>
-          ),
-        )}
-        {sendAction.busy && (
-          <View style={chat.thinking}>
-            <ActivityIndicator color={colors.accent} size="small" />
-            <Text style={s.small}>正在整理思路…</Text>
-          </View>
-        )}
-        <ErrorNotice message={sendAction.error} />
-      </ScrollView>
-      <View style={chat.composerArea}>
-        {(fileAction.error || attachment || recording || voice) && (
+        </View>),
+    [history.error, history.nextOffset, history.loading, refreshHistory, loadOlder,
+      capabilities.error, capabilities.refresh, capabilities.value, messages.length, conversationId, setDraft]);
+  const messageFooter = useMemo(() => <View style={chat.messageFooter} />, []);
+  return (
+    <View
+      style={[s.fill, chat.chatRoot]}
+      onLayout={event => setAvailableHeight(event.nativeEvent.layout.height)}
+    >
+      <ChatMessageList messages={messages} viewport={state.history.viewport}
+        hasOlder={history.nextOffset !== null}
+        latestVersion={messageVersion} renderItem={renderMessage}
+        header={messageHeader} footer={messageFooter}
+        style={chat.messagePane} contentContainerStyle={chat.messages} />
+      <ScrollView
+        ref={composerScroll}
+        testID="chat-composer-scroll"
+        style={chat.composerViewport}
+        contentContainerStyle={chat.composerArea}
+        keyboardShouldPersistTaps="handled"
+        nestedScrollEnabled
+        bounces={false}
+        onLayout={event => {
+          const height = event?.nativeEvent?.layout?.height;
+          if (typeof height === 'number' && Number.isFinite(height) && height > 0) setComposerHeight(previous => previous === height ? previous : height);
+          revealFocusedInput();
+        }}
+      >
+        {(fileAction.error || voiceError || attachment || voice) && (
           <ScrollView
             style={[chat.composerSupport, { maxHeight: supportMaxHeight }]}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
             bounces={false}
           >
-            <ErrorNotice message={fileAction.error} />
+            <ErrorNotice message={voiceError ?? fileAction.error} />
             {attachment && !attachment.upload && (
               <Text style={[s.small, { fontSize: 10, marginBottom: 6 }]}>
-                附件最多 20 MB。录音会自动转成文字。
+                附件最多 25 MB。录音会自动转成文字。
               </Text>
-            )}
-            {recording && (
-              <View style={chat.recordingPanel}>
-                <View style={chat.recordingInfo}>
-                  <View style={chat.recordingDot} />
-                  <View>
-                    <Text style={chat.recordingLabel}>
-                      正在录音 ·{' '}
-                      {String(Math.floor(seconds / 60)).padStart(2, '0')}:
-                      {String(seconds % 60).padStart(2, '0')}
-                    </Text>
-                    <Text style={chat.recordingHint}>
-                      结束后自动转成文字，确认后再发送 · 最长 120 秒
-                    </Text>
-                  </View>
-                </View>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="结束录音"
-                  disabled={fileAction.busy}
-                  style={chat.stopButton}
-                  onPress={() => fileAction.run(finishRecording)}
-                >
-                  {fileAction.busy ? (
-                    <ActivityIndicator size="small" color={colors.danger} />
-                  ) : (
-                    <Text style={chat.stopText}>结束</Text>
-                  )}
-                </Pressable>
-              </View>
             )}
             {voice && (
               <Card style={chat.attachmentCard}>
                 <View style={[s.row, { gap: 10 }]}>
-                  {fileAction.busy ? (
-                    <ActivityIndicator color={colors.accent} />
+                  {voiceBusy ? (
+                    <ActivityIndicator color={appearance.accent} />
                   ) : (
-                    <Icon name="mic" size={20} color={colors.accent} />
+                    <Icon name="mic" size={20} color={appearance.accent} />
                   )}
                   <Text style={[s.body, s.fill, { fontSize: 12 }]}>
                     {voicePhase}
@@ -388,22 +739,19 @@ export function ChatScreen({
                     accessibilityRole="button"
                     accessibilityLabel="取消语音转写"
                     onPress={() => {
-                      voiceGeneration.current += 1;
-                      voiceAbort.current?.abort();
-                      const upload = voice.upload;
-                      setVoice(null);
-                      setVoicePhase('');
+                      if (!mounted.current || voiceOwner.current.api !== api ||
+                        voiceOwner.current.state !== state ||
+                        state.getSnapshot().voice?.key !== voice.key) return;
+                      state.voiceRequest?.cancel();
+                      state.update(old => ({ ...old, voice: null, voicePhase: '', voiceError: null, voiceBusy: false }));
                       fileAction.setError(null);
-                      if (upload) {
-                        api.deleteUpload(upload.id).catch(() => {});
-                      }
                     }}
                     style={chat.removeButton}
                   >
-                    <Icon name="close" size={18} color={colors.secondary} />
+                    <Icon name="close" size={18} color={appearance.secondary} />
                   </Pressable>
                 </View>
-                {!fileAction.busy && (
+                {!voiceBusy && !fileAction.busy && (
                   <Button
                     variant="ghost"
                     onPress={() => fileAction.run(() => convertVoice(voice))}
@@ -420,7 +768,7 @@ export function ChatScreen({
                     <Icon
                       name={isAudioFile(attachment.file) ? 'mic' : 'file'}
                       size={20}
-                      color={colors.accent}
+                      color={appearance.accent}
                     />
                   </View>
                   <View style={s.fill}>
@@ -442,7 +790,7 @@ export function ChatScreen({
                     onPress={() => setAttachment(null)}
                     style={chat.removeButton}
                   >
-                    <Icon name="close" size={18} color={colors.secondary} />
+                    <Icon name="close" size={18} color={appearance.secondary} />
                   </Pressable>
                 </View>
                 {!attachment.upload ? (
@@ -450,13 +798,20 @@ export function ChatScreen({
                     variant="ghost"
                     loading={fileAction.busy}
                     onPress={() =>
-                      fileAction.run(async () => {
-                        const upload = await api.upload(attachment.file);
-                        setAttachment(old =>
-                          old && old.file.uri === attachment.file.uri
-                            ? { ...old, upload }
-                            : old,
-                        );
+                      fileAction.run(async ({ isCurrent }) => {
+                        const controller = new AbortController();
+                        attachmentAbort.current = controller;
+                        try {
+                          const upload = await api.upload(attachment.file, controller.signal);
+                          if (!isCurrent()) return;
+                          setAttachment(old =>
+                            old && old.file.uri === attachment.file.uri
+                              ? { ...old, upload }
+                              : old,
+                          );
+                        } finally {
+                          if (attachmentAbort.current === controller) attachmentAbort.current = null;
+                        }
                       })
                     }
                   >
@@ -467,15 +822,24 @@ export function ChatScreen({
                     variant="ghost"
                     loading={fileAction.busy}
                     onPress={() =>
-                      fileAction.run(async () => {
-                        const transcript = await api.transcribe(
-                          attachment.upload!.id,
-                        );
-                        setAttachment(old =>
-                          old ? { ...old, transcript: transcript.text } : old,
-                        );
-                        if (!draft.trim()) {
-                          setDraft('请整理这段录音的主要内容。');
+                      fileAction.run(async ({ isCurrent }) => {
+                        const controller = new AbortController();
+                        attachmentAbort.current = controller;
+                        try {
+                          const transcript = await api.transcribe(
+                            attachment.upload!.id, controller.signal,
+                          );
+                          if (!isCurrent()) return;
+                          setAttachment(old =>
+                            old && old.file.uri === attachment.file.uri
+                              ? { ...old, transcript: transcript.text }
+                              : old,
+                          );
+                          if (!draftRef.current.trim()) {
+                            setDraft('请整理这段录音的主要内容。');
+                          }
+                        } finally {
+                          if (attachmentAbort.current === controller) attachmentAbort.current = null;
                         }
                       })
                     }
@@ -488,9 +852,9 @@ export function ChatScreen({
                   !attachment.transcript &&
                   !isAudioFile(attachment.file) && (
                     <Text
-                      style={[s.small, { color: colors.amber, marginTop: 6 }]}
+                      style={[s.small, { color: appearance.secondary, marginTop: 6 }]}
                     >
-                      已真实保存。首版暂不能解析 PDF、Office
+                      已真实保存。暂不能解析 PDF、PPT
                       或图片，不会将其作为已读资料。
                     </Text>
                   )}
@@ -518,22 +882,70 @@ export function ChatScreen({
             )}
           </ScrollView>
         )}
-        <View style={chat.composer}>
+        <View
+          style={chat.composer}
+          testID="chat-composer-content"
+          onLayout={event => {
+            composerTop.current = event.nativeEvent.layout.y;
+            revealFocusedInput();
+          }}
+        >
+          <ChatModeMotion mode={voiceMode ? 'voice' : 'text'} reducedMotion={reducedMotion}>
+          <View style={chat.composerRow}>
+          {navigationActions}
+          <Pressable accessibilityRole="button" accessibilityLabel={voiceMode ? '切换文字输入' : '切换语音输入'}
+            disabled={recording || captureBusy || fileAction.busy || Boolean(voice)}
+            style={chat.toolButton} onPress={toggleInputMode}>
+            <Icon name={voiceMode ? 'keyboard' : 'mic'} size={23} color={appearance.secondary} />
+          </Pressable>
           <TextInput
+            ref={inputRef}
+            accessibilityElementsHidden={voiceMode}
+            importantForAccessibility={voiceMode ? 'no-hide-descendants' : 'auto'}
             accessibilityLabel="给助手的消息"
             multiline
+            scrollEnabled
             maxLength={20000}
             placeholder={
               recording
                 ? '正在录音，结束后继续输入…'
-                : '发消息，或说说你的想法…'
+                : '发消息…'
             }
-            placeholderTextColor={colors.muted}
+            placeholderTextColor={appearance.secondary}
             value={draft}
             onChangeText={setDraft}
-            editable={!sendAction.busy}
-            style={[chat.input, { maxHeight: inputMaxHeight }]}
+            onContentSizeChange={refreshInputFontScale}
+            onFocus={() => {
+              inputFocused.current = true;
+              refreshInputFontScale();
+              revealFocusedInput();
+            }}
+            onBlur={() => {
+              inputFocused.current = false;
+            }}
+            editable
+            style={[
+              chat.input,
+              { minHeight: inputMinHeight, maxHeight: inputMaxHeight },
+              voiceMode && chat.hiddenInput,
+            ]}
           />
+          {voiceMode && <View testID="chat-hold-to-talk" accessible={false}
+            style={[chat.holdButton, holdActive && chat.holdPressed, holdActive && holdCancelled && chat.recordingCancelled]}
+            onStartShouldSetResponder={() => !fileAction.busy && !sending && !voice}
+            onResponderGrant={event => beginHold(event?.nativeEvent?.pageY)}
+            onResponderRelease={() => releaseHold()}
+            onResponderTerminationRequest={() => true}
+            onResponderTerminate={() => releaseHold(true)}
+            onResponderMove={event => {
+              const gesture = holdOwner.gesture;
+              if (!gesture?.held || gesture.startY === undefined) return;
+              gesture.cancelled = gesture.startY - event.nativeEvent.pageY > 44;
+              setHoldCancelled(gesture.cancelled);
+            }}
+            onTouchCancel={() => releaseHold(true)}>
+            <Text style={[chat.holdText, holdActive && holdCancelled && chat.cancelText]}>{holdActive ? holdCancelled ? '松开取消' : '松开转文字' : '按住说话'}</Text>
+          </View>}
           <View style={chat.composerActions}>
             <View style={chat.inputTools}>
               <Pressable
@@ -541,39 +953,48 @@ export function ChatScreen({
                 accessibilityLabel="选择附件"
                 style={[
                   chat.toolButton,
-                  (fileAction.busy || recording || sendAction.busy) &&
+                  (fileAction.busy || recording || sending) &&
                     s.disabled,
                 ]}
-                disabled={fileAction.busy || recording || sendAction.busy}
+                disabled={fileAction.busy || recording || captureBusy || sending}
                 onPress={() =>
-                  fileAction.run(async () => {
+                  fileAction.run(async ({ isCurrent }) => {
                     const file = await platform.pickDocument();
-                    if (file) {
+                    if (file && isCurrent()) {
                       setAttachment({ file });
                     }
                   })
                 }
               >
-                <Icon name="plus" size={23} color={colors.secondary} />
+                <Icon name="plus" size={23} color={appearance.secondary} />
               </Pressable>
-              <Pressable
+              {voiceMode && <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={recording ? '结束录音' : '开始录音'}
                 style={[
                   chat.toolButton,
                   recording && chat.recordingTool,
-                  (fileAction.busy || sendAction.busy) && s.disabled,
+                  (fileAction.busy || sending) && s.disabled,
                 ]}
-                disabled={fileAction.busy || sendAction.busy || Boolean(voice)}
+                disabled={fileAction.busy || sending || Boolean(voice) || captureBusy}
                 onPress={() =>
-                  fileAction.run(async () => {
+                  fileAction.run(async ({ isCurrent }) => {
                     if (recording) {
                       await finishRecording();
                     } else {
-                      await platform.startRecording();
-                      recordingRef.current = true;
-                      setSeconds(0);
-                      setRecording(true);
+                      if (activeRecorder) throw new Error('上一段录音尚未结束，请稍后重试。');
+                      const lease = {}; activeRecorder = lease; recorderLease.current = lease;
+                      try {
+                        await platform.startRecording();
+                        if (!isCurrent()) {
+                          await stopRecorder(lease); releaseRecorder(lease);
+                          return;
+                        }
+                        recordingRef.current = true;
+                        setSeconds(0); setRecording(true);
+                      } catch (failure) {
+                        releaseRecorder(lease); throw failure;
+                      }
                     }
                   })
                 }
@@ -581,45 +1002,110 @@ export function ChatScreen({
                 {recording ? (
                   <View style={chat.stopSymbol} />
                 ) : (
-                  <Icon name="mic" size={21} color={colors.secondary} />
+                  <Icon name="mic" size={21} color={appearance.secondary} />
                 )}
-              </Pressable>
-              <Text numberOfLines={1} style={chat.memoryHint}>
-                记忆由你主动添加
-              </Text>
+              </Pressable>}
             </View>
-            <Pressable
+            {!voiceMode && <Pressable
               accessibilityRole="button"
               accessibilityLabel="发送消息"
               disabled={sendDisabled}
               onPress={send}
               style={[chat.sendButton, sendDisabled && chat.sendDisabled]}
             >
-              {sendAction.busy ? (
+              {sending ? (
                 <ActivityIndicator size="small" color="white" />
               ) : (
                 <Icon
                   name="arrowUp"
                   size={23}
-                  color={sendDisabled ? colors.secondary : '#FFFFFF'}
+                  color={sendDisabled ? appearance.secondary : appearance.onAccent}
                 />
               )}
-            </Pressable>
+            </Pressable>}
           </View>
+          </View>
+          </ChatModeMotion>
         </View>
-      </View>
+      </ScrollView>
+      {recording && <ChatVoiceOverlay seconds={seconds} cancelled={holdActive && holdCancelled} holding={holdActive}
+        bottom={composerHeight} availableHeight={availableHeight - composerHeight - 8}
+        fontScale={nativeFontScale ?? fontScale} reducedMotion={reducedMotion} />}
     </View>
   );
 }
 
+const ChatMessage = memo(function ChatMessage({
+  message,
+  formatDate,
+  share,
+  retry,
+}: {
+  message: Message;
+  formatDate: (value: string) => string;
+  share: (content: string) => unknown;
+  retry: (key: string) => unknown;
+}) {
+  return message.role === 'user' ? (
+    <View
+      testID={`chat-message-${message.client_key ?? message.id}`}
+      collapsable={false}
+      style={chat.userBubble}
+    >
+      <Text selectable style={chat.userText}>
+        {message.content}
+      </Text>
+      {message.delivery === 'sending' && <Text style={chat.userMeta}>发送中…</Text>}
+      {message.delivery === 'failed' && <View>
+        <Text style={chat.userMeta}>{message.stream_error ?? '发送未完成，已保留这条消息。'}</Text>
+        <Button variant="secondary" onPress={() => retry(message.client_key ?? message.id)}>重试</Button>
+      </View>}
+      {(message.attachments ?? []).map(file => (
+        <Text key={file.upload_id} selectable style={chat.userMeta}>
+          附件：{file.name}
+          {file.unavailable ? '（已删除或不可用）' : ''}
+        </Text>
+      ))}
+    </View>
+  ) : (
+    <View
+      testID={`chat-message-${message.client_key ?? message.id}`}
+      collapsable={false}
+      style={chat.assistantMessage}
+    >
+      <View style={chat.answer}>
+        {message.model_mode === 'local' && <Text style={chat.timestamp}>本地生成</Text>}
+        {message.content ? <ResultText content={message.content} textStyle={chat.answerText} /> : null}
+        {message.stream_status ? <View style={chat.thinking}>
+          <ActivityIndicator color={appearance.accent} size="small" />
+          <Text style={s.small}>{message.stream_status}</Text>
+        </View> : null}
+        {message.stream_error && <Text style={s.small}>{message.stream_error}</Text>}
+        {!!message.content && <View style={chat.answerFooter}>
+          <Text style={chat.timestamp}>{formatDate(message.created_at)}</Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="分享这条回复"
+            style={chat.shareButton}
+            onPress={() => share(message.content)}
+          >
+            <Text style={chat.shareText}>分享</Text>
+            <Icon name="arrowRight" size={14} color={appearance.secondary} />
+          </Pressable>
+        </View>}
+      </View>
+    </View>
+  );
+});
+
 export function ConversationsScreen() {
   const { api, navigate, formatDate } = useApp();
-  const data = useResource(() => api.conversations(), [api]);
+  const data = usePagedList(offset => api.conversations({ offset, limit: 50 }), [api]);
   return (
     <ScrollView
       refreshControl={
         <RefreshControl
-          refreshing={data.loading && Boolean(data.value)}
+          refreshing={data.loading && data.items.length > 0}
           onRefresh={data.refresh}
         />
       }
@@ -638,15 +1124,14 @@ export function ConversationsScreen() {
           style={chat.newConversation}
           onPress={() => navigate({ name: 'chat' })}
         >
-          <Icon name="plus" size={21} color={colors.accent} />
+          <Icon name="plus" size={21} color={historyColors.accent} />
         </Pressable>
       </View>
       <ErrorNotice message={data.error} retry={data.refresh} />
-      {data.loading && !data.value && <Loading />}
-      {data.value &&
-        (data.value.items.length ? (
+      {data.loading && !data.items.length && <Loading />}
+      {data.items.length ? (
           <View style={chat.conversationList}>
-            {data.value.items.map(item => (
+            {data.items.map(item => (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={'继续对话：' + item.title}
@@ -664,79 +1149,77 @@ export function ConversationsScreen() {
                     {formatDate(item.updated_at)}
                   </Text>
                 </View>
-                <Icon name="chevronRight" size={18} color={colors.secondary} />
+                <Icon name="chevronRight" size={18} color={historyColors.secondary} />
               </Pressable>
             ))}
           </View>
-        ) : (
+        ) : !data.loading && !data.error ? (
           <Empty
             symbol="✧"
             title="还没有对话记录"
             body="聊过的内容会保存在你的账号里。"
           />
-        ))}
+        ) : null}
+      {data.hasMore && <Button variant="ghost" disabled={data.loading} onPress={data.loadMore}>{data.loading ? '正在加载…' : '加载更多对话'}</Button>}
     </ScrollView>
   );
 }
 
 const chat = StyleSheet.create({
-  chatRoot: { minHeight: 0 },
+  chatRoot: { minHeight: 0, backgroundColor: appearance.background },
   messagePane: { flex: 1, minHeight: 0 },
-  messages: { paddingHorizontal: 24, paddingBottom: 24, flexGrow: 1 },
-  welcome: { alignItems: 'center', paddingTop: 27, paddingBottom: 12 },
-  welcomeOrb: { marginBottom: 19 },
+  messages: { paddingHorizontal: 20, paddingTop: 20, flexGrow: 1 },
+  messageFooter: { paddingBottom: 24 },
+  welcome: { alignItems: 'flex-start', paddingTop: 40, paddingBottom: 18 },
   welcomeTitle: {
-    fontSize: 23,
-    lineHeight: 33,
+    fontSize: 21,
+    lineHeight: 30,
     fontWeight: '500',
-    color: colors.ink,
+    color: appearance.ink,
   },
   welcomeBody: {
-    fontSize: 12,
-    lineHeight: 21,
-    color: colors.secondary,
+    fontSize: 14,
+    lineHeight: 24,
+    color: appearance.secondary,
     marginTop: 9,
-    textAlign: 'center',
+    textAlign: 'left',
   },
-  suggestions: { alignItems: 'center', gap: 9, marginTop: 23, width: '100%' },
+  suggestions: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 20, width: '100%' },
   suggestion: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 14,
-    backgroundColor: colors.surface,
-    borderRadius: 24,
+    backgroundColor: appearance.surface,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: appearance.line,
     minHeight: 44,
-    paddingVertical: 11,
-    paddingHorizontal: 17,
+    paddingVertical: 5,
+    paddingHorizontal: 12,
   },
-  suggestionText: { color: colors.text, fontSize: 12, lineHeight: 20 },
+  suggestionText: { color: appearance.ink, fontSize: 12, lineHeight: 20 },
   userBubble: {
     alignSelf: 'flex-end',
-    maxWidth: '90%',
-    backgroundColor: colors.blueLight,
-    paddingHorizontal: 17,
-    paddingVertical: 13,
-    borderRadius: 21,
-    borderBottomRightRadius: 7,
-    marginTop: 20,
+    maxWidth: '75%',
+    backgroundColor: appearance.accent,
+    paddingHorizontal: 15,
+    paddingVertical: 11,
+    borderRadius: 18,
+    borderBottomRightRadius: 6,
+    marginTop: 24,
   },
-  assistantMessage: { marginTop: 25 },
-  messageIdentity: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    marginBottom: 13,
-  },
-  assistantName: { fontSize: 12, color: colors.ink, fontWeight: '500' },
-  answer: { paddingLeft: 1 },
+  userText: { color: appearance.onAccent, fontSize: 15, lineHeight: 26 },
+  answerText: { color: appearance.ink, fontSize: 15, lineHeight: 28 },
+  assistantMessage: { marginTop: 24 },
+  answer: { paddingRight: 12 },
   answerFooter: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     marginTop: 3,
   },
-  timestamp: { fontSize: 10, lineHeight: 17, color: colors.secondary },
+  timestamp: { fontSize: 10, lineHeight: 17, color: appearance.secondary },
   shareButton: {
     minWidth: 50,
     minHeight: 44,
@@ -745,7 +1228,7 @@ const chat = StyleSheet.create({
     justifyContent: 'flex-end',
     gap: 4,
   },
-  shareText: { fontSize: 11, lineHeight: 18, color: colors.secondary },
+  shareText: { fontSize: 11, lineHeight: 18, color: appearance.secondary },
   thinking: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -754,13 +1237,13 @@ const chat = StyleSheet.create({
     marginBottom: 8,
   },
   composerArea: {
-    paddingHorizontal: 16,
-    paddingTop: 9,
-    paddingBottom: 12,
-    backgroundColor: colors.background,
-    flexShrink: 1,
-    minHeight: 0,
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 10,
+    backgroundColor: appearance.background,
+    flexShrink: 0,
   },
+  composerViewport: { flexGrow: 0, flexShrink: 1, minHeight: 0 },
   composerSupport: {
     flexGrow: 0,
     flexShrink: 1,
@@ -770,46 +1253,47 @@ const chat = StyleSheet.create({
   attachmentHint: {
     fontSize: 10,
     lineHeight: 17,
-    color: colors.secondary,
+    color: appearance.secondary,
     textAlign: 'center',
     paddingBottom: 6,
   },
   composer: {
     flexShrink: 0,
-    backgroundColor: colors.surface,
+    backgroundColor: appearance.surface,
     borderWidth: 1,
-    borderColor: '#EDF0F6',
-    borderRadius: 28,
-    paddingHorizontal: 9,
-    paddingTop: 4,
-    shadowColor: '#5671AA',
+    borderColor: appearance.line,
+    borderRadius: 25,
+    paddingHorizontal: 3,
+    paddingVertical: 3,
+    shadowColor: appearance.ink,
     shadowOpacity: 0.07,
     shadowRadius: 15,
     shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
+    elevation: 0,
   },
   input: {
-    fontSize: 14,
-    lineHeight: 23,
-    minHeight: 51,
+    flex: 1,
+    fontSize: 16,
+    // A fixed lineHeight leaves a stale Android CustomLineHeightSpan after a
+    // live fontScale change. Native font metrics keep complete glyphs visible.
+    includeFontPadding: true,
+    minHeight: 44,
     maxHeight: 145,
-    paddingHorizontal: 10,
-    paddingTop: 12,
-    paddingBottom: 10,
-    color: colors.ink,
+    paddingHorizontal: 4,
+    paddingTop: 9,
+    paddingBottom: 9,
+    color: appearance.ink,
     textAlignVertical: 'top',
   },
   composerActions: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingBottom: 7,
+    flexShrink: 0,
   },
   inputTools: {
     flexDirection: 'row',
     alignItems: 'center',
-    flex: 1,
-    marginRight: 8,
   },
   toolButton: {
     width: 44,
@@ -819,13 +1303,12 @@ const chat = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  memoryHint: {
-    fontSize: 10,
-    lineHeight: 17,
-    color: colors.secondary,
-    flex: 1,
-    marginLeft: 4,
-  },
+  composerRow: { flexDirection: 'row', alignItems: 'flex-end' },
+  hiddenInput: { display: 'none' },
+  holdButton: { flex: 1, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 18 },
+  holdPressed: { backgroundColor: appearance.tint },
+  holdText: { fontSize: 16, color: appearance.ink, fontWeight: '500' },
+  userMeta: { fontSize: 12, lineHeight: 18, color: appearance.onAccent },
   sendButton: {
     width: 44,
     height: 44,
@@ -833,59 +1316,17 @@ const chat = StyleSheet.create({
     borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.accent,
+    backgroundColor: appearance.accent,
   },
-  sendDisabled: { backgroundColor: '#EEF1F7' },
-  recordingPanel: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-    paddingLeft: 14,
-    paddingRight: 6,
-    paddingVertical: 7,
-    borderRadius: 20,
-    backgroundColor: colors.dangerLight,
-    marginBottom: 10,
-  },
-  recordingInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 9,
-    flex: 1,
-  },
-  recordingDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.danger,
-  },
-  recordingLabel: {
-    fontSize: 12,
-    lineHeight: 20,
-    color: colors.danger,
-    fontWeight: '500',
-  },
-  recordingHint: { fontSize: 10, lineHeight: 17, color: colors.danger },
-  stopButton: {
-    minWidth: 48,
-    minHeight: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 10,
-  },
-  stopText: {
-    fontSize: 12,
-    lineHeight: 20,
-    color: colors.danger,
-    fontWeight: '600',
-  },
-  recordingTool: { backgroundColor: colors.dangerLight },
+  sendDisabled: { backgroundColor: appearance.keyboard },
+  recordingCancelled: { backgroundColor: appearance.cancellation },
+  cancelText: { color: appearance.ink },
+  recordingTool: { backgroundColor: appearance.cancellation },
   stopSymbol: {
     width: 13,
     height: 13,
     borderRadius: 3,
-    backgroundColor: colors.danger,
+    backgroundColor: appearance.cancellationText,
   },
   attachmentCard: { padding: 12, borderRadius: 20, marginBottom: 10 },
   fileIcon: {
@@ -894,7 +1335,7 @@ const chat = StyleSheet.create({
     borderRadius: 11,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.blueLight,
+    backgroundColor: appearance.tint,
   },
   removeButton: {
     width: 44,
@@ -913,25 +1354,25 @@ const chat = StyleSheet.create({
   conversationsTitle: {
     fontSize: 25,
     lineHeight: 35,
-    color: colors.ink,
+    color: historyColors.ink,
     fontWeight: '500',
   },
   conversationsSubtitle: {
     fontSize: 12,
     lineHeight: 20,
-    color: colors.secondary,
+    color: historyColors.secondary,
     marginTop: 6,
   },
   newConversation: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: colors.blueLight,
+    backgroundColor: historyColors.blueLight,
     alignItems: 'center',
     justifyContent: 'center',
   },
   conversationList: {
-    backgroundColor: colors.surface,
+    backgroundColor: historyColors.surface,
     borderRadius: 23,
     overflow: 'hidden',
   },
@@ -943,18 +1384,18 @@ const chat = StyleSheet.create({
     paddingVertical: 18,
     minHeight: 86,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
+    borderColor: historyColors.line,
   },
   conversationName: {
     fontSize: 14,
     lineHeight: 23,
-    color: colors.ink,
+    color: historyColors.ink,
     fontWeight: '500',
   },
   conversationDate: {
     fontSize: 11,
     lineHeight: 18,
-    color: colors.secondary,
+    color: historyColors.secondary,
     marginTop: 5,
   },
 });

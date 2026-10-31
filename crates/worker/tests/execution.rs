@@ -84,6 +84,18 @@ async fn competing_workers_claim_once_and_stale_attempt_cannot_publish() {
     assert_eq!(recovered.attempt, first.attempt + 1);
     assert!(
         !repository
+            .record_task_model_mode(first, "llm")
+            .await
+            .unwrap()
+    );
+    assert!(
+        second
+            .record_task_model_mode(&recovered, "local")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repository
             .complete_task(first, "旧 worker 内容", "local")
             .await
             .unwrap()
@@ -105,6 +117,77 @@ async fn competing_workers_claim_once_and_stale_attempt_cannot_publish() {
 }
 
 #[tokio::test]
+async fn actual_http_failures_keep_online_provenance_and_stop_promising_retries() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (_directory, _url, repository, user_id) = fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let captured = requests.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = vec![0; 65536];
+            let length = stream.read(&mut bytes).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&bytes[..length]).starts_with("POST /v1/chat/completions")
+            );
+            captured.fetch_add(1, Ordering::SeqCst);
+            stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+        }
+    });
+    let provider = ModelProvider::from_lookup(|key| match key {
+        "MODEL_BASE_URL" => Some(format!("http://{address}/v1")),
+        "MODEL_NAME" => Some("local-regression-model".into()),
+        _ => None,
+    });
+    let created = repository.create_task(&user_id, task(false)).await.unwrap();
+    let engine = WorkerEngine::new(repository.clone(), provider);
+    let start = std::time::Instant::now();
+    for attempt in 1..=3 {
+        let claim = loop {
+            if let Some(claim) = engine.claim().await.unwrap() {
+                break claim;
+            }
+            assert!(
+                start.elapsed().as_secs() < 45,
+                "persisted retry did not become due"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        };
+        assert_eq!(claim.attempt, attempt);
+        assert!(engine.execute(&claim).await.is_err());
+        assert_eq!(requests.load(Ordering::SeqCst), attempt as usize);
+        let saved = repository.task(&user_id, &created.id).await.unwrap();
+        assert_eq!(saved.model_mode, "llm");
+        if attempt < 3 {
+            assert_eq!(saved.status, "queued");
+            assert!(saved.error.unwrap().contains("系统将自动重试"));
+            assert!(
+                engine.claim().await.unwrap().is_none(),
+                "retry backoff must use the real clock"
+            );
+        } else {
+            assert_eq!(saved.status, "failed");
+            let error = saved.error.unwrap();
+            assert!(error.contains("自动重试次数已用尽"));
+            assert!(!error.contains("系统将自动重试"));
+            assert!(engine.claim().await.unwrap().is_none());
+        }
+    }
+    assert!(
+        start.elapsed().as_secs() >= 28,
+        "10s + 20s retry delays should elapse"
+    );
+    assert!(repository.artifacts(&user_id).await.unwrap().is_empty());
+    server.abort();
+}
+
+#[tokio::test]
 async fn schedules_coalesce_missed_runs_and_do_not_dispatch_twice() {
     let (_directory, url, repository, user_id) = fixture().await;
     let schedule = repository
@@ -117,6 +200,7 @@ async fn schedules_coalesce_missed_runs_and_do_not_dispatch_twice() {
                 time: "08:00".into(),
                 timezone: "Asia/Shanghai".into(),
                 enabled: Some(true),
+                client_request_id: None,
             },
         )
         .await
@@ -153,6 +237,7 @@ async fn local_document_uses_only_actual_data_and_labels_capability() {
                 content: "完成安卓首版".into(),
                 kind: "project".into(),
                 source: None,
+                client_request_id: None,
             },
         )
         .await
@@ -175,6 +260,7 @@ async fn execution_reads_current_memories_and_persists_results_once() {
                 content: "不该再出现的私人资料".into(),
                 kind: "fact".into(),
                 source: None,
+                client_request_id: None,
             },
         )
         .await
@@ -194,6 +280,7 @@ async fn execution_reads_current_memories_and_persists_results_once() {
                 content: "完成记忆管理功能".into(),
                 kind: "goal".into(),
                 source: None,
+                client_request_id: None,
             },
         )
         .await

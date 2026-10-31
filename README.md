@@ -1,10 +1,42 @@
-# 明日 Tomorrow AI
+# 妥啦（Tada）
+
+支持导入 ChatGPT、Claude、DeepSeek 的官方对话 ZIP / JSON：手机「能力 → 导入 AI 对话」，电脑打开服务地址下的 `/ai-import`。先预览再确认，支持检索、去重更新与删除；导入不会自动写入长期记忆。范围与限制见 [对话导入说明](docs/ai-history-import.md)。
+
+GitHub 仓库：[lihailong00/Tada](https://github.com/lihailong00/Tada)。App 显示名称为“妥啦”，现有安装可覆盖升级。
+
+### 管理后台与自建服务
+
+后台入口为 `/admin/`，提供一次性初始化、独立管理员登录、模型/语音/应用配置、用户与邀请管理、加密备份和连接手机二维码。客户端默认使用官方服务，也可连接独立自建实例；自建账号、凭据、数据及敏感导入授权按实例隔离，故障时不会回退官方。部署和恢复步骤见 [自建说明](docs/selfhost.md)。首次启动无需模型 Key；自建默认关闭公开注册并支持邮箱密码账号。供应商密钥只保存在所选服务器，使用第三方模型时相应内容仍会发给该供应商。
+
+### 手机应用接入
+
+在「能力 → 连接手机应用」选择手机上已安装的应用。支持微信、QQ、小红书、哔哩哔哩、抖音、知乎、淘宝、京东、美团、支付宝、滴滴、飞书、钉钉、企业微信、WPS、腾讯文档、高德地图的本机入口。通知读取默认关闭，由用户逐个选择，并在系统设置授予通知访问权限；只接收之后的新通知摘要，不读取其他应用的历史数据库。验证码、登录安全和付款确认类消息采用保守过滤，无法保证识别全部敏感内容，导入前仍应检查。
+
+系统分享目标「妥啦」接收文字、链接和文件，内容先进入本机待接收列表；只有用户确认才上传。通知与分享不要求读取短信、通讯录或全部应用列表。可查看、删除导入资料，并让助手按资料 ID 检索整理；资料中的文字不会提升为新的用户指令。选定资料最多保存 500 条，凭用户操作删除；本机队列最多 100 条，超过 24 小时在下次访问时清理，退出或切换账号时清空。相册索引有独立的选择加入开关，与通知/分享分开授权。
+
+文件支持 UTF-8 文本、DOCX 正文/表格、XLSX 单元格文字与公式缓存值，不执行公式。分享来的图片可点击「识别图片文字」，在手机本机识别、预览和编辑，再确认导入；图片不会因识别而自动上传。PDF、PPT、旧版 Office、扫描件不由云端文档解析器读取；仅保存链接也不代表已读取链接正文。
+
+「更多连接方式」提供可选的云端只读适配器，普通用户无需申请开发者 Key 才能使用手机入口：
+
+| 连接 | 首版可读取的范围 | 连接条件 |
+| --- | --- | --- |
+| QQ / 163 / 126 邮箱 | 最近 20 封有限摘要、该窗口内关键词匹配 | 用户开启 IMAP 并提供邮箱客户端授权码 |
+| 腾讯文档 | 已授权目录与文件元数据 | 运营方配置应用，用户 OAuth 授权 |
+| WPS / 金山文档 | 指定文件信息、目录和支持的正文 | 应用权限与用户授权，部分读取需要盘/文件 ID |
+| 飞书 | 云盘目录，额外权限允许的 DOCX 正文 | 应用审批、用户和组织可见范围 |
+| 钉钉 | 本人日历本与日程 | 应用批准的日历查询权限及用户授权 |
+| 语雀 | 本人可访问知识库、文档列表和正文 | 个人访问令牌及平台 API 资格 |
+| 企业微信 | 企业应用授权的部门 ID | 企业应用配置；不包含个人微信聊天 |
+| 知乎 | 官方检索及本人的公开收藏夹 | 平台个人 Access Secret 与可用额度；不包含私密收藏 |
+| 高德 | 地点检索、驾车/步行路线 | 运营方配置 Web 服务 Key |
+
+云端适配器有模拟协议测试，缺少真实平台授权时显示未配置或未连接，不能据此宣称已经同步账号。连接凭据只在后端按用户和平台加密保存，断开连接会清除本地凭据；用户可同时去原平台撤销授权。短信、支付、下单、对外发送消息均不由这些读取接口执行。iOS / 鸿蒙可复用资料、账号和 API 层；通知和系统分享需各自实现系统适配器，目前不宣称与 Android 具有相同权限。
 
 Android 首发的个人 AI 助手首版。客户端使用 React Native / TypeScript，Android 系统能力使用 Kotlin；业务 API、持久任务执行器、文件服务和 Google 连接器使用 Rust，Agent 执行循环使用独立的 TypeScript + Pi 服务。此版本提供可安装、可连接后端的实际工作流程，功能范围与后续产品规划分别记录。
 
 ## 开始体验
 
-在 Android 10 或更新手机安装 `artifacts/apk/tomorrow-ai-latest.apk`。安装包已包含界面资源，无需 Metro，默认连接已部署的云端 HTTPS 服务：
+在 Android 10 或更新手机安装 `artifacts/apk/tada-latest.apk`。安装包已包含界面资源，无需 Metro，默认连接已部署的云端 HTTPS 服务：
 
 `https://api.example.invalid`
 
@@ -44,7 +76,7 @@ Android 首发的个人 AI 助手首版。客户端使用 React Native / TypeScr
 | 自动计划 | 每天、工作日、每周或一次；按 IANA 时区调度，可暂停、恢复、编辑和删除 |
 | 记忆 | 偏好、人物、项目、目标、事实的增删改查；版本冲突提示，删除后不再用于新任务 |
 | 文件与语音 | 系统文件选择、短录音、真实上传、资料列表与删除；配置 ASR 后真实转写 |
-| 文件上下文 | UTF-8 文本及已转写音频可用于对话；PDF、Office、图片本版仅保存，不宣称已解析 |
+| 文件上下文 | 文本、DOCX、XLSX 及已转写音频可用于对话；分享图片可本机识字后确认导入。PDF、PPT 暂仅保存 |
 | Google 连接 | Calendar、Gmail、Drive 三个只读连接器，需服务端 OAuth 配置与用户本人授权 |
 | 成果与通知 | 成果正文、系统分享、站内通知已读；App 在前台可提示新完成任务 |
 
@@ -72,7 +104,7 @@ MODEL_NAME=your-provider-model-name
 
 语音使用后端 ASR：阿里云百炼配置 `ASR_PROTOCOL=qwen_asr`、`ASR_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`、`ASR_MODEL=qwen3-asr-flash`，`ASR_API_KEY` 只放后端私有环境。也保留 `openai_transcriptions` multipart 协议。手机录音结束后自动转为可编辑文字，用户确认后发送；失败可重试或取消。未配置时明确提示不可转写。文件大小、配额与转写边界见 [文件服务说明](crates/attachments/README.md)。
 
-2026-10-27 语音更新：云端已接入 Qwen3-ASR-Flash，用合成中文 M4A/AAC 录音完成真实转写、缓存复用、跨用户拒绝和临时音频删除验证；只发起一次识别请求，没有发送短信或调用聊天模型。手机端 45 项测试（含 5 项录音转文字流程）通过，APK 0.1.2 / versionCode 3 已同步到 `artifacts/apk/tomorrow-ai-latest.apk`。本次未做真机麦克风到云端的整链路验收。
+2026-10-27 语音更新：云端已接入 Qwen3-ASR-Flash，用合成中文 M4A/AAC 录音完成真实转写、缓存复用、跨用户拒绝和临时音频删除验证；只发起一次识别请求，没有发送短信或调用聊天模型。手机端 45 项测试（含 5 项录音转文字流程）通过，APK 0.1.2 / versionCode 3 已同步到 `artifacts/apk/tada-latest.apk`。本次未做真机麦克风到云端的整链路验收。
 
 Google OAuth 的回调、只读权限、加密密钥及断开连接语义见 [连接器说明](crates/connectors/README.md)。本机代码测试不能代替 Google 项目审核或真实账号授权验证。
 
@@ -112,17 +144,45 @@ cargo check -p tomorrow-worker --features temporal --locked
 
 ### APK 存放与清理约定
 
-所有交付 APK 统一保存在 `artifacts/apk/`，不再放在 `artifacts/` 根目录或散落到其他项目目录。每次使用 `./scripts/Build-Android.ps1` 构建时，保留 `tomorrow-ai-v<版本号>-<北京时间 yyyyMMdd-HHmmss-fff>.apk`，同时更新固定入口 `tomorrow-ai-latest.apk`。版本号读取 `apps/mobile/package.json`。
+所有交付 APK 统一保存在 `artifacts/apk/`，不再放在 `artifacts/` 根目录或散落到其他项目目录。每次使用 `./scripts/Build-Android.ps1` 构建时，保留 `tada-v<版本号>-<北京时间 yyyyMMdd-HHmmss-fff>.apk`，同时更新固定入口 `tada-latest.apk`。旧入口 `tomorrow-ai-latest.apk` 同步指向同一最新版，兼容已有下载路径。版本号读取 `apps/mobile/package.json`。
 
-清理历史安装包、仅保留最新版时，在项目根目录执行：
+先停止所有并发构建和发布，再在项目根目录清理历史版本。以下命令保留两个固定入口、`latest.json` 及其中 `source_filename` 指向的当前来源 APK；元数据缺失、无法解析、来源文件名非法或保留文件不存在时立即停止，不猜测替代来源：
 
 ```powershell
-Get-ChildItem -LiteralPath ./artifacts/apk -File -Filter '*.apk' |
-  Where-Object Name -ne 'tomorrow-ai-latest.apk' |
-  Remove-Item -Force
+& {
+  $ErrorActionPreference = 'Stop'
+  $apkDir = Get-Item -LiteralPath ./artifacts/apk -Force
+  $metaFile = Get-Item -LiteralPath (Join-Path $apkDir.FullName 'latest.json') -Force
+  if (-not $apkDir.PSIsContainer -or $metaFile.PSIsContainer -or
+      ($apkDir.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+      ($metaFile.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw '发布目录或元数据不是普通目录/文件。' }
+  $raw = Get-Content -LiteralPath $metaFile.FullName -Raw -Encoding UTF8
+  if (-not $raw.TrimStart().StartsWith('{')) { throw 'latest.json 必须是 JSON 对象。' }
+  $meta = $raw | ConvertFrom-Json -ErrorAction Stop
+  $source = $meta.source_filename
+  if ($meta -isnot [pscustomobject] -or $source -isnot [string] -or
+      [string]::IsNullOrWhiteSpace($source) -or $source -cne $source.Trim() -or
+      $source -ne [IO.Path]::GetFileName($source) -or
+      $source.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
+      [IO.Path]::GetExtension($source) -ine '.apk' -or
+      $source -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw 'source_filename 必须是本目录内的合法 APK 文件名。' }
+  $keep = @('tada-latest.apk', 'tomorrow-ai-latest.apk', $source)
+  foreach ($name in $keep) {
+    $file = Get-Item -LiteralPath (Join-Path $apkDir.FullName $name) -Force
+    if ($file.PSIsContainer -or $file.DirectoryName -ne $apkDir.FullName -or
+        ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw '保留文件必须是发布目录的直接子文件。' }
+  }
+  $old = @(Get-ChildItem -LiteralPath $apkDir.FullName -File -Filter 'tada-v*.apk' -Force |
+    Where-Object Name -notin $keep)
+  foreach ($file in $old) {
+    if ($file.DirectoryName -ne $apkDir.FullName -or
+        ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw '历史 APK 路径异常，已停止清理。' }
+  }
+  foreach ($file in $old) { Remove-Item -LiteralPath $file.FullName -Force }
+}
 ```
 
-该目录只存安装包，可以整体清理；下次构建会重新创建，不影响 `data/` 中的账号和业务资料。Gradle 自己的 `apps/mobile/android/app/build/outputs/apk/` 是构建内部输出，交付与查找安装包以 `artifacts/apk/` 为准。
+该目录还包含发布元数据和锁文件；上述命令只删除本目录单层的历史 `tada-v*.apk`，保留其他内容，不整体清空目录。Gradle 自己的 `apps/mobile/android/app/build/outputs/apk/` 是构建内部输出，交付与查找安装包以 `artifacts/apk/` 为准。
 
 `Test-Pi.ps1` 需要默认 Pi 模式服务在线，会进行真实付费模型调用，使用独立账号，逐项核验工具事件与实际资源。报告为 `artifacts/pi-live-verification.json`，包含虚构测试题、真实回答、Token 用量和脱敏执行记录，不包含会话令牌或模型密钥。测试结束删除测试计划和附件并注销测试会话。
 
@@ -145,7 +205,8 @@ OpenAPI：运行中的 `GET /v1/openapi.json`；也可用 `cargo run -p tomorrow
 ## 产品与路线文档
 
 - [Today.ai 功能梳理与对标范围](docs/01-today-ai-功能梳理与对标范围.md)
-- [Tomorrow AI 技术路线与实施计划](docs/02-tomorrow-ai-技术路线与实施计划.md)
+- [妥啦（Tada）技术路线与实施计划](docs/02-tomorrow-ai-技术路线与实施计划.md)
 - [首版接口协作契约](docs/implementation-contract.md)
+- [轻量图记忆首版：使用方式、来源校验与验证边界](docs/knowledge-graph.md)
 
 路线文档中的浏览器执行、跨外部服务的多步工具调用、语义检索、完整离线队列、远程推送、正式渠道发布与三端验证仍需后续实现和验收；当前 Pi 工具限于本产品的记忆、任务、计划和文本附件。

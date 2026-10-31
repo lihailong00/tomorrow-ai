@@ -40,6 +40,7 @@ async fn postgres_persistence_claims_and_tenant_isolation() {
                 content: "仅第一位用户可见".into(),
                 kind: "fact".into(),
                 source: None,
+                client_request_id: None,
             },
         )
         .await
@@ -90,6 +91,7 @@ async fn postgres_persistence_claims_and_tenant_isolation() {
                 time: "08:00".into(),
                 timezone: "Asia/Shanghai".into(),
                 enabled: Some(false),
+                client_request_id: None,
             },
         )
         .await

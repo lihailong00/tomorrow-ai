@@ -3,12 +3,14 @@ import React, {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
 import { ApiClient, errorMessage } from '../api/client';
 import type { AuthSession, Memory, Schedule, User } from '../domain/types';
 import type { Preferences } from '../platform/ports';
+import type { HealthReceipt } from '../domain/healthLink';
 
 export type MainTab = 'today' | 'tasks' | 'memories' | 'capabilities';
 export type Route =
@@ -22,6 +24,9 @@ export type Route =
   | { name: 'notifications' }
   | { name: 'artifacts' }
   | { name: 'uploads' }
+  | { name: 'integrations' }
+  | { name: 'health'; receipt?: HealthReceipt }
+  | { name: 'aiHistory' }
   | { name: 'conversations' };
 export interface AppContextValue {
   api: ApiClient;
@@ -51,58 +56,161 @@ export function useResource<T>(
   load: () => Promise<T>,
   deps: React.DependencyList = [],
 ) {
-  const [value, setValue] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [generation, setGeneration] = useState(0);
-  useEffect(() => {
-    let current = true;
-    setLoading(true);
-    setError(null);
-    load()
-      .then(result => {
-        if (current) {
-          setValue(result);
-        }
-      })
-      .catch(failure => {
-        if (current) {
-          setError(errorMessage(failure));
-        }
-      })
-      .finally(() => {
-        if (current) {
-          setLoading(false);
-        }
-      });
-    return () => {
-      current = false;
-    };
-    // Requests are keyed explicitly by the caller to avoid reloading on every render.
+  const scope = useMemo(
+    () => ({ load, active: false, inFlight: false, queued: false }),
+    // Callers explicitly key requests; a new loader closure alone is not a new resource.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, generation]);
-  const refresh = useCallback(() => setGeneration(old => old + 1), []);
-  return { value, loading, error, refresh, setValue };
-}
-
-export function useAction() {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const lock = useRef(false);
-  const run = async (action: () => Promise<void>) => {
-    if (lock.current) {
+    deps,
+  );
+  const currentScope = useRef(scope);
+  currentScope.current = scope;
+  scope.load = load;
+  const [state, setState] = useState(() => ({
+    scope,
+    value: null as T | null,
+    loading: true,
+    error: null as string | null,
+  }));
+  const refresh = useCallback(function refreshResource() {
+    const request = currentScope.current;
+    const isCurrent = () => request.active && currentScope.current === request;
+    if (!isCurrent()) return;
+    if (request.inFlight) {
+      // Polling and manual refreshes share one pending revalidation. They must
+      // not invalidate a slow response that still belongs to this resource.
+      request.queued = true;
       return;
     }
-    lock.current = true;
+    request.inFlight = true;
+    setState(previous =>
+      isCurrent()
+        ? {
+            scope: request,
+            value: previous.scope === request ? previous.value : null,
+            loading: true,
+            // A queued retry may start in the same batch as the failure. Keep
+            // that warning visible until this resource succeeds.
+            error: previous.scope === request ? previous.error : null,
+          }
+        : previous,
+    );
+    (async () => {
+      try {
+        const result = await request.load();
+        if (isCurrent()) {
+          setState(previous =>
+            isCurrent() ? { ...previous, value: result, error: null } : previous,
+          );
+        }
+      } catch (failure) {
+        if (isCurrent()) {
+          setState(previous =>
+            isCurrent()
+              ? { ...previous, error: errorMessage(failure) }
+              : previous,
+          );
+        }
+      } finally {
+        request.inFlight = false;
+        if (isCurrent()) {
+          setState(previous =>
+            isCurrent() ? { ...previous, loading: false } : previous,
+          );
+          if (request.queued) {
+            request.queued = false;
+            refreshResource();
+          }
+        }
+      }
+    })();
+  }, []);
+  useEffect(() => {
+    scope.active = true;
+    // StrictMode may replay this effect while its first request is pending.
+    if (!scope.inFlight) refresh();
+    return () => {
+      scope.active = false;
+      scope.queued = false;
+    };
+  }, [scope, refresh]);
+  const setValue = useCallback<React.Dispatch<React.SetStateAction<T | null>>>(
+    next => {
+      const request = currentScope.current;
+      if (!request.active) return;
+      setState(previous => {
+        if (!request.active || currentScope.current !== request) return previous;
+        const value = previous.scope === request ? previous.value : null;
+        return {
+          scope: request,
+          value:
+            typeof next === 'function'
+              ? (next as (previous: T | null) => T | null)(value)
+              : next,
+          loading: previous.scope === request ? previous.loading : true,
+          error: previous.scope === request ? previous.error : null,
+        };
+      });
+    },
+    [],
+  );
+  // Hide previous-owner data in the render that changes scope, before effects run.
+  return {
+    value: state.scope === scope ? state.value : null,
+    loading: state.scope === scope ? state.loading : true,
+    error: state.scope === scope ? state.error : null,
+    refresh,
+    setValue,
+  };
+}
+
+export type ActionScope = { isCurrent: () => boolean };
+
+export function useAction() {
+  const app = useContext(AppContext);
+  const owner = useMemo(() => ({
+    api: app?.api,
+    userId: app?.user?.id,
+    serverUrl: app?.preferences?.serverUrl,
+    instanceId: app?.preferences?.instance?.id,
+  }), [app?.api, app?.user?.id, app?.preferences?.serverUrl, app?.preferences?.instance?.id]);
+  const currentOwner = useRef(owner);
+  currentOwner.current = owner;
+  const mounted = useRef(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const lock = useRef<object | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    lock.current = null;
+    setBusy(false);
+    setError(null);
+    return () => {
+      mounted.current = false;
+      lock.current = null;
+    };
+  }, [owner]);
+  const run = async (action: (scope: ActionScope) => Promise<void>) => {
+    // Native confirmation dialogs may outlive the screen that opened them.
+    if (!mounted.current || currentOwner.current !== owner || lock.current) {
+      return;
+    }
+    const request = {};
+    lock.current = request;
+    const isCurrent = () => mounted.current && currentOwner.current === owner &&
+      lock.current === request;
     setBusy(true);
     setError(null);
     try {
-      await action();
+      await action({ isCurrent });
     } catch (failure) {
-      setError(errorMessage(failure));
+      if (isCurrent()) {
+        setError(errorMessage(failure));
+      }
     } finally {
-      lock.current = false;
-      setBusy(false);
+      if (isCurrent()) {
+        lock.current = null;
+        setBusy(false);
+      }
     }
   };
   return { busy, error, setError, run };

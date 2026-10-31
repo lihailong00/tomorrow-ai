@@ -1,0 +1,34 @@
+plugins {
+    id 'java-library'
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+configurations {
+    reactNativeDebugBaseline
+    reactNativeReleaseBaseline
+}
+
+dependencies {
+    implementation 'com.android.tools.build:gradle-api:8.12.0'
+    implementation 'org.ow2.asm:asm-tree:9.7.1'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.ow2.asm:asm-util:9.7.1'
+    reactNativeDebugBaseline 'com.facebook.react:react-android:0.82.1:debug@aar'
+    reactNativeReleaseBaseline 'com.facebook.react:react-android:0.82.1:release@aar'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+test {
+    doFirst {
+        systemProperty 'reactNativeDebugBaseline', configurations.reactNativeDebugBaseline.singleFile
+        systemProperty 'reactNativeReleaseBaseline', configurations.reactNativeReleaseBaseline.singleFile
+    }
+}

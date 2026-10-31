@@ -1,15 +1,20 @@
 use std::{env, time::Duration};
 
-use reqwest::{header, redirect::Policy, Client, Url};
+use reqwest::{Client, Url, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
 
-use crate::{dto::Message, DomainError};
+use crate::{DomainError, dto::Message};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 const DEEPSEEK_MODEL: &str = "deepseek-flash";
 const RESPONSE_LIMIT_BYTES: usize = 2 * 1024 * 1024;
-const SYSTEM_INSTRUCTION: &str = "你是 Tomorrow AI 手机助手。请用清晰、简洁的中文回答。只依据提供的对话和用户记忆作答；没有工具执行结果时，不得声称已经浏览网页、读取邮件、创建日程、发送消息或完成其他外部操作。不要虚构引用、事实、权限或操作结果。";
+const SYSTEM_INSTRUCTION: &str = "你是妥啦手机助手。请用清晰、简洁的中文回答。只依据提供的对话和用户记忆作答；没有工具执行结果时，不得声称已经浏览网页、读取邮件、创建日程、发送消息或完成其他外部操作。不要虚构引用、事实、权限或操作结果。";
+
+#[cfg(test)]
+mod probe_tests;
+#[cfg(test)]
+mod stream_tests;
 
 // Deliberately no Debug implementation: provider credentials must not enter logs.
 #[derive(Clone)]
@@ -65,9 +70,19 @@ struct ModelSettings {
 /// Injecting the lookup keeps resolution pure and independently testable.
 fn settings_from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> ModelSettings {
     let base_url = nonempty(lookup("MODEL_BASE_URL"));
-    let api_key = nonempty(lookup("MODEL_API_KEY"));
+    let mut api_key = nonempty(lookup("MODEL_API_KEY"));
     let model = nonempty(lookup("MODEL_NAME"));
     if base_url.is_some() || api_key.is_some() || model.is_some() {
+        // A keyless local model is opt-in through both explicit MODEL_BASE_URL
+        // and MODEL_NAME. Never borrow a cloud key for a different endpoint.
+        if api_key.is_none()
+            && model.is_some()
+            && base_url
+                .as_ref()
+                .is_some_and(|base| private_model_url(base))
+        {
+            api_key = Some("local-no-auth".into());
+        }
         return ModelSettings {
             base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.into()),
             api_key,
@@ -102,6 +117,98 @@ pub struct ModelReply {
     pub provider: Option<String>,
 }
 
+/// Deliberately contains no provider response, endpoint, request, or credential.
+#[derive(Serialize)]
+pub struct ModelProbe {
+    pub ok: bool,
+    pub code: &'static str,
+    pub message: &'static str,
+    pub elapsed_ms: u64,
+    pub upstream_status: Option<u16>,
+    pub model: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+}
+
+impl LlmProvider {
+    /// One bounded completion, with no tools, user data, persistence or retries.
+    pub async fn probe_connection(&self) -> ModelProbe {
+        let start = std::time::Instant::now();
+        let mut result = ModelProbe {
+            ok: false, code: "not_configured", message: "请先选择模型并配置对应服务商的 API Key。",
+            elapsed_ms: 0, upstream_status: None, model: self.model.clone(), input_tokens: None, output_tokens: None,
+        };
+        if !self.is_configured() { return result; }
+        let Ok(endpoint) = completion_endpoint(&self.base_url) else { return result; };
+        let client = Client::builder().connect_timeout(Duration::from_secs(7))
+            .timeout(Duration::from_secs(25)).redirect(Policy::none()).build();
+        let Ok(client) = client else {
+            result.code = "connection_failed"; result.message = "无法初始化安全连接，请稍后重试。"; return result;
+        };
+        let mut body = serde_json::json!({
+            "model": self.model.as_deref().unwrap_or_default(),
+            "messages": [{"role":"user","content":"Reply OK."}],
+            "max_tokens": 128, "stream": false
+        });
+        if endpoint.host_str() == Some("api.deepseek.com") && self.model.as_deref() == Some("deepseek-flash") {
+            body["thinking"] = serde_json::json!({"type":"disabled"});
+        }
+        let response = client.post(endpoint).bearer_auth(self.api_key.as_deref().unwrap_or_default())
+            .json(&body).send().await;
+        match response {
+            Err(error) => {
+                result.code = if error.is_timeout() { "timeout" } else { "connection_failed" };
+                result.message = if error.is_timeout() { "模型服务响应超时，请稍后重试。" } else { "无法连接模型服务，请检查网络、服务地址或证书。" };
+            }
+            Ok(mut response) => {
+                let status = response.status().as_u16();
+                result.upstream_status = Some(status);
+                if !response.status().is_success() {
+                    (result.code, result.message) = match status {
+                        300..=399 => ("redirect_blocked", "服务返回了重定向，已停止测试以保护密钥。"),
+                        401 | 403 => ("authentication_failed", "密钥无效或权限不足，请确认该账号已开通所选模型。"),
+                        402 => ("quota_exhausted", "服务商账户余额或可用额度不足。"),
+                        404 => ("model_not_found", "模型或接口不存在，请核对所选服务商和模型。"),
+                        429 => ("upstream_rate_limited", "服务商限流或额度不足，请稍后重试。"),
+                        400 | 422 => ("request_rejected", "服务商未接受测试请求，请检查模型和接口兼容性。"),
+                        _ => ("upstream_error", "模型服务暂时不可用，请稍后重试。"),
+                    };
+                } else {
+                    result.code = "invalid_response"; result.message = "接口可访问，但未返回有效的模型响应。";
+                    let mut bytes = Vec::new();
+                    loop {
+                        match response.chunk().await {
+                            Ok(Some(chunk)) if bytes.len() + chunk.len() <= 64 * 1024 => bytes.extend_from_slice(&chunk),
+                            Ok(None) => {
+                                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                                    let message = value.pointer("/choices/0/message");
+                                    let generated = message.is_some_and(|message| {
+                                        ["content", "reasoning_content"].iter().any(|key| message.get(key).and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty())) ||
+                                        message.get("role").and_then(|v| v.as_str()) == Some("assistant") && value.pointer("/choices/0/finish_reason").and_then(|v| v.as_str()) == Some("length")
+                                    });
+                                    if generated && value.get("error").is_none() {
+                                        result.ok = true; result.code = "connected"; result.message = "连接成功，模型已响应。";
+                                        result.input_tokens = value.pointer("/usage/prompt_tokens").and_then(|v| v.as_u64());
+                                        result.output_tokens = value.pointer("/usage/completion_tokens").and_then(|v| v.as_u64());
+                                    }
+                                }
+                                break;
+                            }
+                            Err(error) => {
+                                if error.is_timeout() { result.code = "timeout"; result.message = "读取模型响应超时，请稍后重试。"; }
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+            }
+        }
+        result.elapsed_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        result
+    }
+}
+
 impl LlmProvider {
     /// An explicit offline provider for demos and tests; never reads environment values.
     pub fn local() -> Self {
@@ -120,7 +227,12 @@ impl LlmProvider {
         if env::var("AGENT_MODE").as_deref() == Ok("pi") {
             return Self::local();
         }
-        let settings = settings_from_lookup(|name| env::var(name).ok());
+        Self::from_lookup(|name| env::var(name).ok())
+    }
+
+    /// A request pins one validated configuration; never changes process environment.
+    pub fn from_lookup(lookup: impl FnMut(&str) -> Option<String>) -> Self {
+        let settings = settings_from_lookup(lookup);
         if !settings.remote_intent {
             return Self::local();
         }
@@ -143,11 +255,7 @@ impl LlmProvider {
     /// Distinguishes an intended remote configuration from explicit local mode.
     /// An incomplete remote configuration must fail rather than silently run locally.
     pub fn mode(&self) -> &'static str {
-        if self.remote_intent {
-            "llm"
-        } else {
-            "local"
-        }
+        if self.remote_intent { "llm" } else { "local" }
     }
 
     pub fn model_name(&self) -> Option<&str> {
@@ -246,6 +354,116 @@ impl LlmProvider {
         })
     }
 
+    /// Forward only visible upstream content as it arrives. Awaiting the callback
+    /// lets the caller durably checkpoint each delta before consuming more data.
+    /// Local demonstrations have no upstream deltas and return their reply once.
+    pub async fn complete_stream<F, Fut>(
+        &self,
+        messages: &[Message],
+        mut on_delta: F,
+    ) -> Result<ModelReply, DomainError>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = Result<(), DomainError>>,
+    {
+        if messages.is_empty() {
+            return Err(DomainError::Validation("消息不能为空".into()));
+        }
+        if !self.remote_intent {
+            return Ok(local_reply(messages));
+        }
+        let api_key = self.api_key.as_deref().ok_or_else(|| {
+            DomainError::External(format!("模型服务缺少 {} 配置", self.kind.key_variable()))
+        })?;
+        let model = self.model.as_deref().ok_or_else(|| {
+            DomainError::External(format!("模型服务缺少 {} 配置", self.kind.model_variable()))
+        })?;
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| DomainError::Internal("无法初始化模型服务连接".into()))?;
+        let endpoint = completion_endpoint(&self.base_url)?;
+        let mut authorization = header::HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .map_err(|_| DomainError::External("模型服务凭证配置无效".into()))?;
+        authorization.set_sensitive(true);
+        let mut provider_messages = vec![ProviderMessage {
+            role: "system",
+            content: SYSTEM_INSTRUCTION,
+        }];
+        for message in messages {
+            if !matches!(message.role.as_str(), "user" | "assistant" | "system") {
+                return Err(DomainError::Validation("消息角色无效".into()));
+            }
+            provider_messages.push(ProviderMessage {
+                role: &message.role,
+                content: &message.content,
+            });
+        }
+        // No generation retries: a disconnect must not start a second model run.
+        let mut response = client
+            .post(endpoint)
+            .header(header::AUTHORIZATION, authorization)
+            .json(&CompletionRequest {
+                model,
+                messages: provider_messages,
+                stream: true,
+            })
+            .send()
+            .await
+            .map_err(model_transport_error)?;
+        if !response.status().is_success() {
+            return Err(DomainError::External(format!(
+                "模型服务返回错误（HTTP {}）",
+                response.status().as_u16()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > RESPONSE_LIMIT_BYTES as u64)
+        {
+            return Err(DomainError::External("模型回复超过大小限制".into()));
+        }
+        let mut decoder = CompletionStreamDecoder::default();
+        let mut total_bytes = 0usize;
+        let mut content = String::new();
+        let mut content_chars = 0usize;
+        let mut finished = false;
+        'response: while let Some(chunk) = response.chunk().await.map_err(model_transport_error)? {
+            total_bytes = total_bytes.saturating_add(chunk.len());
+            if total_bytes > RESPONSE_LIMIT_BYTES {
+                return Err(DomainError::External("模型回复超过大小限制".into()));
+            }
+            for event in decoder.push(&chunk)? {
+                let update = completion_stream_update(&event)?;
+                if let Some(delta) = update.delta.filter(|value| !value.is_empty()) {
+                    content_chars = content_chars.saturating_add(delta.chars().count());
+                    if content_chars > 60000 {
+                        return Err(DomainError::External("模型回复超过大小限制".into()));
+                    }
+                    content.push_str(&delta);
+                    on_delta(delta).await?;
+                }
+                if update.finished {
+                    finished = true;
+                    break 'response;
+                }
+            }
+        }
+        if !finished {
+            return Err(DomainError::External(
+                "模型回复连接中断；已收到的内容已保留".into(),
+            ));
+        }
+        if content.trim().is_empty() {
+            return Err(DomainError::External("模型服务未返回可显示的文本".into()));
+        }
+        Ok(ModelReply {
+            content,
+            mode: "llm".into(),
+            provider: Some(self.kind.name().into()),
+        })
+    }
+
     pub fn from_settings(base_url: String, api_key: Option<String>, model: Option<String>) -> Self {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -262,6 +480,83 @@ impl LlmProvider {
             kind: ProviderKind::Compatible,
         }
     }
+}
+
+/// Parse SSE at byte boundaries, never decoding an incomplete UTF-8 chunk.
+/// Keeping only one unfinished event also bounds providers that omit newlines.
+#[derive(Default)]
+struct CompletionStreamDecoder {
+    pending: Vec<u8>,
+    data: String,
+}
+
+impl CompletionStreamDecoder {
+    fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, DomainError> {
+        const MAX_EVENT_BYTES: usize = 128 * 1024;
+        self.pending.extend_from_slice(bytes);
+        let mut events = Vec::new();
+        let mut consumed = 0;
+        while let Some(offset) = self.pending[consumed..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+        {
+            let end = consumed + offset;
+            let line = self.pending[consumed..end]
+                .strip_suffix(b"\r")
+                .unwrap_or(&self.pending[consumed..end]);
+            let line = std::str::from_utf8(line)
+                .map_err(|_| DomainError::External("模型服务返回了无效的回复格式".into()))?;
+            if line.is_empty() {
+                if !self.data.is_empty() {
+                    events.push(std::mem::take(&mut self.data));
+                }
+            } else if let Some(data) = line.strip_prefix("data:") {
+                let data = data.strip_prefix(' ').unwrap_or(data);
+                if !self.data.is_empty() {
+                    self.data.push('\n');
+                }
+                self.data.push_str(data);
+                if self.data.len() > MAX_EVENT_BYTES {
+                    return Err(DomainError::External("模型流事件超过大小限制".into()));
+                }
+            }
+            consumed = end + 1;
+        }
+        self.pending.drain(..consumed);
+        if self.pending.len().saturating_add(self.data.len()) > MAX_EVENT_BYTES {
+            return Err(DomainError::External("模型流事件超过大小限制".into()));
+        }
+        Ok(events)
+    }
+}
+
+struct CompletionStreamUpdate {
+    delta: Option<String>,
+    finished: bool,
+}
+
+fn completion_stream_update(data: &str) -> Result<CompletionStreamUpdate, DomainError> {
+    if data.trim() == "[DONE]" {
+        return Ok(CompletionStreamUpdate {
+            delta: None,
+            finished: true,
+        });
+    }
+    let value: serde_json::Value = serde_json::from_str(data)
+        .map_err(|_| DomainError::External("模型服务返回了无效的回复格式".into()))?;
+    if value.get("error").is_some() || !value.get("choices").is_some_and(|v| v.is_array()) {
+        return Err(DomainError::External("模型服务返回了无效的回复格式".into()));
+    }
+    let choice = value.pointer("/choices/0");
+    let delta = choice
+        .and_then(|v| v.pointer("/delta/content"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let finished = choice
+        .and_then(|v| v.get("finish_reason"))
+        .is_some_and(|v| !v.is_null());
+    // reasoning_content, tool arguments, and every other field remain private.
+    Ok(CompletionStreamUpdate { delta, finished })
 }
 
 #[derive(Serialize)]
@@ -301,14 +596,51 @@ fn completion_endpoint(base_url: &str) -> Result<Url, DomainError> {
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
+        || (url.scheme() == "http" && !url.host_str().is_some_and(private_service_host))
     {
         return Err(DomainError::External(
-            "模型服务地址须为不含凭证、查询参数和片段的 HTTP(S) 地址".into(),
+            "模型服务地址须为不含凭证、查询参数和片段的 HTTPS 或内网 HTTP 地址".into(),
         ));
     }
     let path = format!("{}/chat/completions", url.path().trim_end_matches('/'));
     url.set_path(&path);
     Ok(url)
+}
+
+/// Private hosts are allowed only for administrator-selected inference services.
+/// This is not an allowlist for web fetching, redirects, or model-supplied URLs.
+pub fn private_service_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    if [
+        "localhost",
+        "api",
+        "backend",
+        "tomorrow-api",
+        "host.docker.internal",
+        "ollama",
+        "vllm",
+        "lmstudio",
+    ]
+    .contains(&host.as_str())
+    {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unique_local(),
+        Err(_) => false,
+    }
+}
+
+fn private_model_url(base: &str) -> bool {
+    Url::parse(base).is_ok_and(|url| {
+        ["http", "https"].contains(&url.scheme())
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.host_str().is_some_and(private_service_host)
+    })
 }
 
 fn model_transport_error(error: reqwest::Error) -> DomainError {
@@ -356,6 +688,7 @@ mod tests {
             content: content.into(),
             created_at: "2026-10-26T00:00:00Z".into(),
             model_mode: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -558,6 +891,62 @@ mod tests {
         assert!(completion_endpoint("file:///tmp/model").is_err());
     }
 
+    #[test]
+    fn administrator_inference_urls_allow_private_http_and_reject_public_http() {
+        for base in [
+            "http://127.0.0.1:11434/v1",
+            "http://[::1]:11434/v1",
+            "http://192.168.0.8:8080/v1",
+            "http://10.0.0.4:8080/v1",
+            "http://host.docker.internal:11434/v1",
+            "http://ollama:11434/v1",
+            "https://public-model.example.test/v1",
+        ] {
+            assert!(completion_endpoint(base).is_ok(), "{base}");
+        }
+        for base in [
+            "http://public-model.example.test/v1",
+            "http://8.8.8.8/v1",
+            "http://169.254.169.254/latest",
+            "http://user:secret@ollama:11434/v1",
+            "http://ollama:11434/v1?api_key=secret",
+        ] {
+            assert!(completion_endpoint(base).is_err(), "{base}");
+        }
+    }
+
+    #[test]
+    fn keyless_models_require_an_explicit_private_compatible_base_and_model() {
+        let local = settings_from_lookup(|name| match name {
+            "MODEL_BASE_URL" => Some("http://host.docker.internal:11434/v1".into()),
+            "MODEL_NAME" => Some("local-model".into()),
+            "DEEPSEEK_API_KEY" => Some("must-not-borrow-cloud-key".into()),
+            _ => None,
+        });
+        assert_eq!(local.api_key.as_deref(), Some("local-no-auth"));
+        assert_eq!(local.kind.name(), "openai-compatible");
+        for values in [
+            vec![("MODEL_BASE_URL", "http://ollama:11434/v1")],
+            vec![("MODEL_NAME", "local-model")],
+            vec![
+                ("MODEL_BASE_URL", "https://public-model.example.test/v1"),
+                ("MODEL_NAME", "model"),
+            ],
+            vec![
+                ("DEEPSEEK_BASE_URL", "http://ollama:11434/v1"),
+                ("DEEPSEEK_MODEL", "model"),
+            ],
+        ] {
+            let settings = settings_from_lookup(|key| {
+                values
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.to_string())
+            });
+            assert!(settings.api_key.is_none());
+        }
+    }
+
     #[tokio::test]
     async fn missing_key_returns_explicit_local_demo_without_network() {
         let provider = LlmProvider::local();
@@ -581,10 +970,12 @@ mod tests {
         );
         assert!(!provider.is_configured());
         assert_eq!(provider.mode(), "llm");
-        assert!(provider
-            .complete(&[message("user", "hello")])
-            .await
-            .is_err());
+        assert!(
+            provider
+                .complete(&[message("user", "hello")])
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

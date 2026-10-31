@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A67110000100000000000001 /* HealthDataModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = A67110000100000000000011 /* HealthDataModule.swift */; };
+		A67110000100000000000002 /* HealthDataModule.m in Sources */ = {isa = PBXBuildFile; fileRef = A67110000100000000000012 /* HealthDataModule.m */; };
+		A67110000100000000000003 /* HealthKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A67110000100000000000013 /* HealthKit.framework */; };
 		0C80B921A6F3F58F76C31292 /* libPods-TomorrowAI.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5DCACB8F33CDC322A6C60F78 /* libPods-TomorrowAI.a */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
@@ -14,6 +17,10 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		A67110000100000000000011 /* HealthDataModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = HealthDataModule.swift; path = TomorrowAI/HealthDataModule.swift; sourceTree = "<group>"; };
+		A67110000100000000000012 /* HealthDataModule.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = HealthDataModule.m; path = TomorrowAI/HealthDataModule.m; sourceTree = "<group>"; };
+		A67110000100000000000013 /* HealthKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = HealthKit.framework; path = System/Library/Frameworks/HealthKit.framework; sourceTree = SDKROOT; };
+		A67110000100000000000014 /* TomorrowAI.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; name = TomorrowAI.entitlements; path = TomorrowAI/TomorrowAI.entitlements; sourceTree = "<group>"; };
 		13B07F961A680F5B00A75B9A /* TomorrowAI.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TomorrowAI.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = TomorrowAI/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = TomorrowAI/Info.plist; sourceTree = "<group>"; };
@@ -32,6 +39,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0C80B921A6F3F58F76C31292 /* libPods-TomorrowAI.a in Frameworks */,
+				A67110000100000000000003 /* HealthKit.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -43,6 +51,9 @@
 			children = (
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
 				761780EC2CA45674006654EE /* AppDelegate.swift */,
+				A67110000100000000000011 /* HealthDataModule.swift */,
+				A67110000100000000000012 /* HealthDataModule.m */,
+				A67110000100000000000014 /* TomorrowAI.entitlements */,
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */,
@@ -54,6 +65,7 @@
 			isa = PBXGroup;
 			children = (
 				ED297162215061F000B7C4FE /* JavaScriptCore.framework */,
+				A67110000100000000000013 /* HealthKit.framework */,
 				5DCACB8F33CDC322A6C60F78 /* libPods-TomorrowAI.a */,
 			);
 			name = Frameworks;
@@ -131,6 +143,9 @@
 				TargetAttributes = {
 					13B07F861A680F5B00A75B9A = {
 						LastSwiftMigration = 1120;
+						SystemCapabilities = {
+							com.apple.HealthKit = { enabled = 1; };
+						};
 					};
 				};
 			};
@@ -245,6 +260,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				761780ED2CA45674006654EE /* AppDelegate.swift in Sources */,
+				A67110000100000000000001 /* HealthDataModule.swift in Sources */,
+				A67110000100000000000002 /* HealthDataModule.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -258,6 +275,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				CODE_SIGN_ENTITLEMENTS = TomorrowAI/TomorrowAI.entitlements;
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = TomorrowAI/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
@@ -286,6 +304,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				CODE_SIGN_ENTITLEMENTS = TomorrowAI/TomorrowAI.entitlements;
 				INFOPLIST_FILE = TomorrowAI/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
 				LD_RUNPATH_SEARCH_PATHS = (

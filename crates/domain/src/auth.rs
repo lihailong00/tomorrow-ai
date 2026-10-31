@@ -10,6 +10,41 @@ use crate::DomainError;
 const MIN_PASSWORD_CHARS: usize = 8;
 const MAX_PASSWORD_CHARS: usize = 128;
 
+/// Account identifiers use the same practical mailbox shape accepted by the UI.
+/// Preserve plus tags, apostrophes and Unicode names without attempting to
+/// implement all of RFC 5322; reject incomplete addresses and header characters.
+pub fn normalize_email(input: &str) -> Result<String, DomainError> {
+    let value = input.trim().to_lowercase();
+    let invalid = || DomainError::Validation("请输入有效的邮箱地址".into());
+    let (local, domain) = value.split_once('@').ok_or_else(invalid)?;
+    if value.len() > 254
+        || input.chars().any(char::is_control)
+        || value.chars().any(char::is_whitespace)
+        || local.is_empty()
+        || domain.contains('@')
+        || !domain.contains('.')
+        || domain.split('.').any(str::is_empty)
+    {
+        return Err(invalid());
+    }
+    Ok(value)
+}
+
+/// HTTP authentication schemes are case-insensitive; credentials are not.
+/// RFC 9110 allows one or more SP characters between the scheme and token.
+pub fn bearer_token(header: &str) -> Option<&str> {
+    let (scheme, credentials) = header.split_once(' ')?;
+    let token = credentials.trim_start_matches(' ');
+    if scheme.eq_ignore_ascii_case("Bearer")
+        && !token.is_empty()
+        && !token.chars().any(|character| character.is_whitespace() || character.is_control())
+    {
+        Some(token)
+    } else {
+        None
+    }
+}
+
 /// Password hashing is CPU/memory intensive; async callers should use spawn_blocking.
 pub fn hash_password(password: &str) -> Result<String, DomainError> {
     validate_password(password)?;
@@ -73,6 +108,31 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emails_reject_incomplete_or_ambiguous_addresses_without_restricting_normal_mailboxes() {
+        for input in ["@", "qa@", "@example.test", "qa@@example.test", "qa@example", "qa@.example", "qa@example.", "qa@exam..ple.test", "qa name@example.test", "qa\r\n@example.test", "qa@example.test\n"] {
+            assert!(normalize_email(input).is_err(), "accepted {input:?}");
+        }
+        for (input, expected) in [
+            ("  User+tag@Example.TEST  ", "user+tag@example.test"),
+            ("o'connor@example.test", "o'connor@example.test"),
+            ("用户@例子.测试", "用户@例子.测试"),
+        ] {
+            assert_eq!(normalize_email(input).unwrap(), expected);
+        }
+        assert!(normalize_email(&format!("{}@example.test", "a".repeat(242))).is_err());
+    }
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive_but_token_bytes_and_parts_are_exact() {
+        for header in ["Bearer AbC-123", "bearer AbC-123", "bEaReR AbC-123", "BEARER   AbC-123"] {
+            assert_eq!(bearer_token(header), Some("AbC-123"));
+        }
+        for header in ["Bearer", "Bearer ", "Bearer\tAbC-123", "Basic AbC-123", "BearerX AbC-123", " Bearer AbC-123", "Bearer AbC-123 ", "Bearer AbC-123 other", "Bearer AbC\t123", "Bearer AbC\r123"] {
+            assert_eq!(bearer_token(header), None, "accepted {header:?}");
+        }
+    }
 
     #[test]
     fn salted_passwords_verify_and_reject_wrong_passwords() {

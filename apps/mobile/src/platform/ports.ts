@@ -2,6 +2,7 @@
  * Domain models and screens must not import native modules or platform SDKs.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { InstanceManifest, readInstanceManifest } from '../domain/instance';
 import {
   AppState,
   Linking,
@@ -17,6 +18,7 @@ export interface LocalFile {
   size?: number;
   duration_ms?: number;
 }
+export type NotificationPermissionStatus = 'granted' | 'requestable' | 'blocked';
 interface NativePort {
   secureGet(key: string): Promise<string | null>;
   secureSet(key: string, value: string): Promise<void>;
@@ -27,7 +29,10 @@ interface NativePort {
   pickDocument(): Promise<LocalFile | null>;
   startRecording(): Promise<void>;
   stopRecording(): Promise<LocalFile | null>;
+  getSystemFontScale(): Promise<number | null>;
   requestNotifications(): Promise<boolean>;
+  notificationPermissionStatus(): Promise<NotificationPermissionStatus>;
+  openNotificationSettings(): Promise<void>;
   clearCache(): Promise<void>;
   showNotification(title: string, body: string): Promise<void>;
 }
@@ -49,9 +54,14 @@ export interface Preferences {
   serverUrl: string;
   onboarded: boolean;
   serverUrlCustomized?: boolean;
+  instance?: InstanceManifest;
+  allowInsecureLan?: boolean;
+  connectionError?: string;
+  pendingConnection?: { url: string; instanceId: string };
 }
-export const defaultServerUrl =
-  'https://api.example.invalid';
+export const defaultServerUrl = 'https://api.example.invalid';
+const previousOfficialServer =
+  /^https:\/\/019f3a8c58c974999af3ad8af1fd1739\.ap-southeast-1\.a8g1v3\.xyz(?:\/v1)?\/*$/i;
 const legacyDefaultServer = /^http:\/\/10\.0\.2\.2:8080(?:\/v1)?\/*$/i;
 
 export const platform = {
@@ -65,6 +75,16 @@ export const platform = {
   ),
   hasDocumentPicker: Boolean(native?.pickDocument),
   hasRecorder: Boolean(native?.startRecording && native?.stopRecording),
+  async getSystemFontScale(): Promise<number | null> {
+    if (!native?.getSystemFontScale) return null;
+    try {
+      const value = await native.getSystemFontScale();
+      return typeof value === 'number' && Number.isFinite(value) && value > 0
+        ? value : null;
+    } catch {
+      return null;
+    }
+  },
   async loadPreferences(): Promise<Preferences> {
     const value = await AsyncStorage.getItem(PREFS_KEY);
     let saved: Partial<Preferences> = {};
@@ -74,7 +94,13 @@ export const platform = {
         saved = parsed;
       }
     } catch {
-      // A damaged preference file falls back to the built-in cloud service.
+      // Losing a self-host preference must never start sending to the official host.
+      return { serverUrl: '', onboarded: true, serverUrlCustomized: true,
+        connectionError: '本机服务设置已损坏，请重新选择服务器。' };
+    }
+    if (value !== null && typeof saved.serverUrl !== 'string') {
+      return { serverUrl: '', onboarded: true, serverUrlCustomized: true,
+        connectionError: '本机服务设置不完整，请重新选择服务器。' };
     }
     const preferences: Preferences = {
       serverUrl:
@@ -85,14 +111,22 @@ export const platform = {
       ...(saved.serverUrlCustomized === true
         ? { serverUrlCustomized: true }
         : {}),
+      ...(saved.allowInsecureLan === true ? { allowInsecureLan: true } : {}),
+      ...(typeof saved.connectionError === 'string' ? { connectionError: saved.connectionError } : {}),
     };
+    if (saved.instance) {
+      try { preferences.instance = readInstanceManifest(saved.instance); }
+      catch { preferences.connectionError = '保存的服务器身份不兼容，请重新检查连接。'; }
+    }
     if (
       !preferences.serverUrlCustomized &&
-      legacyDefaultServer.test(preferences.serverUrl.trim())
+      (legacyDefaultServer.test(preferences.serverUrl.trim()) ||
+        previousOfficialServer.test(preferences.serverUrl.trim()))
     ) {
-      // The local server's credentials must never follow a service migration.
+      // Verify the new endpoint independently; never carry credentials across URLs.
       await platform.removeSession();
       preferences.serverUrl = defaultServerUrl;
+      delete preferences.connectionError;
       await platform.savePreferences(preferences);
     }
     return preferences;
@@ -154,6 +188,22 @@ export const platform = {
     }
     return native.requestNotifications();
   },
+  async manageNotificationPermission(): Promise<'granted' | 'denied' | 'blocked' | 'settings'> {
+    const status = await native?.notificationPermissionStatus?.();
+    if (status === 'blocked') {
+      await platform.openNotificationSettings();
+      return 'settings';
+    }
+    if (await platform.requestNotifications()) return 'granted';
+    return (await native?.notificationPermissionStatus?.()) === 'blocked' ? 'blocked' : 'denied';
+  },
+  async openNotificationSettings(): Promise<void> {
+    if (native?.openNotificationSettings) {
+      await native.openNotificationSettings();
+    } else {
+      await Linking.openSettings();
+    }
+  },
   async showNotification(title: string, body: string) {
     if (!native?.showNotification) {
       throw missing();
@@ -182,5 +232,10 @@ export const platform = {
       throw new Error('只允许打开网页链接。');
     }
     await Linking.openURL(url);
+  },
+  initialConnectionLink: () => Linking.getInitialURL(),
+  onConnectionLink(listener: (url: string) => void): () => void {
+    const subscription = Linking.addEventListener('url', event => listener(event.url));
+    return () => subscription.remove();
   },
 };

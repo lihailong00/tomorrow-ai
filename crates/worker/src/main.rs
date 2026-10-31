@@ -16,8 +16,10 @@ async fn main() -> Result<()> {
     let repository = Repository::connect(&database_url)
         .await
         .context("任务数据库连接失败，请检查 DATABASE_URL")?;
+    let settings = tomorrow_settings::ConfigStore::new(repository.pool()).await?;
     let engine = WorkerEngine::new(repository, ModelProvider::from_env())
-        .with_agent(tomorrow_domain::agent::AgentClient::from_env()?);
+        .with_agent(tomorrow_domain::agent::AgentClient::from_env()?)
+        .with_settings(settings);
     let mode = std::env::var("SCHEDULER_MODE").unwrap_or_else(|_| "local".into());
     match mode.as_str() {
         "local" => run_local(engine).await,

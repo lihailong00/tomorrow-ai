@@ -2,6 +2,23 @@ use super::*;
 use axum::{body::to_bytes, http::Request};
 use tower::ServiceExt;
 
+#[test]
+fn asr_configuration_supports_explicit_private_http_services_and_rejects_public_http() {
+    let configuration = |base: &str| super::asr_from_lookup(|key| match key {
+        "ASR_BASE_URL" => Some(base.to_owned()),
+        "ASR_MODEL" => Some("local-whisper".into()),
+        _ => None,
+    });
+    for base in ["http://127.0.0.1:8081/v1","http://host.docker.internal:8081/v1","http://192.168.1.20:8081/v1","http://[::1]:8081/v1"] {
+        let config = configuration(base).unwrap().unwrap();
+        assert!(config.endpoint.ends_with("/audio/transcriptions"));
+        assert!(config.api_key.is_none());
+    }
+    for base in ["http://asr.example.test/v1","http://169.254.169.254/latest","https://user:secret@example.test/v1"] {
+        assert!(configuration(base).is_err());
+    }
+}
+
 async fn fixture(
     max_bytes: u64,
     asr: Option<AsrConfig>,
@@ -89,6 +106,61 @@ async fn remove_fixture(state: AttachmentsState) {
     state.pool.close().await;
     drop(state);
     tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn upload_archive_pages_every_file_filters_before_paging_and_isolates_owners() {
+    let (state, user, token, other) = fixture(DEFAULT_MAX_BYTES, None).await;
+    let mut expected = std::collections::HashSet::new();
+    for i in 0..205 {
+        let response = post_file(&state, &token, &format!("archive-{i}.txt"), "text/plain", b"fixture").await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        expected.insert(json_body(response).await["id"].as_str().unwrap().to_owned());
+    }
+    let audio = json_body(post_file(&state, &token, "voice.m4a", "audio/mp4", b"fixture").await).await;
+    let audio_id = audio["id"].as_str().unwrap().to_owned();
+    expected.insert(audio_id.clone());
+    sqlx::query("UPDATE uploads SET created_at='2026-01-01T00:00:00Z' WHERE user_id=$1")
+        .bind(&user).execute(&state.pool).await.unwrap();
+    sqlx::query("UPDATE uploads SET created_at='1970-01-01T00:00:00Z' WHERE id=$1")
+        .bind(&audio_id).execute(&state.pool).await.unwrap();
+    let secret = json_body(post_file(&state, &other, "other-owner.txt", "text/plain", b"private").await).await;
+
+    async fn get(state: &AttachmentsState, token: &str, path: &str) -> Response {
+        router(state.clone()).oneshot(Request::builder().uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty()).unwrap()).await.unwrap()
+    }
+    let first = json_body(get(&state, &token, "/v1/uploads").await).await;
+    assert_eq!(first["items"].as_array().unwrap().len(), 200);
+    assert_eq!(first["next_offset"], 200);
+    let mut seen = std::collections::HashSet::new();
+    let mut offset = 0;
+    loop {
+        let page = json_body(get(&state, &token, &format!("/v1/uploads?limit=37&offset={offset}")).await).await;
+        for item in page["items"].as_array().unwrap() {
+            assert!(seen.insert(item["id"].as_str().unwrap().to_owned()));
+        }
+        let Some(next) = page["next_offset"].as_i64() else { break };
+        offset = next;
+    }
+    assert_eq!(seen, expected);
+    assert!(!seen.contains(secret["id"].as_str().unwrap()));
+    let filtered = json_body(get(&state, &token, "/v1/uploads?kind=audio&limit=1").await).await;
+    assert_eq!(filtered["items"][0]["id"], audio_id);
+    assert_eq!(filtered["items"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["has_more"], false);
+    let last_files = json_body(get(&state, &token, "/v1/uploads?kind=file&limit=100&offset=200").await).await;
+    assert_eq!(last_files["items"].as_array().unwrap().len(), 5);
+    let other_page = json_body(get(&state, &other, "/v1/uploads").await).await;
+    assert_eq!(other_page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(other_page["items"][0]["id"], secret["id"]);
+    for query in ["limit=0", "limit=201", "offset=-1", "offset=1000001", "kind=unknown", "unrecognized=1"] {
+        assert_eq!(get(&state, &token, &format!("/v1/uploads?{query}")).await.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+    let id = last_files["items"][0]["id"].as_str().unwrap();
+    assert_eq!(get(&state, &token, &format!("/v1/uploads/{id}/download")).await.status(), StatusCode::OK);
+    remove_fixture(state).await;
 }
 
 #[tokio::test]
@@ -819,5 +891,247 @@ async fn asr_admission_rejects_duplicate_running_jobs_and_retains_failed_attempt
             .status,
         StatusCode::TOO_MANY_REQUESTS
     );
+    remove_fixture(state).await;
+}
+
+#[tokio::test]
+async fn photo_index_is_opt_in_scoped_idempotent_and_revocable() {
+    let (state, _, token, other) = fixture(DEFAULT_MAX_BYTES, None).await;
+    let device = uuid::Uuid::new_v4().to_string();
+    let asset = uuid::Uuid::new_v4().to_string();
+    let path = format!("/v1/photo-index/devices/{device}");
+    let asset_path = format!("{path}/assets/{asset}");
+    let call = |method: &str, url: &str, bearer: &str, body: serde_json::Value| {
+        Request::builder()
+            .method(method)
+            .uri(url)
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let body = serde_json::json!({"epoch":1,"revision":"v1","metadata":{"taken_at":null,"modified_at":100,"width":800,"height":600,"size":10000,"mime_type":"image/jpeg"},"results":[{"kind":"ocr","processor":"local-test-v1","content":"云南旅行攻略 100%"},{"kind":"description","processor":"local-summary-v1","content":"一张旅行攻略截图"}]});
+    let response = router(state.clone())
+        .oneshot(call("GET", &path, &token, serde_json::Value::Null))
+        .await
+        .unwrap();
+    let status = json_body(response).await;
+    assert_eq!(status["enabled"], false);
+    assert_eq!(status["indexed"], 0);
+    let denied = router(state.clone())
+        .oneshot(call("PUT", &asset_path, &token, body.clone()))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::CONFLICT);
+    let enabled = json_body(
+        router(state.clone())
+            .oneshot(call(
+                "PUT",
+                &path,
+                &token,
+                serde_json::json!({"enabled":true}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(enabled["epoch"], 1);
+    for _ in 0..2 {
+        assert_eq!(
+            router(state.clone())
+                .oneshot(call("PUT", &asset_path, &token, body.clone()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+    let result = json_body(
+        router(state.clone())
+            .oneshot(call(
+                "GET",
+                &format!("{path}/assets?q=%25"),
+                &token,
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(result["items"].as_array().unwrap().len(), 1);
+    assert_eq!(result["items"][0]["results"].as_array().unwrap().len(), 2);
+    let isolated = json_body(
+        router(state.clone())
+            .oneshot(call(
+                "GET",
+                &format!("{path}/assets"),
+                &other,
+                serde_json::Value::Null,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(isolated["items"].as_array().unwrap().is_empty());
+    assert_eq!(
+        router(state.clone())
+            .oneshot(call("PUT", &asset_path, &other, body.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    // A client cannot smuggle image bytes, file paths or arbitrary metadata into this API.
+    let mut bytes = body.clone();
+    bytes["image_base64"] = serde_json::json!("data:image/jpeg;base64,secret");
+    assert_eq!(
+        router(state.clone())
+            .oneshot(call("PUT", &asset_path, &token, bytes))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let mut metadata = body.clone();
+    metadata["metadata"]["local_uri"] = serde_json::json!("content://private");
+    assert_eq!(
+        router(state.clone())
+            .oneshot(call("PUT", &asset_path, &token, metadata))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let off = json_body(
+        router(state.clone())
+            .oneshot(call(
+                "PUT",
+                &path,
+                &token,
+                serde_json::json!({"enabled":false}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(off["epoch"], 2);
+    assert_eq!(
+        router(state.clone())
+            .oneshot(call("PUT", &asset_path, &token, body.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    // Re-enabling never restores an old in-flight writer's authority.
+    let on = json_body(
+        router(state.clone())
+            .oneshot(call(
+                "PUT",
+                &path,
+                &token,
+                serde_json::json!({"enabled":true}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(on["epoch"], 3);
+    assert_eq!(
+        router(state.clone())
+            .oneshot(call("PUT", &asset_path, &token, body.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        router(state.clone())
+            .oneshot(call("DELETE", &path, &token, serde_json::Value::Null))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let cleared = json_body(
+        router(state.clone())
+            .oneshot(call("GET", &path, &token, serde_json::Value::Null))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(cleared["enabled"], false);
+    assert_eq!(cleared["indexed"], 0);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM photo_index_results")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(
+        std::fs::read_dir(&state.config.root)
+            .unwrap()
+            .next()
+            .is_none(),
+        "index API must not store files"
+    );
+    remove_fixture(state).await;
+}
+
+#[tokio::test]
+async fn text_read_missing_local_bytes_is_not_found_and_other_io_and_limits_stay_strict() {
+    let (state, owner, token, other) = fixture(DEFAULT_MAX_BYTES, None).await;
+    let upload: Upload = serde_json::from_value(json_body(
+        post_file(&state, &token, "race.txt", "text/plain", b"race-source").await,
+    ).await).unwrap();
+    let path = state.path(&upload.id).unwrap();
+    let request = |token: &str| Request::builder()
+        .uri(format!("/v1/uploads/{}/text", upload.id))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty()).unwrap();
+    assert_eq!(router(state.clone()).oneshot(request(&token)).await.unwrap().status(), StatusCode::OK);
+    // Keep metadata present to model deletion between its lookup and local open.
+    tokio::fs::remove_file(&path).await.unwrap();
+    let response = router(state.clone()).oneshot(request(&token)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(json_body(response).await["error"]["code"], "not_found");
+    assert_eq!(state.chat_context(&owner, &[upload.id.clone()]).await.unwrap_err().status(), StatusCode::NOT_FOUND);
+    assert_eq!(router(state.clone()).oneshot(request(&other)).await.unwrap().status(), StatusCode::NOT_FOUND);
+    tokio::fs::write(&path, b"12345").await.unwrap();
+    assert_eq!(state.read_bytes(&owner, &upload.id, 4).await.unwrap_err().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(router(state.clone()).oneshot(request(&other)).await.unwrap().status(), StatusCode::NOT_FOUND);
+    tokio::fs::remove_file(&path).await.unwrap();
+    tokio::fs::create_dir(&path).await.unwrap();
+    let response = router(state.clone()).oneshot(request(&token)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(json_body(response).await["error"]["code"], "storage_error");
+    remove_fixture(state).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_access_denied_is_not_found_only_after_owned_metadata_disappears() {
+    let (state, owner, token, _) = fixture(DEFAULT_MAX_BYTES, None).await;
+    let upload: Upload = serde_json::from_value(json_body(
+        post_file(&state, &token, "delete-pending.txt", "text/plain", b"source").await,
+    ).await).unwrap();
+    let path = state.path(&upload.id).unwrap();
+    // Opening a directory as a file forces real Windows access-denied (error 5).
+    // Delete-pending can produce the same kind, but its timing is not stable
+    // enough to require in a deterministic fixture on every Windows filesystem.
+    tokio::fs::remove_file(&path).await.unwrap();
+    tokio::fs::create_dir(&path).await.unwrap();
+    assert_eq!(std::fs::File::open(&path).unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+    // A permission error alone cannot justify hiding a surviving upload row.
+    assert_eq!(state.read_bytes(&owner, &upload.id, 100).await.unwrap_err().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(state.download_body(&owner, &upload.id).await.unwrap_err().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // Model the API delete committing metadata shortly after unlinking the file.
+    let delete = async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        sqlx::query("DELETE FROM uploads WHERE user_id=$1 AND id=$2")
+            .bind(&owner).bind(&upload.id).execute(&state.pool).await.unwrap();
+    };
+    let ((), download) = tokio::join!(delete, state.download_body(&owner, &upload.id));
+    assert_eq!(download.unwrap_err().status(), StatusCode::NOT_FOUND);
+    assert_eq!(state.read_bytes(&owner, &upload.id, 100).await.unwrap_err().status(), StatusCode::NOT_FOUND);
     remove_fixture(state).await;
 }

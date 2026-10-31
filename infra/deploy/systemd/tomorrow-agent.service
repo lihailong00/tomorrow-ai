@@ -11,7 +11,7 @@ User=tomorrow
 Group=tomorrow
 WorkingDirectory=/var/lib/tomorrow
 EnvironmentFile=/etc/tomorrow/runtime.env
-EnvironmentFile=/etc/tomorrow/model.env
+EnvironmentFile=-/etc/tomorrow/model.env
 Environment=NODE_ENV=production
 Environment=NODE_OPTIONS=--max-old-space-size=384
 ExecStart=/opt/tomorrow/bin/node /opt/tomorrow/services/agent/dist/server.js

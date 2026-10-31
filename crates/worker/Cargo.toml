@@ -9,6 +9,7 @@ default = []
 temporal = ["dep:temporalio-sdk", "dep:temporalio-client", "dep:temporalio-macros", "dep:temporalio-common", "dep:temporalio-workflow", "dep:futures"]
 
 [dependencies]
+tomorrow-settings = { path = "../settings" }
 anyhow.workspace = true
 chrono.workspace = true
 dotenvy.workspace = true

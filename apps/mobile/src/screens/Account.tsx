@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
-import { normalizeServerUrl, ApiClient, ApiError } from '../api/client';
+import { Alert, Pressable, ScrollView, View } from 'react-native';
+import { Text } from '../ui/Text';
+import { ApiError } from '../api/client';
 import { useAction, useApp } from '../app/context';
 import { defaultServerUrl, platform } from '../platform/ports';
 import {
@@ -15,6 +16,11 @@ import { colors, styles as s } from '../ui/theme';
 import { AssistantOrb, Icon } from '../ui/visuals';
 import { normalizePhoneNumber } from '../domain/phone';
 import { validatePassword } from '../domain/password';
+import { PhotoIndexSettings } from '../features/photo-index/PhotoIndexSettings';
+import { PhoneSourcesEntry } from '../features/phone-sources/PhoneSourcesEntry';
+import { EmailAuthScreen } from '../features/instances/EmailAuthScreen';
+import { InstanceConnectionCard } from '../features/instances/InstanceConnectionCard';
+import { version as appVersion } from '../../package.json';
 
 export function IntroScreen({
   onContinue,
@@ -67,7 +73,7 @@ export function IntroScreen({
           },
         ]}
       >
-        你好，我是 Tomorrow
+        你好，我是妥啦
       </Text>
       <Text
         style={[
@@ -129,12 +135,43 @@ export function IntroScreen({
   );
 }
 
-export function AuthScreen({
+export function AuthScreen(props: { expired: boolean; notice?: string }) {
+  const { preferences, navigate } = useApp();
+  const instance = preferences.instance;
+  if (preferences.connectionError ||
+      (preferences.serverUrl !== defaultServerUrl && !instance)) {
+    return <ScrollView contentContainerStyle={s.content}>
+      <Text style={s.title}>确认服务器连接</Text>
+      <Notice>{preferences.connectionError || '请先检查服务器身份，再使用这台服务器的账号登录。'}</Notice>
+      <Button onPress={() => navigate({ name: 'settings' })}>选择服务器</Button>
+    </ScrollView>;
+  }
+  const emailSupported = instance?.auth_methods.includes('email_password') === true;
+  const phoneSupported = !instance || instance.auth_methods.includes('phone_password');
+  // A connection or capability change must discard credentials and method state.
+  const connectionKey = JSON.stringify([preferences.serverUrl, instance?.id, instance?.auth_methods]);
+  return <PasswordAuthScreen key={connectionKey} {...props} emailSupported={emailSupported}
+    phoneSupported={phoneSupported} preferEmail={instance?.deployment_mode === 'self_hosted'} />;
+}
+
+function PasswordAuthScreen({ emailSupported, phoneSupported, preferEmail, ...props }: {
+  expired: boolean; notice?: string; emailSupported: boolean; phoneSupported: boolean; preferEmail: boolean;
+}) {
+  const [method, setMethod] = useState<'email' | 'phone'>(emailSupported && (preferEmail || !phoneSupported) ? 'email' : 'phone');
+  if (method === 'email') {
+    return <EmailAuthScreen {...props} onSwitchMethod={phoneSupported ? () => setMethod('phone') : undefined} />;
+  }
+  return <PhoneAuthScreen {...props} onSwitchMethod={emailSupported ? () => setMethod('email') : undefined} />;
+}
+
+function PhoneAuthScreen({
   expired,
   notice,
+  onSwitchMethod,
 }: {
   expired: boolean;
   notice?: string;
+  onSwitchMethod?: () => void;
 }) {
   const { api, signIn, navigate, preferences } = useApp();
   const [mode, setMode] = useState<'login' | 'register' | 'reset'>('login');
@@ -166,6 +203,12 @@ export function AuthScreen({
   const registering = mode === 'register';
   const resetting = mode === 'reset';
   const needsCode = mode !== 'login';
+  let smsRecipient = '';
+  try {
+    const national = normalizePhoneNumber(phone).slice(3);
+    smsRecipient = `${national.slice(0, 3)}****${national.slice(-4)}`;
+  } catch { /* The phone field may still be incomplete. */ }
+  const registrationOpen = !preferences.instance || preferences.instance.registration_policy === 'open';
   const resetCode = () => {
     setCode('');
     setChallengeId('');
@@ -203,7 +246,7 @@ export function AuthScreen({
           setCodeNotice(
             challenge.test_mode
               ? '测试验证码：123456，有效期 5 分钟。'
-              : '验证码已发送，请查看短信。',
+              : `验证码已发送至 ${smsRecipient}，请查看该手机号的短信。`,
           );
         } catch (error) {
           if (error instanceof ApiError && error.retryAfterSeconds) {
@@ -274,6 +317,8 @@ export function AuthScreen({
           ? '验证手机号，为账号设置新密码。'
           : '登录后，接着上次的想法继续。'}
       </Text>
+      {onSwitchMethod && <Button variant="ghost" disabled={busy}
+        onPress={() => { if (!pending.current) onSwitchMethod(); }}>使用邮箱密码登录</Button>}
       {expired && (
         <Notice>登录已失效，请重新登录。已保存的任务与记忆仍在服务端。</Notice>
       )}
@@ -290,7 +335,7 @@ export function AuthScreen({
           padding: 4,
         }}
       >
-        {['登录', '创建账号'].map((label, i) => (
+        {(registrationOpen ? ['登录', '创建账号'] : ['登录']).map((label, i) => (
           <Pressable
             key={label}
             accessibilityRole="tab"
@@ -330,6 +375,7 @@ export function AuthScreen({
           </Pressable>
         ))}
       </View>
+      {!registrationOpen && <Notice>当前服务器未开放手机号自助注册，请联系管理员创建账号。</Notice>}
       {registering && (
         <Field
           label="怎么称呼你"
@@ -364,6 +410,7 @@ export function AuthScreen({
         maxLength={20}
         editable={!busy}
       />
+      {needsCode && smsRecipient ? <Text style={s.small}>验证码收件手机号：{smsRecipient}，请核对后再发送。</Text> : null}
       <Field
         key={mode}
         label={resetting ? '新密码' : '密码'}
@@ -492,27 +539,15 @@ export function SettingsScreen() {
   const {
     api,
     user,
-    preferences,
-    savePreferences,
     signOut,
     updateUser,
     navigate,
   } = useApp();
-  const [url, setUrl] = useState(preferences.serverUrl);
   const [name, setName] = useState(user?.name ?? '');
   const [timezone, setTimezone] = useState(user?.timezone ?? 'Asia/Shanghai');
   const [notice, setNotice] = useState('');
+  const [showNotificationSettings, setShowNotificationSettings] = useState(false);
   const action = useAction();
-  const saveServer = () =>
-    action.run(async () => {
-      const serverUrl = normalizeServerUrl(url);
-      await savePreferences({
-        ...preferences,
-        serverUrl,
-        serverUrlCustomized: true,
-      });
-      setNotice('服务地址已保存。请在新服务上登录你的账号。');
-    });
   return (
     <ScrollView
       keyboardShouldPersistTaps="handled"
@@ -521,50 +556,10 @@ export function SettingsScreen() {
       <Text style={s.title}>设置</Text>
       <Text style={s.subtitle}>连接方式、个人资料与数据控制。</Text>
       <Section title="服务连接" />
-      <Card>
-        <Text style={s.small}>设置账号所使用的服务地址。</Text>
-        <Field
-          label="服务地址"
-          placeholder={defaultServerUrl}
-          value={url}
-          onChangeText={setUrl}
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="url"
-        />
-        <Text style={[s.small, s.topGap]}>
-          默认连接云端 HTTPS
-          服务，手机联网即可使用。也可以填写你自己的服务地址。
-        </Text>
-        <View style={[s.row, s.gap, s.topGap]}>
-          <View style={s.fill}>
-            <Button
-              variant="secondary"
-              loading={action.busy}
-              onPress={() =>
-                action.run(async () => {
-                  await new ApiClient(normalizeServerUrl(url)).health();
-                  setNotice('✓ 这个服务可以连接。保存后生效。');
-                })
-              }
-            >
-              测试连接
-            </Button>
-          </View>
-          <View style={s.fill}>
-            <Button loading={action.busy} onPress={saveServer}>
-              保存地址
-            </Button>
-          </View>
-        </View>
-        {url.trim().replace(/\/+$/, '') !== preferences.serverUrl && user && (
-          <Notice>
-            保存不同地址后会退出当前账号，避免把认证信息发送到另一个服务。
-          </Notice>
-        )}
-      </Card>
+      <InstanceConnectionCard />
       {user && (
         <>
+          <PhoneSourcesEntry />
           <Section title="个人资料" />
           <Card>
             <Text style={s.small}>{user.phone ?? user.email}</Text>
@@ -611,6 +606,7 @@ export function SettingsScreen() {
               </Button>
             </View>
           </Card>
+          <PhotoIndexSettings key={api.baseUrl + user.id} />
           <Section title="我的资料" />
           <Card>
             <Text style={s.cardTitle}>已上传的文件与录音</Text>
@@ -633,19 +629,30 @@ export function SettingsScreen() {
             </Text>
             <Button
               variant="ghost"
+              loading={action.busy}
               onPress={() =>
-                action.run(async () => {
-                  const accepted = await platform.requestNotifications();
+                action.run(async ({ isCurrent }) => {
+                  const result = await platform.manageNotificationPermission();
+                  if (!isCurrent()) return;
+                  setShowNotificationSettings(result === 'blocked' || result === 'denied');
                   setNotice(
-                    accepted
+                    result === 'granted'
                       ? '通知权限已开启。App 前台可提示新的任务动态，远程推送仍需后续配置。'
-                      : '通知权限未开启。你可以在 App 内查看任务结果。',
+                      : result === 'settings'
+                      ? '已打开系统通知设置。开启通知后返回 App 即可。'
+                      : result === 'blocked'
+                      ? '系统已停止弹出通知授权，请点击“打开系统通知设置”后开启。'
+                      : '通知权限未开启。你可以在 App 内查看任务结果，也可在系统通知设置中开启。',
                   );
                 })
               }
             >
               管理通知权限
             </Button>
+            {showNotificationSettings && <Button variant="ghost" loading={action.busy}
+              onPress={() => action.run(async () => { await platform.openNotificationSettings(); })}>
+              打开系统通知设置
+            </Button>}
             <View style={s.divider} />
             <Text style={s.cardTitle}>清理本地临时文件</Text>
             <Text style={[s.small, { marginVertical: 7 }]}>
@@ -707,7 +714,7 @@ export function SettingsScreen() {
       <ErrorNotice message={action.error} />
       {notice ? <Notice>{notice}</Notice> : null}
       <Text style={[s.small, { textAlign: 'center', marginTop: 24 }]}>
-        Tomorrow · 0.1
+        {`妥啦 · ${appVersion}`}
       </Text>
     </ScrollView>
   );

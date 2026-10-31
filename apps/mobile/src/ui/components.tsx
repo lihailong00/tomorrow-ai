@@ -2,12 +2,12 @@ import React from 'react';
 import {
   ActivityIndicator,
   Pressable,
-  Text,
   TextInput,
   TextInputProps,
   View,
   ViewProps,
 } from 'react-native';
+import { Text } from './Text';
 import { colors, styles as s } from './theme';
 import { Icon, IconName } from './visuals';
 

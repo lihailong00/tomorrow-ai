@@ -67,6 +67,15 @@ pub struct Schedule {
     pub created_at: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MessageAttachment {
+    pub upload_id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub size: i64,
+    #[serde(default)]
+    pub unavailable: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Message {
     pub id: String,
     pub conversation_id: String,
@@ -74,6 +83,8 @@ pub struct Message {
     pub content: String,
     pub created_at: String,
     pub model_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<MessageAttachment>,
 }
 pub type ChatMessage = Message;
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -122,6 +133,10 @@ pub struct TodayStats {
     pub tasks_completed: usize,
     pub active_routines: usize,
     pub memory_count: usize,
+    #[serde(default)]
+    pub active_tasks: usize,
+    #[serde(default)]
+    pub unread_notifications: usize,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Today {
@@ -146,6 +161,7 @@ pub struct CreateMemory {
     pub content: String,
     pub kind: String,
     pub source: Option<String>,
+    pub client_request_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UpdateMemory {
@@ -170,6 +186,7 @@ pub struct CreateSchedule {
     pub time: String,
     pub timezone: String,
     pub enabled: Option<bool>,
+    pub client_request_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct UpdateSchedule {

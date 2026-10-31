@@ -7,16 +7,21 @@ import React, {
 } from 'react';
 import {
   BackHandler,
+  Keyboard,
   KeyboardAvoidingView,
   Pressable,
   StatusBar,
   StyleSheet,
-  Text,
   View,
 } from 'react-native';
+import { Text } from './src/ui/Text';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { ApiClient, normalizeServerUrl } from './src/api/client';
-import { AppProvider, MainTab, Route } from './src/app/context';
+import { createInstanceIdentityGuard, inspectInstance } from './src/api/instance';
+import { connectionFromLink } from './src/domain/instance';
+import { healthReceiptFromLink } from './src/domain/healthLink';
+import { AppProvider, MainTab } from './src/app/context';
+import { useRouteStack } from './src/app/navigation';
 import { useForegroundNotifications } from './src/app/notifications';
 import type { AuthSession } from './src/domain/types';
 import { readableDate } from './src/domain/types';
@@ -28,8 +33,14 @@ import {
   MemoriesScreen,
   TasksScreen,
 } from './src/screens/Main';
-import { ChatScreen, ConversationsScreen } from './src/screens/Chat';
+import { ChatScreen, ConversationsScreen, createChatEntryState } from './src/screens/Chat';
 import { UploadsScreen } from './src/screens/Uploads';
+import { IntegrationsScreen, type ConnectionBrowseState } from './src/features/integrations/IntegrationsScreen';
+import { HealthScreen } from './src/features/health/HealthScreen';
+import { AiHistoryScreen } from './src/features/ai-history/AiHistoryScreen';
+import { appInputs } from './src/platform/appInputs';
+import { PhoneSourcesEntry } from './src/features/phone-sources/PhoneSourcesEntry';
+import { photoIndex } from './src/platform/photoIndex';
 import {
   ArtifactsScreen,
   MemoryEditor,
@@ -40,6 +51,7 @@ import {
 } from './src/screens/Details';
 import { IconButton, Loading } from './src/ui/components';
 import { colors, styles as s } from './src/ui/theme';
+import { chatAppearance } from './src/ui/ChatAppearance';
 import { AmbientBackground, AssistantOrb, Icon } from './src/ui/visuals';
 
 function Application() {
@@ -53,9 +65,59 @@ function Application() {
   const [expired, setExpired] = useState(false);
   const [authNotice, setAuthNotice] = useState('');
   const [tab, setTab] = useState<MainTab>('today');
-  const [routes, setRoutes] = useState<Route[]>([{ name: 'main' }]);
+  const [shellHeight, setShellHeight] = useState<number>();
+  const [keyboardVisible, setKeyboardVisible] = useState(() =>
+    Keyboard.isVisible(),
+  );
+  useEffect(() => {
+    const shown = Keyboard.addListener('keyboardDidShow', () =>
+      setKeyboardVisible(true),
+    );
+    const hidden = Keyboard.addListener('keyboardDidHide', () =>
+      setKeyboardVisible(false),
+    );
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
+  const navigationOwner = useMemo(() => ({
+    serverUrl: preferences.serverUrl,
+    instanceId: preferences.instance?.id,
+    token: session?.token,
+    userId: session?.user.id,
+    tab,
+  }), [preferences.serverUrl, preferences.instance?.id, session?.token, session?.user.id, tab]);
+  const { entry, depth, navigate, back, getEntryState, resetRoutes } = useRouteStack(navigationOwner);
   const [revision, setRevision] = useState(0);
-  const route = routes[routes.length - 1];
+  const [pendingInputs, setPendingInputs] = useState(0);
+  const inputCleanup = useRef<Promise<void>>(Promise.resolve());
+  const activeConnection = useRef(defaultServerUrl);
+  const route = entry.route;
+  // Measure the whole shell so moving the header cannot change this predicate.
+  const compactChatHeader =
+    route.name === 'chat' &&
+    keyboardVisible &&
+    shellHeight !== undefined &&
+    shellHeight < 220;
+  const clearInputs = useCallback(() => {
+    const next = inputCleanup.current.catch(() => {}).then(() => appInputs.clear());
+    inputCleanup.current = next;
+    void next.catch(() => {});
+    return next;
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const update = () => {
+      if (!session) { setPendingInputs(0); return; }
+      void appInputs.getStatus().then(status => {
+        if (active) { setPendingInputs(status.pending_count); }
+      }).catch(() => {});
+    };
+    update();
+    const unsubscribe = platform.onForeground(update);
+    return () => { active = false; unsubscribe(); };
+  }, [session, route.name, revision]);
 
   useEffect(() => {
     let alive = true;
@@ -64,12 +126,14 @@ function Application() {
       try {
         prefs.serverUrl = normalizeServerUrl(prefs.serverUrl);
       } catch {
-        prefs.serverUrl = defaultServerUrl;
+        prefs.connectionError = prefs.connectionError ?? '保存的服务地址无效，请重新选择服务器。';
+        prefs.serverUrl = '';
       }
       if (!alive) {
         return;
       }
       setPreferences(prefs);
+      activeConnection.current = prefs.serverUrl;
       const stored = await platform.readSession().catch(async () => {
         await platform.removeSession().catch(() => {});
         return null;
@@ -77,26 +141,42 @@ function Application() {
       if (!alive) {
         return;
       }
+      let restored = false;
       if (stored) {
         try {
           const saved = JSON.parse(stored) as AuthSession & {
             serverUrl: string;
+            instanceId?: string;
           };
           if (
             saved.serverUrl === prefs.serverUrl &&
+            !prefs.connectionError &&
+            saved.instanceId && saved.instanceId === prefs.instance?.id &&
             saved.token &&
             saved.user
           ) {
             // Restore locally first: an offline phone must still reach connection settings.
             activeToken.current = saved.token;
             setSession({ token: saved.token, user: saved.user });
+            restored = true;
           }
         } catch {
           await platform.removeSession();
         }
       }
+      // With no authenticated owner, an old native inbox must not be inherited
+      // by the next account after a failed cleanup or a process restart.
+      if (!restored) {
+        await photoIndex.suspend();
+        await clearInputs();
+        await platform.removeSession();
+      }
     })()
-      .catch(() => {})
+      .catch(() => {
+        activeConnection.current = '';
+        setPreferences({ serverUrl: '', onboarded: true, serverUrlCustomized: true,
+          connectionError: '暂时无法读取本机设置，请重新选择服务器。' });
+      })
       .finally(() => {
         if (alive) {
           setBooting(false);
@@ -105,36 +185,75 @@ function Application() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [clearInputs]);
 
   const unauthorized = useCallback(() => {
+    void photoIndex.suspend().catch(() => {});
+    void clearInputs();
     activeToken.current = undefined;
     setSession(null);
     setExpired(true);
-    setRoutes([{ name: 'main' }]);
+    resetRoutes([{ name: 'main' }]);
     platform.removeSession().catch(() => {});
-  }, []);
+  }, [clearInputs, resetRoutes]);
+  const identityGuard = useMemo(() => createInstanceIdentityGuard(preferences.serverUrl, {
+    allowInsecureLan: preferences.allowInsecureLan,
+    expectedId: preferences.instance?.id,
+  }), [preferences.serverUrl, preferences.instance?.id, preferences.allowInsecureLan]);
   const api = useMemo(() => {
     const token = session?.token;
-    return new ApiClient(preferences.serverUrl, token, () => {
+    return new ApiClient(preferences.connectionError ? '' : preferences.serverUrl, token, () => {
       // A delayed response from the previous account must not log out the new one.
       if (activeToken.current === token) {
         unauthorized();
       }
-    });
-  }, [preferences.serverUrl, session?.token, unauthorized]);
+    }, fetch, identityGuard.verify);
+  }, [preferences.serverUrl, preferences.connectionError, session?.token, unauthorized, identityGuard]);
+  useEffect(() => {
+    // Subscribe before foreground polling: a check begun before returning to
+    // the app must not release queued credentials after the server changes.
+    const unsubscribe = platform.onForeground(identityGuard.invalidate);
+    return () => { unsubscribe(); identityGuard.dispose(); };
+  }, [identityGuard]);
+  useEffect(() => () => api.dispose(), [api]);
   useForegroundNotifications(api, session?.user.id);
-  const navigate = useCallback(
-    (next: Route) => setRoutes(old => [...old, next]),
-    [],
-  );
-  const back = useCallback(
-    () => setRoutes(old => (old.length > 1 ? old.slice(0, -1) : old)),
-    [],
-  );
+  const linkContext = useRef({ api, session });
+  linkContext.current = { api, session };
+  const seenHealthLinks = useRef(new Set<string>());
+  useEffect(() => {
+    if (booting) return;
+    let alive = true;
+    const acceptLink = (link: string) => {
+      try {
+        if (!alive) return;
+        const current = linkContext.current;
+        const healthReceipt = healthReceiptFromLink(link, current.api.baseUrl);
+        if (healthReceipt) {
+          // No saved drafts, account switches or automatic network requests.
+          if (!current.session || seenHealthLinks.current.has(link)) return;
+          seenHealthLinks.current.add(link);
+          if (seenHealthLinks.current.size > 20) seenHealthLinks.current.delete(seenHealthLinks.current.values().next().value!);
+          resetRoutes([{ name: 'main' }, { name: 'health', receipt: healthReceipt }]);
+          return;
+        }
+        const pendingConnection = connectionFromLink(link);
+        if (!alive) return;
+        // A scanned link opens a review form; it never switches or signs in.
+        setPreferences(current => ({ ...current, pendingConnection }));
+        resetRoutes([{ name: 'main' }, { name: 'settings' }]);
+      } catch { /* Ignore unrelated or malformed external intents. */ }
+    };
+    void platform.initialConnectionLink().then(link => { if (link) acceptLink(link); }).catch(() => {});
+    const unsubscribe = platform.onConnectionLink(acceptLink);
+    return () => { alive = false; unsubscribe(); };
+  }, [booting, resetRoutes]);
   useEffect(() => {
     const listener = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (routes.length > 1) {
+      // The connection centre owns its internal detail/search navigation.
+      // Returning from health remounts both handlers; registration order must
+      // not allow this application handler to skip those internal layers.
+      if (route.name === 'integrations') return false;
+      if (depth > 1) {
         back();
         return true;
       }
@@ -145,34 +264,58 @@ function Application() {
       return false;
     });
     return () => listener.remove();
-  }, [routes.length, tab, session, back]);
+  }, [depth, tab, session, back, route.name]);
   const savePreferences = async (next: Preferences) => {
-    await platform.savePreferences(next);
-    if (next.serverUrl !== preferences.serverUrl) {
+    const changed = next.serverUrl !== preferences.serverUrl || next.instance?.id !== preferences.instance?.id;
+    if (changed) {
+      // Cancel old uploads immediately, then revoke local background consent.
+      api.dispose();
+      activeConnection.current = '';
+      await photoIndex.suspend();
+      await clearInputs();
       activeToken.current = undefined;
       await platform.removeSession();
       setSession(null);
-      setRoutes([{ name: 'main' }]);
+      resetRoutes([{ name: 'main' }]);
     }
+    const saved = { ...next };
+    delete saved.pendingConnection;
+    await platform.savePreferences(saved);
+    activeConnection.current = next.serverUrl;
     setPreferences(next);
   };
   const signIn = async (next: AuthSession) => {
+    const target = preferences.serverUrl;
+    const checked = await inspectInstance(target, {
+      allowInsecureLan: preferences.allowInsecureLan, expectedId: preferences.instance?.id,
+    });
+    if (activeConnection.current !== target) throw new Error('服务连接已变化，请重新登录。');
+    // An expired account's local notification queue must be cleared before the
+    // next account can use a new session, including a previously failed cleanup.
+    await inputCleanup.current.catch(() => clearInputs());
+    if (activeConnection.current !== target) throw new Error('服务连接已变化，请重新登录。');
     activeToken.current = next.token;
     try {
       await platform.writeSession(
-        JSON.stringify({ ...next, serverUrl: preferences.serverUrl }),
+        JSON.stringify({ ...next, serverUrl: target, instanceId: checked.instance.id }),
       );
     } catch (error) {
       activeToken.current = undefined;
       throw error;
     }
+    if (activeConnection.current !== target) throw new Error('服务连接已变化，请重新登录。');
+    const updatedPreferences = { ...preferences, instance: checked.instance };
+    await platform.savePreferences(updatedPreferences);
+    setPreferences(updatedPreferences);
     setSession(next);
     setExpired(false);
     setAuthNotice('');
     setTab('today');
-    setRoutes([{ name: 'main' }]);
+    resetRoutes([{ name: 'main' }]);
   };
   const signOut = async () => {
+    await photoIndex.suspend();
+    await clearInputs();
     try {
       await api.logout();
       setAuthNotice('已退出当前账号。');
@@ -185,7 +328,7 @@ function Application() {
     activeToken.current = undefined;
     setSession(null);
     setExpired(false);
-    setRoutes([{ name: 'main' }]);
+    resetRoutes([{ name: 'main' }]);
     setTab('today');
   };
   if (booting) {
@@ -212,9 +355,21 @@ function Application() {
       case 'chat':
         page = (
           <ChatScreen
-            key={String(routes.length) + (route.conversationId ?? 'new')}
             conversationId={route.conversationId}
             prompt={route.prompt}
+            entryState={getEntryState(scope => createChatEntryState(route.conversationId, route.prompt, scope))}
+            navigationActions={
+              compactChatHeader ? (
+                <>
+                  <IconButton label="返回" icon="back" onPress={back} />
+                  <IconButton
+                    label="历史对话"
+                    icon="history"
+                    onPress={() => navigate({ name: 'conversations' })}
+                  />
+                </>
+              ) : undefined
+            }
           />
         );
         break;
@@ -239,6 +394,34 @@ function Application() {
       case 'uploads':
         page = <UploadsScreen />;
         break;
+      case 'integrations': {
+        const connectionsEntry = getEntryState(scope => ({
+          api,
+          userId: session.user.id,
+          isRetained: scope.isRetained,
+          browse: { category: 'local', query: '', managing: false } as ConnectionBrowseState,
+        }));
+        if (connectionsEntry.api !== api || connectionsEntry.userId !== session.user.id) {
+          connectionsEntry.api = api;
+          connectionsEntry.userId = session.user.id;
+          connectionsEntry.browse = { category: 'local', query: '', managing: false };
+        }
+        page = <IntegrationsScreen
+          browseState={connectionsEntry.browse}
+          onBrowseStateChange={next => {
+            if (connectionsEntry.isRetained() && connectionsEntry.api === api && connectionsEntry.userId === session.user.id) {
+              connectionsEntry.browse = next;
+            }
+          }}
+        />;
+        break;
+      }
+      case 'health':
+        page = <HealthScreen key={session.user.id + preferences.serverUrl} initialReceipt={route.receipt} />;
+        break;
+      case 'aiHistory':
+        page = <AiHistoryScreen key={session.user.id + preferences.serverUrl} />;
+        break;
       case 'conversations':
         page = <ConversationsScreen />;
         break;
@@ -256,6 +439,8 @@ function Application() {
     }
   }
   const main = route.name === 'main';
+  const chatPage = route.name === 'chat' && Boolean(session);
+  const chatSurface = chatPage || (route.name === 'conversations' && Boolean(session));
   const tabs: Array<{
     id: MainTab;
     label: string;
@@ -268,7 +453,7 @@ function Application() {
   ];
   return (
     <AppProvider
-      key={`${preferences.serverUrl}:${session?.user.id ?? 'signed-out'}`}
+      key={`${preferences.serverUrl}:${preferences.instance?.id ?? 'unverified'}:${session?.user.id ?? 'signed-out'}`}
       value={{
         api,
         user: session?.user ?? null,
@@ -284,7 +469,7 @@ function Application() {
           }
           const updated = { ...session, user };
           await platform.writeSession(
-            JSON.stringify({ ...updated, serverUrl: preferences.serverUrl }),
+            JSON.stringify({ ...updated, serverUrl: preferences.serverUrl, instanceId: preferences.instance?.id }),
           );
           if (activeToken.current === session.token) {
             setSession(updated);
@@ -299,28 +484,51 @@ function Application() {
           ),
       }}
     >
-      <View style={s.screen}>
-        <AmbientBackground />
-        <SafeAreaView style={shell.safeArea} edges={['top', 'bottom']}>
+      <View style={[s.screen, chatSurface && shell.chatCanvas]}>
+        {!chatSurface && <AmbientBackground />}
+        <SafeAreaView
+          style={shell.safeArea}
+          edges={['top', 'bottom']}
+          testID="application-shell"
+          onLayout={event => setShellHeight(event.nativeEvent.layout.height)}
+        >
           <StatusBar
             barStyle="dark-content"
-            backgroundColor={colors.background}
+            backgroundColor={chatSurface ? chatAppearance.surface : colors.background}
           />
-          <View style={s.header}>
-            {main ? (
+          {route.name !== 'health' && route.name !== 'integrations' && <View
+            testID="application-header"
+            style={[s.header, chatSurface && shell.chatHeader, compactChatHeader && shell.hiddenHeader]}
+          >
+            {chatPage ? <>
+              <View style={shell.chatHeaderActions}>
+                <Pressable accessibilityRole="button" accessibilityLabel="返回" onPress={back} style={shell.chatHeaderButton}>
+                  <Icon name="back" size={22} color={chatAppearance.ink} />
+                </Pressable>
+                <Pressable accessibilityRole="button" accessibilityLabel="开启新对话" onPress={() => navigate({ name: 'chat' })} style={shell.chatHeaderButton}>
+                  <Icon name="compose" size={21} color={chatAppearance.ink} />
+                </Pressable>
+              </View>
+              <Text style={shell.chatTitle}>妥啦</Text>
+              <View style={[shell.chatHeaderActions, { justifyContent: 'flex-end' }]}>
+                <Pressable accessibilityRole="button" accessibilityLabel="历史对话" onPress={() => navigate({ name: 'conversations' })} style={shell.chatHeaderButton}>
+                  <Icon name="history" size={22} color={chatAppearance.ink} />
+                </Pressable>
+              </View>
+            </> : main ? (
               <View style={s.row}>
                 <AssistantOrb size={34} />
-                <Text style={[s.wordmark, shell.brand]}>Tomorrow</Text>
+                <Text style={[s.wordmark, shell.brand]}>妥啦</Text>
               </View>
             ) : (
               <View style={[s.row, { gap: 8 }]}>
                 <IconButton label="返回" icon="back" onPress={back} />
                 {route.name === 'chat' && (
-                  <Text style={shell.chatTitle}>Tomorrow</Text>
+                  <Text style={shell.chatTitle}>妥啦</Text>
                 )}
               </View>
             )}
-            {route.name === 'chat' ? (
+            {chatPage ? null : route.name === 'chat' ? (
               <IconButton
                 label="历史对话"
                 icon="history"
@@ -339,8 +547,17 @@ function Application() {
                 onPress={() => navigate({ name: 'settings' })}
               />
             )}
-          </View>
+          </View>}
+          {session && pendingInputs > 0 && route.name !== 'integrations' && (
+            <Pressable accessibilityRole="button" accessibilityLabel="查看待接收的手机资料"
+              onPress={() => navigate({ name: 'integrations' })}
+              style={{ marginHorizontal: 20, marginBottom: 8, paddingHorizontal: 16, paddingVertical: 11, borderRadius: 18, backgroundColor: '#EAF1FF' }}>
+              <Text style={{ color: colors.accent }}>有 {pendingInputs} 条手机资料待接收 · 查看并确认</Text>
+            </Pressable>
+          )}
+          {session && main && tab === 'today' && <PhoneSourcesEntry autoOpen />}
           <KeyboardAvoidingView
+            key={entry.key}
             style={s.fill}
             behavior={platform.keyboardBehavior}
           >
@@ -406,9 +623,14 @@ function Application() {
   );
 }
 const shell = StyleSheet.create({
+  hiddenHeader: { display: 'none' },
   safeArea: { flex: 1, backgroundColor: 'transparent' },
   brand: { marginLeft: 5 },
-  chatTitle: { color: colors.ink, fontSize: 17, fontWeight: '500' },
+  chatTitle: { flex: 1, textAlign: 'center', color: chatAppearance.ink, fontSize: 17, fontWeight: '500' },
+  chatCanvas: { backgroundColor: chatAppearance.background },
+  chatHeader: { minHeight: 60, paddingHorizontal: 8, paddingVertical: 4, marginBottom: 0, backgroundColor: chatAppearance.surface },
+  chatHeaderActions: { width: 88, flexDirection: 'row', alignItems: 'center' },
+  chatHeaderButton: { width: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   selectedTab: {
     backgroundColor: 'rgba(234,241,255,0.85)',
   },

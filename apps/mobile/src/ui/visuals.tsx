@@ -22,6 +22,7 @@ const paths = {
   sparkles:
     'm12 3 2.3 6.7L21 12l-6.7 2.3L12 21l-2.3-6.7L3 12l6.7-2.3L12 3ZM20 2v4m-2-2h4',
   plus: 'M12 5v14M5 12h14',
+  compose: 'M12 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7M14 5l5 5M11 13l-1 4 4-1 8-8a2 2 0 0 0-4-4l-7 9Z',
   arrowUp: 'M12 19V5m-6 6 6-6 6 6',
   send: 'M12 19V5m-6 6 6-6 6 6',
   arrowRight: 'M5 12h14m-6-6 6 6-6 6',

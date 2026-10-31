@@ -116,7 +116,7 @@ async fn reserve_login_attempt(
         .bind(created)
         .execute(&mut *transaction)
         .await?;
-    let credential = sqlx::query("SELECT c.user_id,c.password_hash FROM phone_credentials c JOIN phone_identities p ON p.user_id=c.user_id WHERE p.phone=$1")
+    let credential = sqlx::query("SELECT c.user_id,c.password_hash FROM phone_credentials c JOIN phone_identities p ON p.user_id=c.user_id WHERE p.phone=$1 AND NOT EXISTS(SELECT 1 FROM admin_user_controls a WHERE a.user_id=c.user_id AND a.disabled<>0)")
         .bind(phone).fetch_optional(&mut *transaction).await?
         .map(|row| -> Result<Credential, DomainError> {
             Ok(Credential { user_id: row.try_get("user_id")?, password_hash: row.try_get("password_hash")? })
@@ -138,7 +138,7 @@ async fn complete_login(
     let token = auth::generate_token();
     // Reset/registration uses this same guard. A stale hash or removed/expired
     // reservation must never create a session after an intervening reset.
-    let inserted = sqlx::query("INSERT INTO sessions(token_hash,user_id,expires_at,created_at) SELECT $1,c.user_id,$2,$3 FROM phone_credentials c JOIN phone_identities p ON p.user_id=c.user_id WHERE p.phone=$4 AND c.user_id=$5 AND c.password_hash=$6 AND EXISTS(SELECT 1 FROM phone_login_attempts a WHERE a.id=$7 AND a.phone=$4 AND a.requested_at>$8)")
+    let inserted = sqlx::query("INSERT INTO sessions(token_hash,user_id,expires_at,created_at) SELECT $1,c.user_id,$2,$3 FROM phone_credentials c JOIN phone_identities p ON p.user_id=c.user_id WHERE p.phone=$4 AND c.user_id=$5 AND c.password_hash=$6 AND EXISTS(SELECT 1 FROM phone_login_attempts a WHERE a.id=$7 AND a.phone=$4 AND a.requested_at>$8) AND NOT EXISTS(SELECT 1 FROM admin_user_controls a WHERE a.user_id=c.user_id AND a.disabled<>0)")
         .bind(auth::hash_token(&token)).bind(created.saturating_add(SESSION_LIFETIME_SECONDS)).bind(created)
         .bind(phone).bind(&credential.user_id).bind(&credential.password_hash).bind(attempt_id).bind(created.saturating_sub(LOGIN_WINDOW_SECONDS))
         .execute(&mut *transaction).await?.rows_affected();
@@ -701,6 +701,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn disabled_account_revokes_existing_sessions_and_rejects_inflight_phone_login() {
+        let _serial = TEST_LOCK.lock().await;
+        let repository = Repository::connect("sqlite::memory:").await.unwrap();
+        let user = credential_fixture(&repository).await;
+        let existing = repository.create_session(&user.id).await.unwrap();
+        let pending = reserve_login_attempt(&repository, PHONE, now)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO admin_user_controls(user_id,disabled,updated_at) VALUES($1,1,$2)")
+            .bind(&user.id)
+            .bind(now())
+            .execute(&repository.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            repository.authenticate(&existing).await,
+            Err(DomainError::Unauthorized)
+        ));
+        assert!(matches!(
+            repository.create_session(&user.id).await,
+            Err(DomainError::Unauthorized)
+        ));
+        assert!(repository.credentials(&user.email).await.unwrap().is_none());
+        assert!(matches!(
+            complete_login(
+                &repository,
+                PHONE,
+                &pending.id,
+                pending.credential.as_ref().unwrap(),
+                now
+            )
+            .await,
+            Err(DomainError::InvalidCredentials)
+        ));
+        let next = reserve_login_attempt(&repository, PHONE, now)
+            .await
+            .unwrap();
+        assert!(next.credential.is_none());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "old session remains stored but unusable, no new token is issued"
+        );
     }
 
     #[tokio::test]

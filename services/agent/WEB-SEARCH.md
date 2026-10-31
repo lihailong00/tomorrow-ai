@@ -8,13 +8,15 @@ Pi 服务向模型提供 `web_search` 和 `web_fetch` 两个只读工具，分�
 
 | 变量 | 作用 |
 | --- | --- |
-| `DEEPSEEK_API_KEY` | 默认复用已有 DeepSeek 密钥；只从 Pi 服务的环境读取 |
+| `DEEPSEEK_API_KEY` | 默认复用已有 DeepSeek 密钥；来自受保护的后台配置快照或旧部署的 Pi 环境 |
 | `DEEPSEEK_SEARCH_API_KEY` | 可选，单独配置搜索密钥时优先使用；不会借用 `MODEL_API_KEY` |
-| `DEEPSEEK_WEB_ENABLED` | 默认有 DeepSeek 密钥时启用；`false` 关闭；`true` 要求有密钥，否则启动失败 |
+| `DEEPSEEK_WEB_ENABLED` | 默认有 DeepSeek 密钥时启用；`false` 关闭；`true` 要求有密钥，否则新执行返回配置错误，服务仍可启动 |
 | `AGENT_MAX_WEB_SEARCHES` | 每次执行最多搜索次数，默认 4，上限 8 |
 | `AGENT_MAX_WEB_FETCHES` | 每次执行最多读取次数，默认 4，上限 8 |
 
 请求固定发送到 `https://api.deepseek.com/v1/tools/search` 和 `/v1/tools/fetch`，不会跟随模型代理地址变化，也不跟随供应商接口的 HTTP 重定向。部署时只需在现有 Pi 服务构建目录更新代码并重启 Pi；无需新增 APK 权限或修改 Rust 数据库。启用后 Pi `/health` 返回 `web_search: true`。需要运行在 `AGENT_MODE=pi`，旧 direct 模式不使用此功能。
+
+新部署设置 `TADA_RUNTIME_CONFIG=enabled` 后，从 Rust 管理后台读取生效配置。每轮固定一个版本，后台修改用于下一轮；缺失或读取失败不会回退旧环境 Key。详见 [运行配置](RUNTIME-CONFIG.md)。
 
 ## 行为与边界
 

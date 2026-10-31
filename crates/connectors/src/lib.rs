@@ -2,6 +2,10 @@
 mod config;
 mod crypto;
 mod reads;
+pub mod domestic;
+pub mod personal_mcp;
+pub mod personal_wallet;
+pub mod health;
 
 use std::sync::Arc;
 
@@ -32,6 +36,14 @@ pub struct ConnectorError {
 }
 
 impl ConnectorError {
+    pub fn into_domain(self) -> tomorrow_domain::DomainError {
+        match self.status {
+            StatusCode::UNAUTHORIZED => tomorrow_domain::DomainError::Unauthorized,
+            StatusCode::NOT_FOUND => tomorrow_domain::DomainError::NotFound,
+            StatusCode::BAD_REQUEST | StatusCode::CONFLICT => tomorrow_domain::DomainError::Validation(self.message.into()),
+            _ => tomorrow_domain::DomainError::External(self.message.into()),
+        }
+    }
     fn new(status: StatusCode, code: &'static str, message: &'static str) -> Self {
         Self {
             status,
@@ -174,7 +186,7 @@ struct Inner {
     pool: AnyPool,
     config: Option<Config>,
     client: Client,
-    refresh_lock: Mutex<()>,
+    refresh_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -226,9 +238,17 @@ impl ConnectorState {
                 pool,
                 config,
                 client: http_client()?,
-                refresh_lock: Mutex::new(()),
+                refresh_lock: Arc::new(Mutex::new(())),
             }),
         })
+    }
+
+    pub fn reconfigured(&self, values: &std::collections::HashMap<String, String>) -> Result<Self> {
+        Ok(Self { inner: Arc::new(Inner {
+            repo: self.inner.repo.clone(), pool: self.inner.pool.clone(),
+            config: Config::from_lookup(|key| values.get(key).cloned()).ok(),
+            client: self.inner.client.clone(), refresh_lock: self.inner.refresh_lock.clone(),
+        }) })
     }
 
     pub fn is_configured(&self) -> bool {
@@ -686,7 +706,7 @@ impl FromRequestParts<ConnectorState> for Auth {
             .headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
+            .and_then(tomorrow_domain::auth::bearer_token)
             .ok_or_else(ConnectorError::unauthorized)?;
         let user_id = state
             .inner
@@ -786,12 +806,12 @@ async fn callback(
     let (status, message) = match result {
         Ok(true) => (
             StatusCode::OK,
-            "授权完成。请返回 Tomorrow AI 并刷新连接列表。",
+            "授权完成。请返回妥啦并刷新连接列表。",
         ),
-        Ok(false) => (StatusCode::OK, "你已取消本次授权。请返回 Tomorrow AI。"),
+        Ok(false) => (StatusCode::OK, "你已取消本次授权。请返回妥啦。"),
         Err(error) => (error.status, error.message),
     };
-    (status,[(header::CACHE_CONTROL,"no-store"),(header::REFERRER_POLICY,"no-referrer"),(header::CONTENT_SECURITY_POLICY,"default-src 'none'; frame-ancestors 'none'")],Html(format!("<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Tomorrow AI</title><body><h1>Tomorrow AI</h1><p>{message}</p></body></html>"))).into_response()
+    (status,[(header::CACHE_CONTROL,"no-store"),(header::REFERRER_POLICY,"no-referrer"),(header::CONTENT_SECURITY_POLICY,"default-src 'none'; frame-ancestors 'none'")],Html(format!("<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>妥啦</title><body><h1>妥啦</h1><p>{message}</p></body></html>"))).into_response()
 }
 
 #[cfg(test)]

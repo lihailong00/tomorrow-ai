@@ -3,6 +3,7 @@ import type {
   AuthSession,
   CapabilityResponse,
   ChatResponse,
+  ChatIntent,
   Connector,
   ConnectorItem,
   Conversation,
@@ -19,6 +20,7 @@ import type {
 import type { LocalFile } from '../platform/ports';
 import { normalizePhoneNumber } from '../domain/phone';
 import { validatePassword } from '../domain/password';
+import { readChatSse, type SseEvent } from './chatSse';
 
 export type PhoneCodeChallenge = {
   challenge_id: string;
@@ -56,15 +58,36 @@ export function newRequestId(): string {
     .slice(2, 14)}`;
 }
 type Fetcher = typeof fetch;
+function listQuery(
+  options?: Record<string, string | number | boolean | undefined>,
+): string {
+  const entries = Object.entries(options ?? {}).filter(
+    ([, value]) => value !== undefined,
+  );
+  return entries.length
+    ? '?' +
+        entries
+          .map(([key, value]) => `${key}=${encodeURIComponent(String(value))}`)
+          .join('&')
+    : '';
+}
 export class ApiClient {
   readonly baseUrl: string;
+  private disposed = false;
+  private requests = new Set<AbortController>();
   constructor(
     baseUrl: string,
     private token?: string,
     private onUnauthorized?: () => void,
     private fetcher: Fetcher = fetch,
+    private verifyIdentity?: () => Promise<void>,
   ) {
-    this.baseUrl = normalizeServerUrl(baseUrl);
+    this.baseUrl = baseUrl ? normalizeServerUrl(baseUrl) : '';
+  }
+  dispose() {
+    this.disposed = true;
+    for (const controller of this.requests) controller.abort();
+    this.requests.clear();
   }
   async request<T>(
     path: string,
@@ -72,7 +95,19 @@ export class ApiClient {
     body?: unknown,
     signal?: AbortSignal,
   ): Promise<T> {
+    if (this.disposed || !this.baseUrl) {
+      throw new ApiError('connection_required', '请先检查并确认服务器连接。');
+    }
+    if (signal?.aborted) throw new ApiError('cancelled', '操作已取消。');
+    if (this.verifyIdentity) await this.verifyIdentity();
+    if (this.disposed)
+      throw new ApiError(
+        'connection_changed',
+        '服务器连接已变化，请重新操作。',
+      );
+    if (signal?.aborted) throw new ApiError('cancelled', '操作已取消。');
     const controller = new AbortController();
+    this.requests.add(controller);
     const cancel = () => controller.abort();
     signal?.addEventListener('abort', cancel);
     if (signal?.aborted) {
@@ -80,9 +115,18 @@ export class ApiClient {
     }
     const multipart =
       typeof FormData !== 'undefined' && body instanceof FormData;
+    const smsCodeRequest = path === '/auth/phone/code';
+    const personalMcpRequest = path.startsWith('/personal-mcp/');
+    const healthReadRequest = /^\/health\/connections\/(huawei|xiaomi)\/(sync|finalize)$/.test(path);
     const timeout = setTimeout(
       () => controller.abort(),
-      path === '/chat' || path.endsWith('/transcribe')
+      smsCodeRequest
+        ? 45000 // The SMS provider may take up to 30 seconds; allow return-path margin.
+        : healthReadRequest
+        ? 85000 // Health refresh + paged reads have an 80s total server deadline.
+        : personalMcpRequest
+        ? 50000 // Includes MCP initialization, tool discovery and the bounded provider call.
+        : path === '/chat' || path.endsWith('/transcribe')
         ? 120000
         : multipart
         ? 60000
@@ -102,7 +146,19 @@ export class ApiClient {
           ? { body: multipart ? (body as FormData) : JSON.stringify(body) }
           : {}),
         signal: controller.signal,
-      });
+        credentials: 'omit',
+        redirect: 'error',
+      } as RequestInit & { redirect: 'error' });
+      if (this.disposed)
+        throw new ApiError(
+          'connection_changed',
+          '服务器连接已变化，请重新操作。',
+        );
+      if (response.redirected)
+        throw new ApiError(
+          'redirect_blocked',
+          '接口发生跳转，请重新检查服务器地址。',
+        );
       const text = await response.text();
       const retryHeader = Number(response.headers?.get?.('Retry-After'));
       const retryAfterSeconds =
@@ -139,10 +195,23 @@ export class ApiClient {
           retryAfterSeconds,
         );
       }
+      if (this.disposed)
+        throw new ApiError(
+          'connection_changed',
+          '服务器连接已变化，请重新操作。',
+        );
       return data as T;
     } catch (error) {
       if (error instanceof ApiError) {
         throw error;
+      }
+      if (smsCodeRequest) {
+        throw new ApiError(
+          'sms_send_uncertain',
+          '发送结果尚未确认，短信可能仍会到达。请核对收件手机号，等待 60 秒后再试。',
+          0,
+          60,
+        );
       }
       if ((error as Error).name === 'AbortError') {
         throw new ApiError(
@@ -156,6 +225,7 @@ export class ApiClient {
       );
     } finally {
       clearTimeout(timeout);
+      this.requests.delete(controller);
       signal?.removeEventListener('abort', cancel);
     }
   }
@@ -214,12 +284,14 @@ export class ApiClient {
     password: string,
     name: string,
     timezone = 'Asia/Shanghai',
+    inviteCode?: string,
   ) =>
     this.request<AuthSession>('/auth/register', 'POST', {
       email: email.trim(),
       password,
       name: name.trim(),
       timezone,
+      ...(inviteCode ? { invite_code: inviteCode.trim() } : {}),
     });
   me = () => this.request<User>('/me');
   updateMe = (data: Partial<Pick<User, 'name' | 'timezone'>>) =>
@@ -227,9 +299,9 @@ export class ApiClient {
   logout = () => this.request<{ ok: boolean }>('/auth/logout', 'POST', {});
   today = () => this.request<Today>('/today');
   briefing = () => this.request<Task>('/briefing', 'POST', {});
-  memories = (kind?: MemoryKind) =>
-    this.request<{ items: Memory[] }>(
-      `/memories${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`,
+  memories = (kind?: MemoryKind, page?: { offset?: number; limit?: number }) =>
+    this.request<{ items: Memory[]; next_offset?: number | null }>(
+      `/memories${listQuery({ ...page, kind })}`,
     );
   saveMemory = (
     data: {
@@ -238,6 +310,7 @@ export class ApiClient {
       kind: MemoryKind;
       source?: string;
       version?: number;
+      client_request_id?: string;
     },
     id?: string,
   ) =>
@@ -251,7 +324,10 @@ export class ApiClient {
       `/memories/${encodeURIComponent(id)}`,
       'DELETE',
     );
-  tasks = () => this.request<{ items: Task[] }>('/tasks');
+  tasks = (page?: { offset?: number; limit?: number; status?: string }) =>
+    this.request<{ items: Task[]; next_offset?: number | null }>(
+      `/tasks${listQuery(page)}`,
+    );
   task = (id: string) => this.request<Task>(`/tasks/${encodeURIComponent(id)}`);
   createTask = (
     instruction: string,
@@ -274,7 +350,7 @@ export class ApiClient {
         Schedule,
         'title' | 'instruction' | 'frequency' | 'time' | 'timezone' | 'enabled'
       >
-    >,
+    > & { client_request_id?: string },
     id?: string,
   ) =>
     this.request<Schedule>(
@@ -287,11 +363,11 @@ export class ApiClient {
       `/schedules/${encodeURIComponent(id)}`,
       'DELETE',
     );
-  conversations = () =>
-    this.request<{ items: Conversation[] }>('/conversations');
-  messages = (id: string) =>
-    this.request<{ items: Message[] }>(
-      `/conversations/${encodeURIComponent(id)}/messages`,
+  conversations = (page?: { offset?: number; limit?: number }) =>
+    this.request<{ items: Conversation[]; next_offset?: number | null }>(`/conversations${listQuery(page)}`);
+  messages = (id: string, page?: { offset?: number; limit?: number; before?: string }) =>
+    this.request<{ items: Message[]; next_offset?: number | null; next_before?: string | null }>(
+      `/conversations/${encodeURIComponent(id)}/messages${listQuery(page)}`,
     );
   chat = (
     message: string,
@@ -306,6 +382,47 @@ export class ApiClient {
       remember: false,
       upload_ids,
     });
+  async chatStream(
+    intent: ChatIntent,
+    onEvent: (event: SseEvent) => void,
+    options: { signal: AbortSignal; lastEventId?: number; retry?: boolean },
+  ): Promise<void> {
+    if (this.disposed || !this.baseUrl) {
+      throw new ApiError('connection_required', '请先检查并确认服务器连接。');
+    }
+    if (options.signal.aborted) throw new ApiError('cancelled', '操作已取消。');
+    // The identity probe is anonymous and must finish before constructing an
+    // authenticated native request, on first send and every reattachment.
+    if (this.verifyIdentity) await this.verifyIdentity();
+    if (this.disposed) throw new ApiError('connection_changed', '服务器连接已变化，请重新操作。');
+    if (options.signal.aborted) throw new ApiError('cancelled', '操作已取消。');
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    this.requests.add(controller);
+    options.signal.addEventListener('abort', cancel);
+    if (options.signal.aborted) controller.abort();
+    try {
+      await readChatSse({
+        url: `${this.baseUrl}/v1/chat/stream`,
+        headers: {
+          Accept: 'text/event-stream',
+          'Content-Type': 'application/json',
+          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+          ...(options.lastEventId !== undefined ? { 'Last-Event-ID': String(options.lastEventId) } : {}),
+          ...(options.retry ? { 'X-Chat-Retry': '1' } : {}),
+        },
+        body: JSON.stringify(intent),
+        signal: controller.signal,
+        onEvent: event => {
+          if (!this.disposed && !controller.signal.aborted) onEvent(event);
+        },
+        onUnauthorized: () => { if (!this.disposed && this.token) this.onUnauthorized?.(); },
+      });
+    } finally {
+      options.signal.removeEventListener('abort', cancel);
+      this.requests.delete(controller);
+    }
+  }
   upload = (file: LocalFile, signal?: AbortSignal) => {
     const data = new FormData();
     data.append('file', {
@@ -315,7 +432,15 @@ export class ApiClient {
     } as any);
     return this.request<Upload>('/uploads', 'POST', data, signal);
   };
-  uploads = () => this.request<{ items: Upload[] }>('/uploads');
+  uploads = (
+    page?: { offset?: number; limit?: number; kind?: 'all' | 'file' | 'audio' },
+    signal?: AbortSignal,
+  ) =>
+    this.request<{
+      items: Upload[];
+      next_offset?: number | null;
+      has_more?: boolean;
+    }>(`/uploads${listQuery(page)}`, 'GET', undefined, signal);
   deleteUpload = (id: string) =>
     this.request<{ ok: boolean }>(
       '/uploads/' + encodeURIComponent(id),
@@ -329,15 +454,16 @@ export class ApiClient {
       signal,
     );
   capabilities = () => this.request<CapabilityResponse>('/capabilities');
-  notifications = () =>
-    this.request<{ items: Notification[] }>('/notifications');
+  notifications = (page?: { offset?: number; limit?: number; read?: boolean }) =>
+    this.request<{ items: Notification[]; next_offset?: number | null }>(`/notifications${listQuery(page)}`);
   readNotification = (id: string) =>
     this.request<{ ok: boolean }>(
       `/notifications/${encodeURIComponent(id)}/read`,
       'POST',
       {},
     );
-  artifacts = () => this.request<{ items: Artifact[] }>('/artifacts');
+  artifacts = (page?: { offset?: number; limit?: number }) =>
+    this.request<{ items: Artifact[]; next_offset?: number | null }>(`/artifacts${listQuery(page)}`);
   artifact = (id: string) =>
     this.request<Artifact>(`/artifacts/${encodeURIComponent(id)}`);
   connectors = () => this.request<{ items: Connector[] }>('/connectors');

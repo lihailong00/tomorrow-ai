@@ -1,25 +1,19 @@
 import { createServer, type IncomingMessage } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { config as dotenv } from 'dotenv';
-import { authenticate, positiveInteger, resolveModel, serviceUrl } from './config.js';
-import { DEFAULT_LIMITS, executeRun, RunError, validateRun, type Bridge } from './runtime.js';
-import { createDeepSeekWeb, resolveWebSettings } from './web.js';
+import { authenticate, positiveInteger, rustServiceUrl } from './config.js';
+import { executeRun, RunError, validateRun, type Bridge } from './runtime.js';
+import { createDeepSeekWeb } from './web.js';
+import { createRuntimeSettingsProvider, RuntimeSettingsError } from './runtime-settings.js';
 
 dotenv({ path: fileURLToPath(new URL('../../../.env', import.meta.url)), quiet: true });
 const secret = process.env.AGENT_SERVICE_TOKEN ?? '';
 if (secret.length < 32 || /[\r\n]/.test(secret)) throw new Error('缺少有效的 AGENT_SERVICE_TOKEN，请使用启动脚本');
-const apiUrl = serviceUrl(process.env.RUST_API_URL ?? 'http://127.0.0.1:8080', 'Rust 服务地址');
-const settings = resolveModel(process.env);
-const webSettings = resolveWebSettings(process.env);
-const webProvider = webSettings ? createDeepSeekWeb(webSettings) : undefined;
+const apiUrl = rustServiceUrl(process.env.RUST_API_URL ?? 'http://127.0.0.1:8080');
+const configuration = createRuntimeSettingsProvider(process.env, apiUrl, secret);
 const port = positiveInteger(process.env.AGENT_PORT, 8090, 65535);
-const limits = {
-  turns: positiveInteger(process.env.AGENT_MAX_TURNS, DEFAULT_LIMITS.turns, 20),
-  tools: positiveInteger(process.env.AGENT_MAX_TOOLS, DEFAULT_LIMITS.tools, 40),
-  timeoutMs: positiveInteger(process.env.AGENT_TIMEOUT_MS, DEFAULT_LIMITS.timeoutMs, 105000),
-};
 let active = 0;
-const maxConcurrent = positiveInteger(process.env.AGENT_MAX_CONCURRENT, 4, 32);
+let pending = 0;
 
 async function readBody(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = []; let length = 0;
@@ -40,8 +34,20 @@ const server = createServer(async (request, response) => {
     }
   };
   if (request.method === 'GET' && request.url === '/health') {
-    send(200, { ok: true, harness: 'pi', version: '1.4.0', model_name: settings.model.id,
-      web_search: !!webProvider }); return;
+    try {
+      const snapshot = await configuration.snapshot();
+      send(200, { ok: true, harness: 'pi', version: '1.4.0', configured: !!snapshot.model && !snapshot.error,
+        model_name: snapshot.model?.model.id ?? null, web_search: !!snapshot.web && !snapshot.error,
+        config_source: configuration.mode, config_revision: snapshot.revision,
+        config_status: snapshot.error ?? 'ready' });
+    } catch {
+      // Liveness remains available before the Rust API starts, while readiness
+      // explicitly reports that no valid run configuration can be loaded.
+      send(200, { ok: true, harness: 'pi', version: '1.4.0', configured: false,
+        model_name: null, web_search: false, config_source: configuration.mode,
+        config_revision: null, config_status: 'runtime_config_unavailable' });
+    }
+    return;
   }
   if (!authenticate(request.headers.authorization, `Bearer ${secret}`)) {
     send(401, { error: { code: 'unauthorized', message: '内部服务认证失败' } }); return;
@@ -49,17 +55,33 @@ const server = createServer(async (request, response) => {
   if (request.method !== 'POST' || request.url !== '/v1/runs') {
     send(404, { error: { code: 'not_found', message: '接口不存在' } }); return;
   }
-  if (active >= maxConcurrent) {
+  // A fixed admission bound also limits configuration/body reads while the
+  // actual run concurrency is resolved from this request's settings snapshot.
+  if (active + pending >= 32) {
     send(503, { error: { code: 'busy', message: 'Agent 正忙，请稍后重试' } }); return;
   }
-  active++;
+  pending++;
+  let awaitingAdmission = true;
   const controller = new AbortController();
   response.on('close', () => { if (!response.writableEnded) controller.abort(); });
   try {
     const input = await readBody(request);
     validateRun(input);
+    // Each run receives one resolved revision. A dashboard update applies to
+    // the next run, never halfway through a tool loop or a provider request.
+    const snapshot = await configuration.snapshot(controller.signal);
+    if (snapshot.error) throw new RuntimeSettingsError(snapshot.error);
+    if (!snapshot.model) throw new RuntimeSettingsError('model_not_configured');
+    if (active >= snapshot.limits.maxConcurrent) {
+      send(503, { error: { code: 'busy', message: 'Agent 正忙，请稍后重试' } }); return;
+    }
+    pending--; awaitingAdmission = false; active++;
+    const settings = snapshot.model;
+    const webProvider = snapshot.web ? createDeepSeekWeb(snapshot.web) : undefined;
     const callback = async (path: string, body?: unknown, signal?: AbortSignal) => {
-      const combined = AbortSignal.any([controller.signal, AbortSignal.timeout(15000), ...(signal ? [signal] : [])]);
+      const mcpCall = path === '/tools' && body && typeof body === 'object' &&
+        ['list_mcp_tools', 'call_mcp_tool'].includes(String((body as { name?: unknown }).name));
+      const combined = AbortSignal.any([controller.signal, AbortSignal.timeout(mcpCall ? 50000 : 15000), ...(signal ? [signal] : [])]);
       const result = await fetch(`${apiUrl}/internal/agent/runs/${encodeURIComponent(input.run_id)}${path}`, {
         method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: combined,
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${input.run_token}`, 'X-Agent-Service': secret },
@@ -70,22 +92,25 @@ const server = createServer(async (request, response) => {
       return value;
     };
     const bridge: Bridge = {
-      state: async () => await callback('/state') as { next_sequence: number },
-      event: async event => { await callback('/events', event); },
-      tool: (name, args, signal, operationIndex) => callback('/tools', { name, arguments: args, operation_index: operationIndex }, signal),
+      state: async signal => await callback('/state', undefined, signal) as { next_sequence: number },
+      event: async (event, signal) => { await callback('/events', event, signal); },
+      tool: (name, args, signal, operationIndex, operationSlot) => callback('/tools', {
+        name, arguments: args, operation_index: operationIndex, client_model: settings.model.id,
+        ...(operationSlot === undefined ? {} : { operation_slot: operationSlot }),
+      }, signal),
     };
-    send(200, await executeRun(input, settings, bridge, controller.signal, limits, undefined, webProvider));
+    send(200, await executeRun(input, settings, bridge, controller.signal, snapshot.limits, undefined, webProvider));
   } catch (error) {
-    const code = error instanceof RunError ? error.code : 'execution_failed';
+    const code = error instanceof RunError || error instanceof RuntimeSettingsError ? error.code : 'execution_failed';
     // Never log upstream SDK errors, request bodies, headers, or provider credentials.
     console.error(JSON.stringify({ event: 'run_failed', code }));
-    send(code === 'invalid_request' || code === 'context_limit' || code === 'body_limit' ? 400 : 502,
-      { error: { code, message: 'Agent 执行未完成，请查看执行记录后重试' } });
-  } finally { active--; }
+    send(error instanceof RuntimeSettingsError ? 503 : code === 'invalid_request' || code === 'context_limit' || code === 'body_limit' ? 400 : 502,
+      { error: { code, message: error instanceof RuntimeSettingsError ? error.message : 'Agent 执行未完成，请查看执行记录后重试' } });
+  } finally { if (awaitingAdmission) pending--; else active--; }
 });
 server.requestTimeout = 120000;
 server.headersTimeout = 15000;
-server.listen(port, '127.0.0.1', () => console.log(JSON.stringify({ event: 'ready', harness: 'pi', port, model: settings.model.id })));
+server.listen(port, '127.0.0.1', () => console.log(JSON.stringify({ event: 'ready', harness: 'pi', port, config_source: configuration.mode })));
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => { server.close(); setTimeout(() => process.exit(0), 3000).unref(); });
 }

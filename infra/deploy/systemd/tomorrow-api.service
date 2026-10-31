@@ -14,7 +14,9 @@ EnvironmentFile=/etc/tomorrow/runtime.env
 EnvironmentFile=/etc/tomorrow/database.env
 EnvironmentFile=-/etc/tomorrow/sms.env
 EnvironmentFile=-/etc/tomorrow/asr.env
-ExecStartPre=/usr/bin/curl --fail --silent --show-error --retry 15 --retry-delay 2 --retry-connrefused --max-time 5 --output /dev/null http://127.0.0.1:8090/health
+Environment=PERSONAL_MCP_NODE=/opt/tomorrow/bin/node
+Environment=PERSONAL_MCP_YUQUE_SCRIPT=/opt/tomorrow/services/agent/node_modules/yuque-mcp/dist/cli.js
+# The administration UI must start even before a model has been configured.
 ExecStart=/opt/tomorrow/bin/tomorrow-api
 TimeoutStartSec=120
 Restart=on-failure

@@ -1,9 +1,10 @@
 import React from 'react';
-import { Text, View } from 'react-native';
+import { View, type StyleProp, type TextStyle } from 'react-native';
+import { Text } from './Text';
 import { colors, styles as s } from './theme';
 
 /** Safe native rendering: model output never becomes executable HTML or a WebView. */
-export function ResultText({ content }: { content: string }) {
+export function ResultText({ content, textStyle }: { content: string; textStyle?: StyleProp<TextStyle> }) {
   let code = false;
   return (
     <View style={{ gap: 7 }}>
@@ -28,6 +29,7 @@ export function ResultText({ content }: { content: string }) {
             key={index}
             style={[
               s.body,
+              textStyle,
               heading && {
                 fontSize: heading[1].length < 3 ? 18 : 15,
                 fontWeight: '600',

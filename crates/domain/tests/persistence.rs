@@ -38,6 +38,7 @@ async fn persistence_isolation_and_revocation() {
                 content: "偏好中文".into(),
                 kind: "preference".into(),
                 source: None,
+                client_request_id: None,
             },
         )
         .await
@@ -90,6 +91,7 @@ async fn stale_memory_cannot_overwrite_or_reappear_after_delete() {
                 content: "中文".into(),
                 kind: "preference".into(),
                 source: None,
+                client_request_id: None,
             },
         )
         .await

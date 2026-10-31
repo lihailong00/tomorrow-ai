@@ -17,5 +17,6 @@
 # Downloaded benchmark corpus; fetch with scripts/Prepare-MemoryBenchmarks.py.
 /research/benchmarks/longmemeval_s_cleaned.json
 *.log
+*.tsbuildinfo
 *.keystore
 !**/debug.keystore

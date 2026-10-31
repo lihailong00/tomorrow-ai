@@ -1,6 +1,8 @@
 pub mod agent;
 pub mod auth;
+pub mod chat_stream;
 pub mod dto;
+pub mod knowledge;
 pub mod model;
 pub mod phone;
 pub mod phone_password;
