@@ -8,6 +8,30 @@ const response = (data: unknown, status = 200) =>
   } as Response);
 
 describe('mobile API boundary', () => {
+  it('keeps a legacy chat research request alive beyond120s and returns once without retrying', async () => {
+    jest.useFakeTimers();
+    try {
+      let signal!: AbortSignal;
+      const fetcher = jest.fn((_url, init) => {
+        signal = init.signal;
+        return new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(() => resolve(response({ content: 'research complete' })), 1230000);
+          signal.addEventListener('abort', () => {
+            clearTimeout(timer);
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          });
+        });
+      });
+      const api = new ApiClient('https://api.example.com', 'synthetic', undefined, fetcher);
+      const result = api.request('/chat', 'POST', { client_request_id: 'same-intent', message: '核对公告' });
+      await jest.advanceTimersByTimeAsync(151000);
+      expect(signal.aborted).toBe(false);
+      await jest.advanceTimersByTimeAsync(1079000);
+      await expect(result).resolves.toEqual({ content: 'research complete' });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(fetcher.mock.calls[0][1].body)).toMatchObject({ client_request_id: 'same-intent' });
+    } finally { jest.clearAllTimers(); jest.useRealTimers(); }
+  });
   it('allows a slow accepted SMS response beyond the general request deadline without retrying', async () => {
     jest.useFakeTimers();
     try {

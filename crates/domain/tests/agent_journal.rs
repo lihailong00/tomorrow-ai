@@ -1,5 +1,5 @@
 use serde_json::json;
-use tomorrow_domain::{DomainError, Repository, agent::AgentOutput, new_id};
+use tomorrow_domain::{DomainError, Repository, agent::{AgentOutput, AGENT_CHAT_EVENT_LIMIT}, new_id};
 
 async fn journal_recovery_contract(repo: Repository) {
     let user = repo
@@ -183,10 +183,10 @@ async fn chat_attempt_limit_sequence_guards_and_pruned_history_recovery() {
         Err(DomainError::Conflict(_))
     ));
     // Real chat text updates have a larger attempt budget; retention stays 500.
-    for sequence in 501..=2500 {
+    for sequence in 501..=AGENT_CHAT_EVENT_LIMIT {
         repo.record_agent_event(&first.id,&first.token,sequence,"turn",&json!({})).await.unwrap();
     }
-    assert!(matches!(repo.record_agent_event(&first.id,&first.token,2501,"turn",&json!({})).await,Err(DomainError::Validation(_))));
+    assert!(matches!(repo.record_agent_event(&first.id,&first.token,AGENT_CHAT_EVENT_LIMIT+1,"turn",&json!({})).await,Err(DomainError::Validation(_))));
     repo.finish_agent_run(&first, None, Some("failure"))
         .await
         .unwrap();
@@ -201,7 +201,7 @@ async fn chat_attempt_limit_sequence_guards_and_pruned_history_recovery() {
         .await
         .unwrap();
     assert_eq!(retry.id, first.id);
-    assert_eq!(repo.next_agent_sequence(&retry.id).await.unwrap(), 2501);
+    assert_eq!(repo.next_agent_sequence(&retry.id).await.unwrap(), AGENT_CHAT_EVENT_LIMIT+1);
     assert!(matches!(
         repo.record_agent_event(
             &retry.id,
@@ -213,7 +213,7 @@ async fn chat_attempt_limit_sequence_guards_and_pruned_history_recovery() {
         .await,
         Err(DomainError::Conflict(_))
     ));
-    repo.record_agent_event(&retry.id, &retry.token, 2501, "started", &json!({}))
+    repo.record_agent_event(&retry.id, &retry.token, AGENT_CHAT_EVENT_LIMIT+1, "started", &json!({}))
         .await
         .unwrap();
     assert!(
@@ -223,6 +223,6 @@ async fn chat_attempt_limit_sequence_guards_and_pruned_history_recovery() {
     );
     let trace = repo.agent_run(&user.id, &retry.id).await.unwrap();
     assert_eq!(trace.events.len(), 500);
-    assert_eq!(trace.events[0]["sequence"], 2002);
-    assert_eq!(trace.events.last().unwrap()["sequence"], 2501);
+    assert_eq!(trace.events[0]["sequence"], AGENT_CHAT_EVENT_LIMIT-498);
+    assert_eq!(trace.events.last().unwrap()["sequence"], AGENT_CHAT_EVENT_LIMIT+1);
 }

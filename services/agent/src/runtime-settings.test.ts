@@ -34,6 +34,24 @@ test('legacy mode pins its initial environment, and disabled mode never calls Ru
   assert.throws(() => createRuntimeSettingsProvider({ TADA_RUNTIME_CONFIG: 'yes' }, url, secret));
 });
 
+test('environment and Rust snapshots share the complete100-call research policy', async () => {
+  const expected = { turns: 256, tools: 240, timeoutMs: 1200000, maxConcurrent: 4 };
+  const legacy = createRuntimeSettingsProvider(configured, url, secret, async () => { throw new Error('not called'); });
+  const runtime = createRuntimeSettingsProvider({ TADA_RUNTIME_CONFIG: 'enabled' }, url, secret,
+    async () => response(7, configured));
+  for (const provider of [legacy, runtime]) {
+    const snapshot = await provider.snapshot();
+    assert.equal(snapshot.error, undefined);
+    assert.deepEqual(snapshot.limits, expected);
+    assert.equal(snapshot.web?.searches, 100); assert.equal(snapshot.web?.fetches, 100);
+  }
+  for (const key of ['AGENT_MAX_WEB_SEARCHES', 'AGENT_MAX_WEB_FETCHES']) {
+    const invalid = createRuntimeSettingsProvider({ TADA_RUNTIME_CONFIG: 'enabled' }, url, secret,
+      async () => response(8, { ...configured, [key]: '101' }));
+    assert.equal((await invalid.snapshot()).error, 'web_configuration_invalid');
+  }
+});
+
 test('runtime requests use only the fixed private endpoint and internal authentication', async () => {
   let calls = 0;
   const transport: typeof fetch = async (input, init) => {
@@ -164,8 +182,8 @@ test('run budgets and admission limits change only with the next pinned revision
   assert.deepEqual(first.limits, { turns: 3, tools: 4, timeoutMs: 1000, maxConcurrent: 1 });
   assert.deepEqual(second.limits, { turns: 4, tools: 5, timeoutMs: 2000, maxConcurrent: 2 });
   assert.deepEqual(first.limits, { turns: 3, tools: 4, timeoutMs: 1000, maxConcurrent: 1 });
-  for (const [key, value] of [['AGENT_MAX_TURNS', '21'], ['AGENT_MAX_TOOLS', '41'],
-    ['AGENT_TIMEOUT_MS', '105001'], ['AGENT_MAX_CONCURRENT', '33'], ['AGENT_MAX_CONCURRENT', '0']]) {
+  for (const [key, value] of [['AGENT_MAX_TURNS', '257'], ['AGENT_MAX_TOOLS', '241'],
+    ['AGENT_TIMEOUT_MS', '1200001'], ['AGENT_MAX_CONCURRENT', '33'], ['AGENT_MAX_CONCURRENT', '0']]) {
     const invalid = createRuntimeSettingsProvider({ TADA_RUNTIME_CONFIG: 'enabled' }, url, secret,
       async () => response(3, { ...configured, [key!]: value }));
     const snapshot = await invalid.snapshot();

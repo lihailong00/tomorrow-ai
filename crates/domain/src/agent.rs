@@ -8,10 +8,14 @@ use sqlx::Row;
 
 use crate::{auth, new_id, now, timestamp, validate_text, DomainError, Message, Repository};
 
-const RUN_LEASE: i64 = 150;
+// Keep the durable authority and outer transports longer than Pi's bounded run.
+// The per-task worker lease is separate and is renewed by its existing heartbeat.
+pub const AGENT_EXECUTION_TIMEOUT_SECONDS: u64 = 20 * 60;
+pub const AGENT_HTTP_TIMEOUT_SECONDS: u64 = AGENT_EXECUTION_TIMEOUT_SECONDS + 30;
+pub const AGENT_RUN_LEASE_SECONDS: i64 = AGENT_EXECUTION_TIMEOUT_SECONDS as i64 + 90;
+pub const AGENT_TASK_EVENT_LIMIT: i64 = 2000;
+pub const AGENT_CHAT_EVENT_LIMIT: i64 = 6000;
 const MAX_RESPONSE: usize = 512 * 1024;
-const MAX_ATTEMPT_EVENTS: i64 = 500;
-const MAX_CHAT_ATTEMPT_EVENTS: i64 = 2500;
 const MAX_RETAINED_EVENTS: i64 = 500;
 const MAX_TOOL_RESULT_BYTES: usize = 40000;
 
@@ -148,7 +152,7 @@ impl AgentClient {
             model_name,
             client: Client::builder()
                 .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(115))
+                .timeout(Duration::from_secs(AGENT_HTTP_TIMEOUT_SECONDS))
                 .redirect(Policy::none())
                 .build()
                 .map_err(|_| DomainError::Internal("Agent 客户端初始化失败".into()))?,
@@ -299,7 +303,7 @@ impl Repository {
         let mut tx = self.pool.begin().await?;
         let inserted = sqlx::query("INSERT INTO agent_runs(id,user_id,run_key,fingerprint,conversation_id,scope,task_id,task_attempt,token_hash,status,lease_until,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'running',$10,$11,$11)ON CONFLICT(run_key)DO NOTHING")
             .bind(&id).bind(user_id).bind(&key).bind(&fingerprint).bind(conversation_id).bind(scope)
-            .bind(task_id).bind(task_attempt).bind(auth::hash_token(&token)).bind(now()+RUN_LEASE).bind(now())
+            .bind(task_id).bind(task_attempt).bind(auth::hash_token(&token)).bind(now()+AGENT_RUN_LEASE_SECONDS).bind(now())
             .execute(&mut *tx).await?.rows_affected();
         let row = sqlx::query("SELECT * FROM agent_runs WHERE user_id=$1 AND run_key=$2")
             .bind(user_id)
@@ -330,7 +334,7 @@ impl Repository {
                 return Err(DomainError::Conflict("本次执行已取消，请发送新消息".into()));
             }
             let changed = sqlx::query("UPDATE agent_runs SET token_hash=$1,status='running',lease_until=$2,task_attempt=$3,error=NULL,updated_at=$4 WHERE id=$5 AND user_id=$6 AND status!='cancelled' AND (status!='running' OR lease_until<$4 OR (task_attempt IS NOT NULL AND task_attempt!=$3))")
-                .bind(auth::hash_token(&token)).bind(now()+RUN_LEASE).bind(task_attempt).bind(now()).bind(&id).bind(user_id)
+                .bind(auth::hash_token(&token)).bind(now()+AGENT_RUN_LEASE_SECONDS).bind(task_attempt).bind(now()).bind(&id).bind(user_id)
                 .execute(&mut *tx).await?.rows_affected();
             if changed != 1 {
                 return Err(DomainError::Conflict(
@@ -488,7 +492,7 @@ impl Repository {
         if sequence != next {
             return Err(DomainError::Conflict("执行事件顺序无效".into()));
         }
-        if count >= if scope=="chat" {MAX_CHAT_ATTEMPT_EVENTS} else {MAX_ATTEMPT_EVENTS} {
+        if count >= if scope=="chat" {AGENT_CHAT_EVENT_LIMIT} else {AGENT_TASK_EVENT_LIMIT} {
             return Err(DomainError::Validation(
                 "本次执行事件已达上限，请重试".into(),
             ));

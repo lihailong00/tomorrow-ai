@@ -34,7 +34,7 @@ import {
 } from './src/screens/Main';
 import { ChatScreen, ConversationsScreen, createChatEntryState } from './src/screens/Chat';
 import { UploadsScreen } from './src/screens/Uploads';
-import { IntegrationsScreen } from './src/features/integrations/IntegrationsScreen';
+import { IntegrationsScreen, type ConnectionBrowseState } from './src/features/integrations/IntegrationsScreen';
 import { CapabilitiesScreen } from './src/features/capabilities/CapabilitiesScreen';
 import { capabilityAppearance } from './src/features/capabilities/model';
 import { TodosScreen } from './src/features/todos/TodosScreen';
@@ -256,6 +256,9 @@ function Application() {
   }, [booting, resetRoutes]);
   useEffect(() => {
     const listener = BackHandler.addEventListener('hardwareBackPress', () => {
+      // Connection details and search own their internal back stack, including
+      // after a device/health route remounts the listeners in a different order.
+      if (route.name === 'integrations') return false;
       if (depth > 1) {
         back();
         return true;
@@ -267,7 +270,7 @@ function Application() {
       return false;
     });
     return () => listener.remove();
-  }, [depth, tab, session, back]);
+  }, [depth, tab, session, back, route.name]);
   const savePreferences = async (next: Preferences) => {
     const changed = next.serverUrl !== preferences.serverUrl || next.instance?.id !== preferences.instance?.id;
     if (changed) {
@@ -418,9 +421,28 @@ function Application() {
       case 'uploads':
         page = <UploadsScreen />;
         break;
-      case 'integrations':
-        page = <IntegrationsScreen />;
+      case 'integrations': {
+        const connectionsEntry = getEntryState(scope => ({
+          api,
+          userId: session.user.id,
+          isRetained: scope.isRetained,
+          browse: { category: 'local', query: '', managing: false } as ConnectionBrowseState,
+        }));
+        if (connectionsEntry.api !== api || connectionsEntry.userId !== session.user.id) {
+          connectionsEntry.api = api;
+          connectionsEntry.userId = session.user.id;
+          connectionsEntry.browse = { category: 'local', query: '', managing: false };
+        }
+        page = <IntegrationsScreen
+          browseState={connectionsEntry.browse}
+          onBrowseStateChange={next => {
+            if (connectionsEntry.isRetained() && connectionsEntry.api === api && connectionsEntry.userId === session.user.id) {
+              connectionsEntry.browse = next;
+            }
+          }}
+        />;
         break;
+      }
       case 'health':
         page = <HealthScreen key={session.user.id + preferences.serverUrl} initialReceipt={route.receipt} />;
         break;
@@ -503,7 +525,7 @@ function Application() {
             barStyle="dark-content"
             backgroundColor={chatSurface ? chatAppearance.surface : capabilitiesSurface ? capabilityAppearance.background : colors.background}
           />
-          {route.name !== 'health' && <View
+          {route.name !== 'health' && route.name !== 'integrations' && <View
             testID="application-header"
             style={[s.header, chatSurface && shell.chatHeader, compactChatHeader && shell.hiddenHeader]}
           >

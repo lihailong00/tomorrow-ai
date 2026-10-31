@@ -18,6 +18,15 @@ use temporalio_sdk::{
 };
 use tomorrow_domain::ClaimedTask;
 
+fn task_execution_options() -> ActivityOptions {
+    // Leave room for Pi's execution limit and the Rust HTTP/cleanup margin.
+    let mut options = ActivityOptions::start_to_close_timeout(Duration::from_secs(
+        tomorrow_domain::agent::AGENT_EXECUTION_TIMEOUT_SECONDS + 120,
+    ));
+    options.heartbeat_timeout = Some(Duration::from_secs(20));
+    options
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct JobReference {
     user_id: String,
@@ -121,11 +130,9 @@ impl TaskQueueWorkflow {
                 )
                 .await?;
             if let Some(job) = job {
-                let mut options = ActivityOptions::start_to_close_timeout(Duration::from_secs(120));
-                options.heartbeat_timeout = Some(Duration::from_secs(20));
                 // Business retry/backoff is persisted in tasks. A retried activity either sees its
                 // original live lease or returns false, then a later claim recovers the task.
-                ctx.execute_activity(TaskActivities::execute, job, options)
+                ctx.execute_activity(TaskActivities::execute, job, task_execution_options())
                     .await?;
             } else {
                 ctx.timer(Duration::from_secs(2)).await;
@@ -134,6 +141,25 @@ impl TaskQueueWorkflow {
         // Bound history growth for this long-running dispatcher without nondeterministic state.
         ctx.continue_as_new((), ContinueAsNewOptions::default())?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use temporalio_sdk::ActivityCloseTimeouts;
+
+    #[test]
+    fn research_activity_allows_the_agent_deadline_with_heartbeat_protection() {
+        let options = task_execution_options();
+        let ActivityCloseTimeouts::StartToClose(duration) = options.close_timeouts else {
+            panic!("task execution must retain a start-to-close deadline");
+        };
+        assert!(duration.as_secs() > tomorrow_domain::agent::AGENT_HTTP_TIMEOUT_SECONDS);
+        assert!(duration.as_secs() > tomorrow_domain::agent::AGENT_RUN_LEASE_SECONDS as u64);
+        assert_eq!(duration, Duration::from_secs(1320));
+        assert_eq!(options.heartbeat_timeout, Some(Duration::from_secs(20)));
+        assert_eq!(crate::LEASE_SECONDS, 90);
     }
 }
 

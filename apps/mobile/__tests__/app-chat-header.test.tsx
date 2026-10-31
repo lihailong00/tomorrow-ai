@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  BackHandler,
   DeviceEventEmitter,
   Dimensions,
   StyleSheet,
@@ -72,11 +73,17 @@ jest.mock('../src/screens/Main', () => ({
   HomeScreen: () => {
     const { createElement } = require('react');
     const { navigate } = require('../src/app/context').useApp();
-    const { Pressable } = require('react-native');
-    return createElement(Pressable, {
-      accessibilityLabel: '打开测试对话',
-      onPress: () => navigate({ name: 'chat' }),
-    });
+    const { Pressable, View } = require('react-native');
+    return createElement(View, null,
+      createElement(Pressable, {
+        accessibilityLabel: '打开测试对话',
+        onPress: () => navigate({ name: 'chat' }),
+      }),
+      createElement(Pressable, {
+        accessibilityLabel: '打开测试连接',
+        onPress: () => navigate({ name: 'integrations' }),
+      }),
+    );
   },
   ModeNotice: () => null,
   usePagedList: () => ({ items: [], loading: false, hasMore: false }),
@@ -84,7 +91,46 @@ jest.mock('../src/screens/Main', () => ({
 jest.mock('../src/screens/Account', () => ({}));
 jest.mock('../src/screens/Details', () => ({}));
 jest.mock('../src/screens/Uploads', () => ({}));
-jest.mock('../src/features/integrations/IntegrationsScreen', () => ({}));
+jest.mock('../src/features/integrations/IntegrationsScreen', () => ({
+  IntegrationsScreen: ({ browseState, onBrowseStateChange }: any) => {
+    const { createElement, useEffect, useState } = require('react');
+    const { BackHandler: NativeBackHandler, Pressable, View } = require('react-native');
+    const { back, navigate } = require('../src/app/context').useApp();
+    const [localQuery, setLocalQuery] = useState(browseState?.query || '');
+    useEffect(() => {
+      const subscription = NativeBackHandler.addEventListener('hardwareBackPress', () => {
+        if (localQuery) {
+          setLocalQuery('');
+          onBrowseStateChange?.({ ...browseState, query: '' });
+        } else back();
+        return true;
+      });
+      return () => subscription.remove();
+    }, [localQuery, back, browseState, onBrowseStateChange]);
+    return createElement(View, null,
+      createElement(View, { accessibilityLabel: '连接分类：' + (browseState?.category || 'unknown') + '，搜索：' + localQuery }),
+      createElement(Pressable, {
+        accessibilityLabel: '浏览设备并打开健康测试',
+        onPress: () => {
+          onBrowseStateChange?.({ category: 'devices', query: '华为', managing: false });
+          navigate({ name: 'health' });
+        },
+      }),
+      createElement(Pressable, {
+        accessibilityLabel: '返回连接入口',
+        onPress: back,
+      }),
+    );
+  },
+}));
+jest.mock('../src/features/health/HealthScreen', () => ({
+  HealthScreen: () => {
+    const { createElement } = require('react');
+    const { Pressable } = require('react-native');
+    const { back } = require('../src/app/context').useApp();
+    return createElement(Pressable, { accessibilityLabel: '返回设备连接测试', onPress: back });
+  },
+}));
 jest.mock('../src/features/ai-history/AiHistoryScreen', () => ({}));
 
 beforeAll(() => {
@@ -97,6 +143,71 @@ const button = (root: ReactTestInstance, label: string) =>
       node.props.accessibilityLabel === label &&
       typeof node.props.onPress === 'function',
   )[0];
+
+test('the connection centre owns one navigation header and restores the application header on return', async () => {
+  let tree!: ReactTestRenderer;
+  await act(async () => { tree = create(<App />); });
+  try {
+    expect(tree.root.findAll(node => node.props.testID === 'application-header').length).toBeGreaterThan(0);
+    await act(async () => button(tree.root, '打开测试连接').props.onPress());
+    expect(tree.root.findAll(node => node.props.testID === 'application-header')).toHaveLength(0);
+    expect(button(tree.root, '返回连接入口')).toBeDefined();
+    await act(async () => button(tree.root, '返回连接入口').props.onPress());
+    expect(tree.root.findAll(node => node.props.testID === 'application-header').length).toBeGreaterThan(0);
+    expect(button(tree.root, '打开测试连接')).toBeDefined();
+  } finally {
+    await act(async () => tree.unmount());
+  }
+});
+
+test('returning from health restores connection browsing without retaining it after the route is closed', async () => {
+  let tree!: ReactTestRenderer;
+  await act(async () => { tree = create(<App />); });
+  const hasBrowse = (label: string) => tree.root.findAll(node => node.props.accessibilityLabel === label).length > 0;
+  try {
+    await act(async () => button(tree.root, '打开测试连接').props.onPress());
+    expect(hasBrowse('连接分类：local，搜索：')).toBe(true);
+    await act(async () => button(tree.root, '浏览设备并打开健康测试').props.onPress());
+    await act(async () => button(tree.root, '返回设备连接测试').props.onPress());
+    expect(hasBrowse('连接分类：devices，搜索：华为')).toBe(true);
+    await act(async () => button(tree.root, '返回连接入口').props.onPress());
+    await act(async () => button(tree.root, '打开测试连接').props.onPress());
+    expect(hasBrowse('连接分类：local，搜索：')).toBe(true);
+  } finally {
+    await act(async () => tree.unmount());
+  }
+});
+
+test('hardware back lets the remounted connection screen clear its query before leaving the route', async () => {
+  const listeners: { active: boolean; handler: () => boolean | null | undefined }[] = [];
+  const subscribe = jest.spyOn(BackHandler, 'addEventListener').mockImplementation((_event, handler) => {
+    const entry = { active: true, handler };
+    listeners.push(entry);
+    return { remove: () => { entry.active = false; } };
+  });
+  const pressBack = () => {
+    for (const listener of [...listeners].reverse()) {
+      if (listener.active && listener.handler()) return true;
+    }
+    return false;
+  };
+  let tree!: ReactTestRenderer;
+  await act(async () => { tree = create(<App />); });
+  try {
+    await act(async () => button(tree.root, '打开测试连接').props.onPress());
+    await act(async () => button(tree.root, '浏览设备并打开健康测试').props.onPress());
+    await act(async () => button(tree.root, '返回设备连接测试').props.onPress());
+    expect(tree.root.findAll(node => node.props.accessibilityLabel === '连接分类：devices，搜索：华为').length).toBeGreaterThan(0);
+    await act(async () => { expect(pressBack()).toBe(true); });
+    expect(button(tree.root, '返回连接入口')).toBeDefined();
+    expect(tree.root.findAll(node => node.props.accessibilityLabel === '连接分类：devices，搜索：').length).toBeGreaterThan(0);
+    await act(async () => { expect(pressBack()).toBe(true); });
+    expect(button(tree.root, '打开测试连接')).toBeDefined();
+  } finally {
+    await act(async () => tree.unmount());
+    subscribe.mockRestore();
+  }
+});
 
 test('a short keyboard viewport moves navigation into the composer and restores its header without remounting the draft', async () => {
   let tree!: ReactTestRenderer;

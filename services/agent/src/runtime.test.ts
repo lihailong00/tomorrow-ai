@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import type { StreamFn } from '@earendil-works/pi-agent-core';
-import type { AssistantMessage } from '@earendil-works/pi-ai';
+import type { AssistantMessage, Message } from '@earendil-works/pi-ai';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 import { resolveModel } from './config.js';
 import { executeRun, RunError, safeToolResult, validateRun, type Bridge, type RunEvent, type RunInput } from './runtime.js';
@@ -324,6 +324,46 @@ test('without search configuration Pi is told truthfully that no web tools are a
     fakeStream([final], value => { contexts.push(JSON.stringify(value)); }));
   assert.ok(contexts[0]?.includes('当前未配置联网搜索'));
   assert.equal(contexts[0]?.includes('已提供 web_search'), false);
+});
+
+test('the real Pi loop completes 100 searches plus 100 reads beyond the old tool, turn and task-event caps', { timeout: 15000 }, async () => {
+  const fixture = bridge(); let searches = 0, fetches = 0;
+  const replies: AssistantMessage['content'][] = [];
+  for (let i = 1; i <= 100; i++) {
+    replies.push([{ type: 'toolCall', id: `research-search-${i}`, name: 'web_search', arguments: { query: `synthetic notice ${i}` } }]);
+    replies.push([{ type: 'toolCall', id: `research-fetch-${i}`, name: 'web_fetch', arguments: { url: `https://www.chinaamc.com/fixture-${i}` } }]);
+  }
+  replies.push([{ type: 'text', text: 'Completed the 100 synthetic searches and 100 synthetic page reads.' }]);
+  const web = createDeepSeekWeb({ apiKey: 'never-paid-fixture-key', searches: 100, fetches: 100 }, async url => {
+    if (String(url).endsWith('/search')) { searches++; return Response.json({ results: [] }); }
+    fetches++; return Response.json({ title: 'Synthetic notice', content: 'This is synthetic local test data.' });
+  });
+  let observedInitialBudget = false, observedFinalBudget = false, observedRequests = 0;
+  const result = await executeRun({ ...input(), scope: 'task' }, settings, fixture.value, undefined, undefined,
+    fakeStream(replies, context => {
+      const messages = (context as { messages: Message[] }).messages;
+      if (observedRequests++ === 0) observedInitialBudget = JSON.stringify(context).includes('最多搜索 100 次、网页读取 100 次');
+      const last = messages.at(-1);
+      if (last?.role === 'toolResult' && last.toolCallId === 'research-fetch-100') {
+        const part = last.content.find(item => item.type === 'text');
+        if (part?.type === 'text') {
+          const budget = JSON.parse(part.text).web_budget;
+          observedFinalBudget = budget.search.remaining === 0 && budget.fetch.remaining === 0;
+        }
+      }
+    }), web);
+  assert.equal(searches, 100); assert.equal(fetches, 100);
+  assert.equal(result.usage.web_search_requests, 100); assert.equal(result.usage.web_fetch_requests, 100);
+  assert.equal(result.usage.tool_calls, 200); assert.equal(result.usage.model_requests, 201);
+  assert.equal(observedRequests, 201);
+  assert.equal(fixture.effects.length, 0);
+  assert.equal(fixture.events.filter(event => event.kind === 'tool_start').length, 200);
+  assert.equal(fixture.events.filter(event => event.kind === 'tool_end').length, 200);
+  assert.ok(fixture.events.length > 500); assert.ok(fixture.events.length <= 2000);
+  assert.equal(fixture.events.at(-1)?.kind, 'finished');
+  assert.equal(fixture.events.at(-1)?.body.web_search_requests, 100);
+  assert.equal(observedInitialBudget, true); assert.equal(observedFinalBudget, true);
+  assert.equal(JSON.stringify(fixture.events).includes('never-paid-fixture-key'), false);
 });
 
 test('web tool schema validation and total tool budget stop API calls before dispatch', async () => {

@@ -21,6 +21,7 @@ import type { LocalFile } from '../platform/ports';
 import { normalizePhoneNumber } from '../domain/phone';
 import { validatePassword } from '../domain/password';
 import { readChatSse, type SseEvent } from './chatSse';
+import { CHAT_REQUEST_TIMEOUT_MS } from './chatTimeout';
 
 export type PhoneCodeChallenge = {
   challenge_id: string;
@@ -126,7 +127,9 @@ export class ApiClient {
         ? 85000 // Health refresh + paged reads have an 80s total server deadline.
         : personalMcpRequest
         ? 50000 // Includes MCP initialization, tool discovery and the bounded provider call.
-        : path === '/chat' || path === '/todos/extract' || path.endsWith('/transcribe')
+        : path === '/chat'
+        ? CHAT_REQUEST_TIMEOUT_MS
+        : path === '/todos/extract' || path.endsWith('/transcribe')
         ? 120000
         : multipart
         ? 60000

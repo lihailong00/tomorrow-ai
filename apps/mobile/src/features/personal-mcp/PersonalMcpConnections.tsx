@@ -32,13 +32,26 @@ import type {
 let nextSession = 0;
 
 /** Remount the credential form synchronously when the authenticated API changes. */
-export function PersonalMcpConnections() {
+export function PersonalMcpConnections({
+  providerId,
+  onConnectionChange,
+}: {
+  providerId?: string;
+  onConnectionChange?: (item: PersonalMcpConnection) => void;
+} = {}) {
   const { api, user } = useApp();
   const session = useMemo(
     () => ({ id: ++nextSession, api, userId: user?.id }),
-    [api, user?.id],
+    [api, user?.id, providerId],
   );
-  return user ? <ConnectionsSession key={session.id} api={api} /> : null;
+  return user ? (
+    <ConnectionsSession
+      key={session.id}
+      api={api}
+      providerId={providerId}
+      onConnectionChange={onConnectionChange}
+    />
+  ) : null;
 }
 
 const statusLabels: Record<PersonalMcpConnection['status'], string> = {
@@ -48,7 +61,15 @@ const statusLabels: Record<PersonalMcpConnection['status'], string> = {
   needs_reconnect: '需要重新连接',
 };
 
-function ConnectionsSession({ api }: { api: ApiClient }) {
+function ConnectionsSession({
+  api,
+  providerId,
+  onConnectionChange,
+}: {
+  api: ApiClient;
+  providerId?: string;
+  onConnectionChange?: (item: PersonalMcpConnection) => void;
+}) {
   const scope = useMemo(
     () => ({
       active: false,
@@ -80,9 +101,13 @@ function ConnectionsSession({ api }: { api: ApiClient }) {
 
   const receiveCatalog = useCallback(
     (catalog: PersonalMcpConnection[]) => {
-      scope.catalog = catalog;
-      setItems(catalog);
-      const selectedItem = catalog.find(item => item.id === scope.selectedId);
+      const visible = providerId
+        ? catalog.filter(item => item.id === providerId)
+        : catalog;
+      scope.catalog = visible;
+      setItems(visible);
+      visible.forEach(item => onConnectionChange?.(item));
+      const selectedItem = visible.find(item => item.id === scope.selectedId);
       if (
         scope.selectedId &&
         (!selectedItem || selectedItem.status === 'not_configured')
@@ -94,11 +119,17 @@ function ConnectionsSession({ api }: { api: ApiClient }) {
         setTools([]);
       }
     },
-    [scope],
+    [scope, providerId, onConnectionChange],
   );
 
   const refresh = useCallback(async () => {
     if (!scope.active || scope.refreshing || mutation.current) return;
+    if (providerId === 'alipay') {
+      receiveCatalog([]);
+      setActions([]);
+      setLoading(false);
+      return;
+    }
     scope.refreshing = true;
     const sequence = ++scope.refreshSequence;
     setLoading(true);
@@ -108,11 +139,16 @@ function ConnectionsSession({ api }: { api: ApiClient }) {
     if (result[0].status === 'fulfilled') {
       receiveCatalog(result[0].value.items);
     }
-    if (result[1].status === 'fulfilled') setActions(result[1].value.items);
+    if (result[1].status === 'fulfilled')
+      setActions(
+        providerId
+          ? result[1].value.items.filter(item => item.provider === providerId)
+          : result[1].value.items,
+      );
     const failed = result.find(value => value.status === 'rejected');
     setError(failed?.status === 'rejected' ? errorMessage(failed.reason) : '');
     setLoading(false);
-  }, [client, scope, receiveCatalog]);
+  }, [client, scope, receiveCatalog, providerId]);
 
   useEffect(() => {
     if (scope.controller.signal.aborted)
@@ -162,6 +198,7 @@ function ConnectionsSession({ api }: { api: ApiClient }) {
       value.id === item.id ? item : value,
     );
     setItems(scope.catalog);
+    onConnectionChange?.(item);
     setToolOwner(null);
     setTools([]);
   };
@@ -360,7 +397,7 @@ function ConnectionsSession({ api }: { api: ApiClient }) {
   return (
     <View testID="personal-mcp-connections">
       <Section
-        title="我的账号"
+        title={providerId ? '账号授权与管理' : '我的账号'}
         action={loading ? '正在刷新' : '刷新连接'}
         onAction={() => {
           void refresh();
@@ -377,7 +414,18 @@ function ConnectionsSession({ api }: { api: ApiClient }) {
         }}
       />
       {notice ? <Notice>{notice}</Notice> : null}
-      <AlipayWalletConnection api={api} />
+      {!providerId || providerId === 'alipay' ? (
+        <AlipayWalletConnection api={api} />
+      ) : null}
+      {providerId &&
+      providerId !== 'alipay' &&
+      !loading &&
+      !items.length &&
+      !error ? (
+        <Notice>
+          当前服务器尚未提供这项账号连接，请联系服务管理员确认开通情况。
+        </Notice>
+      ) : null}
       {items.map(item => (
         <Card key={item.id}>
           <View style={s.between}>
@@ -580,7 +628,7 @@ function ConnectionsSession({ api }: { api: ApiClient }) {
           )}
         </Card>
       ))}
-      {!loading && !error && !items.length && (
+      {!providerId && !loading && !error && !items.length && (
         <Card>
           <Text style={s.body}>当前服务器尚未提供个人账号连接。</Text>
         </Card>

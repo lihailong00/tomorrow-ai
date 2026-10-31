@@ -90,6 +90,33 @@ async function setup(existing?: string, initial: Message[] = []) {
   };
 }
 
+test('a long research turn preserves one native request and its optimistic rows beyond the old150s deadline', async () => {
+  const app = await setup();
+  await app.type('original intent');
+  const { pending } = await app.begin();
+  const xhr = NativeStream.all[0];
+  const originalBody = xhr.body;
+  await app.event(1, 'accepted', accepted);
+  await app.event(2, 'tool_start', { tool: 'web_search', tool_call_id: 'research-search' });
+  const before = app.entry().getSnapshot().messages;
+  await act(async () => { await jest.advanceTimersByTimeAsync(151000); });
+  expect(app.entry().getSnapshot().sending).toBe(true);
+  expect(app.text()).toContain('正在搜索…');
+  expect(app.entry().getSnapshot().messages).toBe(before);
+  expect(NativeStream.all).toHaveLength(1);
+  expect(xhr.aborted).toBe(false);
+  await act(async () => { await jest.advanceTimersByTimeAsync(1049000); });
+  await app.event(3, 'text_delta', { delta: '第一段\n\n最终回复', turn: 0 });
+  await app.event(4, 'done', { response });
+  await pending;
+  expect(app.entry().getSnapshot().sending).toBe(false);
+  expect(app.entry().getSnapshot().messages).toHaveLength(2);
+  expect(NativeStream.all).toHaveLength(1);
+  expect(xhr.body).toBe(originalBody);
+  expect(JSON.parse(xhr.body)).toMatchObject({ message: 'original intent' });
+  expect(app.text()).toContain('最终回复');
+});
+
 test('send clears immediately, shows one optimistic turn before HTTP completes, and real timed bytes reach the same row before final', async () => {
   const app = await setup(); await app.type('original intent');
   const { pending } = await app.begin();

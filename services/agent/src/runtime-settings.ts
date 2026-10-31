@@ -1,5 +1,6 @@
 import { positiveInteger, resolveModel, rustServiceUrl, type ModelSettings } from './config.js';
 import { resolveWebSettings, type WebSettings } from './web.js';
+import { DEFAULT_LIMITS } from './limits.js';
 
 export type SettingsErrorCode = 'model_not_configured' | 'model_configuration_invalid' |
   'web_configuration_invalid' | 'runtime_configuration_invalid' | 'runtime_config_unavailable';
@@ -29,10 +30,12 @@ const runtimeKeys = new Set([
 ]);
 
 function settingsFromEnv(env: NodeJS.ProcessEnv, revision: string | null): RuntimeSettings {
-  let limits = { turns: 10, tools: 20, timeoutMs: 100000, maxConcurrent: 4 };
+  let limits = { ...DEFAULT_LIMITS, maxConcurrent: 4 };
   try {
-    limits = { turns: positiveInteger(env.AGENT_MAX_TURNS, 10, 20), tools: positiveInteger(env.AGENT_MAX_TOOLS, 20, 40),
-      timeoutMs: positiveInteger(env.AGENT_TIMEOUT_MS, 100000, 105000), maxConcurrent: positiveInteger(env.AGENT_MAX_CONCURRENT, 4, 32) };
+    limits = { turns: positiveInteger(env.AGENT_MAX_TURNS, DEFAULT_LIMITS.turns, DEFAULT_LIMITS.turns),
+      tools: positiveInteger(env.AGENT_MAX_TOOLS, DEFAULT_LIMITS.tools, DEFAULT_LIMITS.tools),
+      timeoutMs: positiveInteger(env.AGENT_TIMEOUT_MS, DEFAULT_LIMITS.timeoutMs, DEFAULT_LIMITS.timeoutMs),
+      maxConcurrent: positiveInteger(env.AGENT_MAX_CONCURRENT, 4, 32) };
   } catch { return { revision, limits, error: 'runtime_configuration_invalid' }; }
   let model: ModelSettings;
   try { model = resolveModel(env); }

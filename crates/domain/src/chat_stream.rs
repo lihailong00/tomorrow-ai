@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::{Any, Row, Transaction};
 
-pub const CHAT_STREAM_LIFETIME_SECONDS: u64 = 125;
+pub const CHAT_STREAM_LIFETIME_SECONDS: u64 = crate::agent::AGENT_EXECUTION_TIMEOUT_SECONDS + 60;
 const RETAINED_EVENTS: i64 = 500;
 
 #[derive(Clone)]

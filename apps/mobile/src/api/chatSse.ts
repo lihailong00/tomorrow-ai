@@ -1,3 +1,5 @@
+import { CHAT_REQUEST_TIMEOUT_MS } from './chatTimeout';
+
 export type SseEvent = { id: number; event: string; data: Record<string, any> };
 
 /** SSE framing is incremental; the native transport already decodes UTF-8. */
@@ -140,7 +142,7 @@ export function readChatSse(options: StreamOptions): Promise<void> {
     };
     xhr.open('POST', options.url, true);
     xhr.withCredentials = false;
-    xhr.timeout = 150000;
+    xhr.timeout = CHAT_REQUEST_TIMEOUT_MS;
     Object.entries(options.headers).forEach(([name, value]) => xhr.setRequestHeader(name, value));
     xhr.onreadystatechange = consume;
     xhr.onprogress = consume;

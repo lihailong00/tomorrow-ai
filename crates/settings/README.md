@@ -43,7 +43,12 @@ and fragments are rejected, including in environment overrides. This exception
 does not apply to webpages or URLs supplied by model output. An explicit private
 `MODEL_BASE_URL` plus `MODEL_NAME` supports a keyless local model without borrowing
 any cloud credential; public endpoints still require their own Key. The four Pi
-startup limits are marked as requiring restart.
+runtime limits take effect on the next Pi execution when runtime configuration is
+enabled. Search and webpage reads default to independent limits of 100 each;
+the coordinated default/max policy is 240 total tools, 256 model turns and
+1,200,000 milliseconds per execution. Concurrency remains 4 by default, at most
+32. Explicit stored or environment values retain precedence; upgrades do not
+silently replace an administrator's smaller limits.
 
 ## Secrets and restoration
 

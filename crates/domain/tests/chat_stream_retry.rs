@@ -1,5 +1,6 @@
 use serde_json::json;
 use tomorrow_domain::{
+    agent::AGENT_TASK_EVENT_LIMIT,
     new_id, now, timestamp, ChatTurn, Conversation, DomainError, Message, Repository,
 };
 
@@ -264,7 +265,7 @@ async fn postgres_restart_explicit_retry_reuses_effects_and_fences_stale_produce
 }
 
 #[tokio::test]
-async fn task_attempt_budget_stays_500_and_rejects_chat_text_callbacks() {
+async fn research_task_event_budget_is_bounded_and_rejects_chat_text_callbacks() {
     let repo = Repository::connect("sqlite::memory:").await.unwrap();
     let owner = repo
         .create_user(
@@ -307,13 +308,13 @@ async fn task_attempt_budget_stays_500_and_rejects_chat_text_callbacks() {
         )
         .await
         .unwrap();
-    for sequence in 1..=500 {
+    for sequence in 1..=AGENT_TASK_EVENT_LIMIT {
         repo.record_agent_event(&run.id, &run.token, sequence, "turn", &json!({}))
             .await
             .unwrap();
     }
     assert!(matches!(
-        repo.record_agent_event(&run.id, &run.token, 501, "turn", &json!({}))
+        repo.record_agent_event(&run.id, &run.token, AGENT_TASK_EVENT_LIMIT+1, "turn", &json!({}))
             .await,
         Err(DomainError::Validation(_))
     ));
@@ -321,7 +322,7 @@ async fn task_attempt_budget_stays_500_and_rejects_chat_text_callbacks() {
         repo.record_agent_event(
             &run.id,
             &run.token,
-            501,
+            AGENT_TASK_EVENT_LIMIT+1,
             "text_delta",
             &json!({"turn":1,"delta":"not task output"})
         )

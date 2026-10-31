@@ -1,6 +1,13 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Alert,
+  BackHandler,
   Image,
   Pressable,
   RefreshControl,
@@ -36,6 +43,12 @@ import { importDraft, integrationsApi } from './api';
 import type { ImportedContent, Integration, IntegrationResult } from './types';
 import { extractTodos } from '../todos/api';
 import { PersonalMcpConnections } from '../personal-mcp/PersonalMcpConnections';
+import {
+  ConnectionsHub,
+  type ConnectionBrowseState,
+  type IntegrationToolOptions,
+} from './ConnectionsHub';
+export type { ConnectionBrowseState } from './ConnectionsHub';
 
 type Tab = 'apps' | 'inbox' | 'library';
 const sourceNames: Record<string, string> = Object.fromEntries([
@@ -106,14 +119,79 @@ function useRequestScope(api: ApiClient, userId?: string) {
   return scope;
 }
 
-export function IntegrationsScreen() {
+let nextConnectionSession = 0;
+export function IntegrationsScreen({
+  browseState,
+  onBrowseStateChange,
+}: {
+  browseState?: ConnectionBrowseState;
+  onBrowseStateChange?: (state: ConnectionBrowseState) => void;
+} = {}) {
+  const { api, user } = useApp();
+  const session = useMemo(() => ++nextConnectionSession, [api, user?.id]);
+  return (
+    <IntegrationNavigation
+      key={session}
+      browseState={browseState}
+      onBrowseStateChange={onBrowseStateChange}
+    />
+  );
+}
+
+function IntegrationNavigation({
+  browseState,
+  onBrowseStateChange,
+}: {
+  browseState?: ConnectionBrowseState;
+  onBrowseStateChange?: (state: ConnectionBrowseState) => void;
+}) {
+  const [tools, setTools] = useState<IntegrationToolOptions | null>(null);
+  const browse = useRef(browseState);
+  const saveBrowse = useCallback(
+    (value: ConnectionBrowseState) => {
+      browse.current = value;
+      onBrowseStateChange?.(value);
+    },
+    [onBrowseStateChange],
+  );
+  useEffect(() => {
+    if (!tools) return;
+    const listener = BackHandler.addEventListener('hardwareBackPress', () => {
+      setTools(null);
+      return true;
+    });
+    return () => listener.remove();
+  }, [tools]);
+  return tools ? (
+    <IntegrationTools
+      key={JSON.stringify(tools)}
+      options={tools}
+      onBack={() => setTools(null)}
+    />
+  ) : (
+    <ConnectionsHub
+      onOpenTools={setTools}
+      browseState={browse.current}
+      onBrowseStateChange={saveBrowse}
+    />
+  );
+}
+
+/** Existing import and service operations remain separate from the discovery list. */
+export function IntegrationTools({
+  options = {},
+  onBack,
+}: {
+  options?: IntegrationToolOptions;
+  onBack: () => void;
+}) {
   const { api, navigate, user } = useApp();
   const scope = useRequestScope(api, user?.id);
   const client = useMemo(
     () => integrationsApi(api, () => scope.controller.signal),
     [api, scope],
   );
-  const [tab, setTab] = useState<Tab>('apps');
+  const [tab, setTab] = useState<Tab>(options.tab || 'apps');
   const [status, setStatus] = useState<AppInputStatus | null>(null);
   const [pending, setPending] = useState<AppInputItem[]>([]);
   const [catalog, setCatalog] = useState<Integration[]>([]);
@@ -123,16 +201,18 @@ export function IntegrationsScreen() {
   const [cloudError, setCloudError] = useState('');
   const [notice, setNotice] = useState('');
   const [showOtherApps, setShowOtherApps] = useState(false);
-  const [advanced, setAdvanced] = useState(false);
-  const [source, setSource] = useState('shared');
-  const [composer, setComposer] = useState(false);
+  const [advanced, setAdvanced] = useState(options.section === 'cloud');
+  const [source, setSource] = useState(options.source || 'shared');
+  const [composer, setComposer] = useState(Boolean(options.source));
   const [pendingImageImport, setPendingImageImport] = useState<string | null>(
     null,
   );
   const [title, setTitle] = useState('');
   const [text, setText] = useState('');
   const [url, setUrl] = useState('');
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(
+    options.cloudId && options.cloudId !== '*' ? options.cloudId : null,
+  );
   const discoveryRequests = useMemo(
     () => ({ owner: scope, values: new Map<string, string>() }),
     [scope],
@@ -333,10 +413,7 @@ export function IntegrationsScreen() {
         item.text,
         item.url,
       );
-      const imported = await client.importContent({
-        ...input,
-        external_id: item.id,
-      });
+      const imported = await client.importContent({ ...input, external_id: item.id });
       if (!scope.active) {
         return;
       }
@@ -466,15 +543,27 @@ export function IntegrationsScreen() {
         />
       }
     >
-      <Text style={s.title}>我的连接</Text>
-      <Text style={s.subtitle}>连接自己的账号，把日常里的重要信息带给妥啦。</Text>
-      <Card>
-        <Text style={s.cardTitle}>我的健康</Text>
-        <Text style={[s.small, { marginTop: 6, marginBottom: 12 }]}>
-          连接华为、小米或系统健康数据，按你的授权记录睡眠与运动。
-        </Text>
-        <Button onPress={() => navigate({ name: 'health' })}>健康与穿戴设备</Button>
-      </Card>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="返回我的连接"
+        onPress={onBack}
+        style={v.toolsBack}
+      >
+        <Icon name="back" size={21} />
+        <Text style={s.small}>我的连接</Text>
+      </Pressable>
+      <Text style={s.title}>
+        {options.section === 'cloud'
+          ? '云端服务设置'
+          : tab === 'inbox'
+          ? '待接收'
+          : tab === 'library'
+          ? '已导入'
+          : composer
+          ? '导入内容'
+          : '手机通知与分享'}
+      </Text>
+      <Text style={s.subtitle}>由你确认范围，再把需要的内容交给妥啦。</Text>
       <View style={v.tabs}>
         {(
           [
@@ -545,91 +634,104 @@ export function IntegrationsScreen() {
       )}
       {tab === 'apps' && !composer && (
         <>
-          <PersonalMcpConnections />
-          <Section title="手机通知与分享" />
-          <Card style={v.hero}>
-            <View style={s.row}>
-              <View style={v.heroIcon}>
-                <Icon name="sparkles" size={22} color={colors.action} />
-              </View>
-              <View style={[s.fill, { marginLeft: 12 }]}>
-                <Text style={s.cardTitle}>由你决定，哪些值得记住</Text>
-                <Text style={[s.small, { marginTop: 4 }]}>
-                  通知与分享先留在手机，确认后才导入。
-                </Text>
-              </View>
-            </View>
-            {status?.supported ? (
-              <>
-                <Text style={[s.body, { marginTop: 16 }]}>
-                  {notifyEnabled
-                    ? '通知使用权已开启，打开下方应用的开关即可。'
-                    : '开启通知使用权，再选择希望妥啦接收的应用。'}
-                </Text>
-                <View style={{ marginTop: 12 }}>
+          {options.section === 'cloud' &&
+          (!options.cloudId || options.cloudId === '*') ? (
+            <PersonalMcpConnections />
+          ) : null}
+          {options.section !== 'cloud' ? (
+            <>
+              <Section title="手机通知与分享" />
+              <Card style={v.hero}>
+                <View style={s.row}>
+                  <View style={v.heroIcon}>
+                    <Icon name="sparkles" size={22} color={colors.action} />
+                  </View>
+                  <View style={[s.fill, { marginLeft: 12 }]}>
+                    <Text style={s.cardTitle}>由你决定，哪些值得记住</Text>
+                    <Text style={[s.small, { marginTop: 4 }]}>
+                      通知与分享先留在手机，确认后才导入。
+                    </Text>
+                  </View>
+                </View>
+                {status?.supported ? (
+                  <>
+                    <Text style={[s.body, { marginTop: 16 }]}>
+                      {notifyEnabled
+                        ? '通知使用权已开启，打开下方应用的开关即可。'
+                        : '开启通知使用权，再选择希望妥啦接收的应用。'}
+                    </Text>
+                    <View style={{ marginTop: 12 }}>
+                      <Button
+                        variant={notifyEnabled ? 'secondary' : 'primary'}
+                        onPress={() => {
+                          void action.run(() =>
+                            appInputs.openNotificationSettings(),
+                          );
+                        }}
+                      >
+                        {notifyEnabled ? '管理通知使用权' : '开启通知使用权'}
+                      </Button>
+                    </View>
+                  </>
+                ) : (
+                  <Text style={[s.body, { marginTop: 14 }]}>
+                    此设备可以先使用文字、链接与文件导入。
+                  </Text>
+                )}
+              </Card>
+              <View style={[s.row, { gap: 10 }]}>
+                <View style={s.fill}>
                   <Button
-                    variant={notifyEnabled ? 'secondary' : 'primary'}
-                    onPress={() => {
-                      void action.run(() =>
-                        appInputs.openNotificationSettings(),
-                      );
-                    }}
+                    variant="secondary"
+                    onPress={() => startImport('shared')}
                   >
-                    {notifyEnabled ? '管理通知使用权' : '开启通知使用权'}
+                    粘贴文字 / 链接
                   </Button>
                 </View>
-              </>
-            ) : (
-              <Text style={[s.body, { marginTop: 14 }]}>
-                此设备可以先使用文字、链接与文件导入。
+                <View style={s.fill}>
+                  <Button
+                    variant="secondary"
+                    loading={action.busy}
+                    onPress={() => {
+                      void uploadFile();
+                    }}
+                  >
+                    选取文件
+                  </Button>
+                </View>
+              </View>
+              <Text style={[s.small, { marginTop: 12 }]}>
+                在其他应用中选择“分享 →
+                妥啦”，也可以把支持分享的文字、链接或文件放进“待接收”。无法分享的内容可以复制后粘贴。
               </Text>
-            )}
-          </Card>
-          <View style={[s.row, { gap: 10 }]}>
-            <View style={s.fill}>
-              <Button variant="secondary" onPress={() => startImport('shared')}>
-                粘贴文字 / 链接
-              </Button>
-            </View>
-            <View style={s.fill}>
-              <Button
-                variant="secondary"
-                loading={action.busy}
-                onPress={() => {
-                  void uploadFile();
-                }}
-              >
-                选取文件
-              </Button>
-            </View>
-          </View>
-          <Text style={[s.small, { marginTop: 12 }]}>
-            在其他应用中选择“分享 →
-            妥啦”，也可以把支持分享的文字、链接或文件放进“待接收”。无法分享的内容可以复制后粘贴。
-          </Text>
-          <Section
-            title={
-              installed.length
-                ? '手机上的应用 · ' + installed.length
-                : '支持的应用'
-            }
-            action={showOtherApps ? '收起' : '查看全部'}
-            onAction={() => setShowOtherApps(value => !value)}
-          />
-          {visibleApps.map(renderApp)}
-          {!visibleApps.length && !showOtherApps && (
-            <Card>
-              <Text style={s.body}>
-                暂未识别到支持的应用。你仍可查看全部应用，粘贴内容或选择文件。
+              <Section
+                title={
+                  installed.length
+                    ? '手机上的应用 · ' + installed.length
+                    : '支持的应用'
+                }
+                action={showOtherApps ? '收起' : '查看全部'}
+                onAction={() => setShowOtherApps(value => !value)}
+              />
+              {visibleApps.map(renderApp)}
+              {!visibleApps.length && !showOtherApps && (
+                <Card>
+                  <Text style={s.body}>
+                    暂未识别到支持的应用。你仍可查看全部应用，粘贴内容或选择文件。
+                  </Text>
+                  <Button
+                    variant="ghost"
+                    onPress={() => setShowOtherApps(true)}
+                  >
+                    查看支持的应用
+                  </Button>
+                </Card>
+              )}
+              <Text style={s.small}>
+                只接收开启后应用提供的新通知摘要，不会读取完整聊天记录。验证码与安全验证类通知会被过滤。关闭开关即可停止接收。
               </Text>
-              <Button variant="ghost" onPress={() => setShowOtherApps(true)}>
-                查看支持的应用
-              </Button>
-            </Card>
-          )}
-          <Text style={s.small}>
-            只接收开启后应用提供的新通知摘要，不会读取完整聊天记录。验证码与安全验证类通知会被过滤。关闭开关即可停止接收。
-          </Text>
+            </>
+          ) : null}
           <Section
             title="更多连接方式"
             action={advanced ? '收起' : '展开'}
@@ -647,7 +749,13 @@ export function IntegrationsScreen() {
                 }}
               />
               {catalog
-                .filter(item => item.mode !== 'import')
+                .filter(
+                  item =>
+                    item.mode !== 'import' &&
+                    (!options.cloudId ||
+                      options.cloudId === '*' ||
+                      item.id === options.cloudId),
+                )
                 .map(item => (
                   <Card key={item.id}>
                     <Pressable
@@ -1262,6 +1370,14 @@ export function CloudConnection({
 }
 
 const v = StyleSheet.create({
+  toolsBack: {
+    minHeight: 46,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    alignSelf: 'flex-start',
+    marginBottom: 12,
+  },
   tabs: {
     flexDirection: 'row',
     backgroundColor: '#E9EDF6',

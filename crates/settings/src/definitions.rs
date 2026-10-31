@@ -113,14 +113,14 @@ pub static DEFINITIONS: &[SettingDefinition] = &[
         "search",
         "每次任务最多搜索次数",
         "number",
-        "4"
+        "100"
     ),
     item!(
         "AGENT_MAX_WEB_FETCHES",
         "search",
         "每次任务最多网页读取次数",
         "number",
-        "4"
+        "100"
     ),
     item!(select "PHONE_AUTH_MODE","sms","短信验证码服务","disabled","disabled","aliyun_pnvs"),
     item!(secret "ALIBABA_CLOUD_ACCESS_KEY_ID","sms","阿里云 AccessKey ID"),
@@ -242,21 +242,21 @@ pub static DEFINITIONS: &[SettingDefinition] = &[
         "limits",
         "每次任务最多模型轮次",
         "number",
-        "10"
+        "256"
     ),
     item!(
         "AGENT_MAX_TOOLS",
         "limits",
         "每次任务最多工具调用",
         "number",
-        "20"
+        "240"
     ),
     item!(
         "AGENT_TIMEOUT_MS",
         "limits",
         "任务最长执行时间（毫秒）",
         "number",
-        "100000"
+        "1200000"
     ),
     item!(
         "AGENT_MAX_CONCURRENT",

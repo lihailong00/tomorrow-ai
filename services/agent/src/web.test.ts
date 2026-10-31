@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createDeepSeekWeb, resolveWebSettings, type WebSettings } from './web.js';
+import { createDeepSeekWeb, resolveWebSettings, WebBudgetExceededError, type WebSettings } from './web.js';
 
 const settings: WebSettings = { apiKey: 'search-key-never-in-output', searches: 2, fetches: 2 };
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {
@@ -9,13 +9,13 @@ const json = (value: unknown, status = 200) => new Response(JSON.stringify(value
 const active = async () => {};
 
 test('web config reuses only the explicit DeepSeek key, can be disabled, and caps calls', () => {
-  assert.deepEqual(resolveWebSettings({ DEEPSEEK_API_KEY: 'fixture' }), { apiKey: 'fixture', searches: 4, fetches: 4 });
+  assert.deepEqual(resolveWebSettings({ DEEPSEEK_API_KEY: 'fixture' }), { apiKey: 'fixture', searches: 100, fetches: 100 });
   assert.equal(resolveWebSettings({ MODEL_API_KEY: 'other-provider' }), undefined);
   assert.equal(resolveWebSettings({ DEEPSEEK_API_KEY: 'fixture', DEEPSEEK_WEB_ENABLED: 'false' }), undefined);
   assert.equal(resolveWebSettings({ DEEPSEEK_API_KEY: 'fallback', DEEPSEEK_SEARCH_API_KEY: 'dedicated' })?.apiKey, 'dedicated');
   for (const env of [
     { DEEPSEEK_WEB_ENABLED: 'true' }, { DEEPSEEK_WEB_ENABLED: 'yes' },
-    { DEEPSEEK_API_KEY: 'bad\nkey' }, { DEEPSEEK_API_KEY: 'fixture', AGENT_MAX_WEB_SEARCHES: '9' },
+    { DEEPSEEK_API_KEY: 'bad\nkey' }, { DEEPSEEK_API_KEY: 'fixture', AGENT_MAX_WEB_SEARCHES: '101' },
   ]) assert.throws(() => resolveWebSettings(env));
 });
 
@@ -81,11 +81,64 @@ test('provider errors expose a safe reason, consume attempts, and are never auto
     assert.ok(error instanceof Error); assert.ok(error.message.includes('余额不足'));
     assert.equal(error.message.includes(settings.apiKey), false); return true;
   });
-  await assert.rejects(session.tools[0]!.execute('budget', { query: '公告' }), /本轮联网调用上限/);
+  await assert.rejects(session.tools[0]!.execute('budget', { query: '公告' }), error => {
+    assert.ok(error instanceof WebBudgetExceededError);
+    assert.equal(error.code, 'web_search_limit'); assert.equal(error.kind, 'search');
+    assert.equal(error.used, 1); assert.equal(error.limit, 1);
+    assert.match(error.message, /搜索次数已达上限.*1\/1/);
+    return true;
+  });
   assert.equal(attempts, 1);
   // Budgets are isolated between runs, not shared mutable state on the provider.
   await assert.rejects(provider.session(active).tools[0]!.execute('new-run', { query: '公告' }), /余额不足/);
   assert.equal(attempts, 2);
+});
+
+test('100 searches and 100 page reads are separate per-run budgets; the 101st never reaches transport', async () => {
+  const attempts = { search: 0, fetch: 0 };
+  const provider = createDeepSeekWeb(resolveWebSettings({ DEEPSEEK_API_KEY: 'fixture' })!, async url => {
+    const kind = String(url).endsWith('/search') ? 'search' : 'fetch';
+    attempts[kind]++;
+    return json(kind === 'search' ? { results: [] } : { title: 'Synthetic notice', content: 'Local fixture only.' });
+  });
+  const session = provider.session(active);
+  assert.deepEqual(session.budget(), { search: { used: 0, limit: 100, remaining: 100 }, fetch: { used: 0, limit: 100, remaining: 100 } });
+  for (let i = 1; i <= 100; i++) {
+    const result = await session.tools[0]!.execute(`search-${i}`, { query: `notice ${i}` });
+    assert.equal(result.content[0]?.type, 'text');
+    if (result.content[0]?.type !== 'text') throw new Error('Expected web tool text');
+    const budget = JSON.parse(result.content[0].text).web_budget;
+    assert.equal(budget.search.used, i); assert.equal(budget.search.remaining, 100 - i);
+    assert.equal(budget.fetch.remaining, 100);
+  }
+  await assert.rejects(session.tools[0]!.execute('search-101', { query: 'one too many' }), error =>
+    error instanceof WebBudgetExceededError && error.code === 'web_search_limit' && error.used === 100 && error.limit === 100);
+  for (let i = 1; i <= 100; i++) {
+    await session.tools[1]!.execute(`fetch-${i}`, { url: `https://www.chinaamc.com/notice-${i}` });
+  }
+  await assert.rejects(session.tools[1]!.execute('fetch-101', { url: 'https://www.chinaamc.com/one-too-many' }), error => {
+    assert.ok(error instanceof WebBudgetExceededError);
+    assert.equal(error.code, 'web_fetch_limit'); assert.equal(error.used, 100); assert.equal(error.limit, 100);
+    assert.match(error.message, /网页读取次数已达上限.*100\/100/);
+    return true;
+  });
+  assert.deepEqual(attempts, { search: 100, fetch: 100 });
+  assert.deepEqual(session.budget(), { search: { used: 100, limit: 100, remaining: 0 }, fetch: { used: 100, limit: 100, remaining: 0 } });
+  assert.deepEqual(provider.session(active).budget(), { search: { used: 0, limit: 100, remaining: 100 }, fetch: { used: 0, limit: 100, remaining: 100 } });
+});
+
+test('concurrent authority checks cannot oversubscribe the final web reservation', async () => {
+  let requests = 0;
+  const session = createDeepSeekWeb({ apiKey: 'fixture', searches: 100, fetches: 100 }, async () => {
+    requests++; return json({ results: [] });
+  }).session(async () => { await new Promise<void>(resolve => setImmediate(resolve)); });
+  const outcomes = await Promise.allSettled(Array.from({ length: 101 }, (_, i) =>
+    session.tools[0]!.execute(`concurrent-${i}`, { query: `notice ${i}` })));
+  assert.equal(outcomes.filter(x => x.status === 'fulfilled').length, 100);
+  const rejected = outcomes.filter(x => x.status === 'rejected');
+  assert.equal(rejected.length, 1);
+  assert.ok(rejected[0]?.status === 'rejected' && rejected[0].reason instanceof WebBudgetExceededError);
+  assert.equal(requests, 100); assert.equal(session.usage.web_search_requests, 100);
 });
 
 test('authority loss or a cancelled signal blocks the paid API request', async () => {

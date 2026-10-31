@@ -83,6 +83,58 @@ test('native XHR publishes a real delayed partial chunk before final response an
   expect(xhr.onprogress).toBeNull();
   expect(xhr.onload).toBeNull();
 });
+
+test('one native reader survives the old150s boundary and a twenty-minute research run without another POST', async () => {
+  jest.useFakeTimers();
+  class TimedXhr extends FakeXhr {
+    private deadline?: ReturnType<typeof setTimeout>;
+    send(body: string) {
+      super.send(body);
+      this.deadline = setTimeout(() => this.ontimeout?.(), this.timeout);
+    }
+    end() { if (this.deadline !== undefined) clearTimeout(this.deadline); super.end(); }
+    abort() { if (this.deadline !== undefined) clearTimeout(this.deadline); super.abort(); }
+  }
+  const received: SseEvent[] = [];
+  let settled = false;
+  const body = JSON.stringify({ client_request_id: 'original-research', message: '核对公告' });
+  const request = readChatSse({ url: 'https://own.test/v1/chat/stream', headers: {}, body,
+    signal: new AbortController().signal, xhrFactory: () => new TimedXhr() as unknown as XMLHttpRequest,
+    onEvent: event => received.push(event) }).then(() => { settled = true; });
+  const xhr = FakeXhr.instances[0];
+  xhr.chunk(frame(1, 'accepted', { agent_run_id: 'original-run' }));
+  await jest.advanceTimersByTimeAsync(151000);
+  expect(settled).toBe(false);
+  expect(xhr.aborted).toBe(false);
+  xhr.chunk(frame(2, 'tool_start', { tool: 'web_search' }));
+  await jest.advanceTimersByTimeAsync(1049000);
+  expect(settled).toBe(false);
+  xhr.chunk(frame(3, 'text_delta', { delta: '核对结果' }));
+  await jest.advanceTimersByTimeAsync(30000);
+  xhr.chunk(frame(4, 'done', { response: { content: '核对结果' } }));
+  xhr.end();
+  await request;
+  expect(received.map(item => item.id)).toEqual([1, 2, 3, 4]);
+  expect(FakeXhr.instances).toHaveLength(1);
+  expect(xhr.body).toBe(body);
+  expect(xhr.aborted).toBe(false);
+});
+
+test('research reader still has a finite1290s deadline and aborts a stalled native connection', async () => {
+  jest.useFakeTimers();
+  const request = readChatSse({ url: 'https://own.test/v1/chat/stream', headers: {}, body: '{}',
+    signal: new AbortController().signal, xhrFactory: () => {
+      const xhr = new FakeXhr();
+      const original = xhr.send.bind(xhr);
+      xhr.send = body => { original(body); setTimeout(() => xhr.ontimeout?.(), xhr.timeout); };
+      return xhr as unknown as XMLHttpRequest;
+    }, onEvent: jest.fn() }).catch(error => error);
+  await jest.advanceTimersByTimeAsync(1289999);
+  expect(FakeXhr.instances[0].aborted).toBe(false);
+  await jest.advanceTimersByTimeAsync(1);
+  expect(await request).toMatchObject({ code: 'timeout' });
+  expect(FakeXhr.instances[0].aborted).toBe(true);
+});
 test('cancellation rejects promptly, aborts native work and rejects late bytes', async () => {
   const controller = new AbortController();
   const received = jest.fn();

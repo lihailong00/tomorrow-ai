@@ -570,7 +570,7 @@ fn validators_bound_inputs_and_disallow_credentials_in_urls() {
         ("REGISTRATION_POLICY", "surprise"),
         ("PHONE_PASSWORD_ENABLED", "yes"),
         ("PHONE_AUTH_MODE", "local_test"),
-        ("AGENT_MAX_WEB_SEARCHES", "9"),
+        ("AGENT_MAX_WEB_SEARCHES", "101"),
         ("SMS_DAILY_LIMIT", "0"),
         ("MODEL_API_KEY", "secret\nheader"),
     ] {
@@ -781,15 +781,47 @@ async fn readiness_recognizes_explicit_private_keyless_models_but_never_public_k
 #[test]
 fn runtime_limits_match_pi_caps_and_apply_without_restart() {
     for (key, max) in [
-        ("AGENT_MAX_TURNS", 20),
-        ("AGENT_MAX_TOOLS", 40),
-        ("AGENT_TIMEOUT_MS", 105000),
+        ("AGENT_MAX_WEB_SEARCHES", 100),
+        ("AGENT_MAX_WEB_FETCHES", 100),
+        ("AGENT_MAX_TURNS", 256),
+        ("AGENT_MAX_TOOLS", 240),
+        ("AGENT_TIMEOUT_MS", 1200000),
         ("AGENT_MAX_CONCURRENT", 32),
     ] {
         assert!(validate(key, &max.to_string()).is_ok());
         assert!(validate(key, &(max + 1).to_string()).is_err());
         assert!(!definition(key).unwrap().restart_required);
     }
+}
+
+#[tokio::test]
+async fn research_defaults_and_saved_snapshot_allow_one_hundred_searches_and_reads() {
+    let fixture = Fixture::new().await;
+    let store = fixture.store().await;
+    let expected = [
+        ("AGENT_MAX_WEB_SEARCHES", "100"),
+        ("AGENT_MAX_WEB_FETCHES", "100"),
+        ("AGENT_MAX_TURNS", "256"),
+        ("AGENT_MAX_TOOLS", "240"),
+        ("AGENT_TIMEOUT_MS", "1200000"),
+        ("AGENT_MAX_CONCURRENT", "4"),
+    ];
+    let initial = store.effective_values().await.unwrap();
+    for (key, value) in expected {
+        assert_eq!(initial[key], value, "default {key}");
+        assert!(validate(key, value).is_ok(), "{key}");
+    }
+    store.update(0, changes(&[("AGENT_MAX_WEB_SEARCHES", Some("100")),
+        ("AGENT_MAX_WEB_FETCHES", Some("100"))])).await.unwrap();
+    let (revision, saved) = store.effective_snapshot().await.unwrap();
+    assert_eq!(revision, 1);
+    assert_eq!(saved["AGENT_MAX_WEB_SEARCHES"], "100");
+    assert_eq!(saved["AGENT_MAX_WEB_FETCHES"], "100");
+    assert!(matches!(store.update(1, changes(&[("AGENT_MAX_WEB_SEARCHES", Some("101"))])).await,
+        Err(ConfigError::Validation)));
+    let (revision, unchanged) = store.effective_snapshot().await.unwrap();
+    assert_eq!(revision, 1);
+    assert_eq!(unchanged["AGENT_MAX_WEB_SEARCHES"], "100");
 }
 
 #[cfg(unix)]

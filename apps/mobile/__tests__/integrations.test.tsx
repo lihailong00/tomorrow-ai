@@ -2,7 +2,7 @@ import React from 'react';
 import { Switch, Text, TextInput } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { AppContextValue, AppProvider } from '../src/app/context';
-import { IntegrationsScreen } from '../src/features/integrations/IntegrationsScreen';
+import { IntegrationTools } from '../src/features/integrations/IntegrationsScreen';
 import { importDraft, integrationsApi } from '../src/features/integrations/api';
 import { appInputs } from '../src/platform/appInputs';
 import { platform } from '../src/platform/ports';
@@ -82,7 +82,7 @@ async function setup(cloudAvailable = true, catalog: object[] = []) {
   await act(async () => {
     tree = create(
       <AppProvider value={context}>
-        <IntegrationsScreen />
+        <IntegrationTools onBack={jest.fn()} />
       </AppProvider>,
     );
   });
@@ -252,7 +252,7 @@ it('hides the previous account discovery and ignores its late extraction respons
       <AppProvider
         value={{ ...view.context, user: { id: 'user-b' } } as AppContextValue}
       >
-        <IntegrationsScreen />
+        <IntegrationTools onBack={jest.fn()} />
       </AppProvider>,
     );
   });
