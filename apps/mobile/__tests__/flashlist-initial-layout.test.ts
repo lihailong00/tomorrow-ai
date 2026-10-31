@@ -7,12 +7,15 @@ const SourceManager = require('@shopify/flash-list/src/recyclerview/RecyclerView
 
 type Item = { id: string; role: string };
 type Manager = Pick<PublishedManager<Item>, 'updateLayoutParams' | 'modifyChildrenLayout' |
-  'getAbsoluteLastScrollOffset' | 'getLayout' | 'getDataKey' | 'computeVisibleIndices' | 'dispose'>;
+  'getAbsoluteLastScrollOffset' | 'getInitialScrollIndex' | 'getLayout' | 'getDataKey' | 'computeVisibleIndices' | 'dispose'>;
 const engines: { name: string; create: (props: FlashListProps<Item>) => Manager }[] = [
   { name: 'published dist entry', create: props => new PublishedManager(props) },
   { name: 'source entry', create: props => new SourceManager(props) },
 ];
 const scenarios = [
+  { name: 'short inverted tail retains explicit zero rather than defaulting to final item',
+    count:2, initial:0, targetHeight:100, nextHeight:150, alternating:true,
+    targetKey:'tail-zero' },
   {
     name: 'native trace: 1004 alternating rows, initial368',
     count: 1004, initial: 368, targetHeight: 925.8181818181819,
@@ -37,7 +40,9 @@ function afterInitialMeasurements(
     role: scenario.alternating ? (index % 2 === 0 ? 'assistant' : 'user') : 'row',
   }));
   const manager = create({ data, renderItem: () => null, keyExtractor: item => item.id,
-    getItemType: item => item.role, inverted: true, initialScrollIndex: scenario.initial });
+    getItemType: item => item.role, inverted: true, initialScrollIndex: scenario.initial,
+    maintainVisibleContentPosition: { disabled:false,startRenderingFromBottom:true } });
+  expect(manager.getInitialScrollIndex()).toBe(scenario.initial);
   manager.updateLayoutParams({ width: 320, height: 280 }, 24);
   manager.modifyChildrenLayout([], scenario.count);
   // The cold manager starts with its real internal200 estimate, not caller estimates.

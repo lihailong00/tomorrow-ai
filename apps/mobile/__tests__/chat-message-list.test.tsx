@@ -215,7 +215,7 @@ test.each([0, 502, 1003])('History Back delegates deep index %i and signed inset
   expect(app.list().props.initialScrollIndex).toBe(1003 - index);
   expect(app.list().props.initialScrollIndexParams).toEqual({ viewOffset: -53 });
   expect(app.list().props.inverted).toBe(true);
-  expect(app.list().props.maintainVisibleContentPosition).toEqual({ disabled: false });
+  expect(app.list().props.maintainVisibleContentPosition).toEqual({ disabled: false, startRenderingFromBottom: true });
   expect(app.list().props.renderScrollComponent).toBeUndefined();
   expect(app.list().props.getItemLayout).toBeUndefined();
   expect(app.list().props.estimatedItemSize).toBeUndefined();
@@ -675,4 +675,21 @@ test('anchor helpers preserve native boundaries, missing IDs and reachable inset
   expect(messageInitialIndex([message(3), message(2)], { id: 'message-2', offset: 8 })).toBe(1);
   expect(messageInitialIndex([message(3), message(2)], { id: 'missing', offset: 8 })).toBe(0);
   expect(messageAnchorInset(175, 50, 640)).toBe(49);
+});
+
+test('empty and nonempty lists use stable separate MVCP options without dropping explicit tail index zero', async () => {
+  const app=await setup([]);
+  const emptyOptions=app.list().props.maintainVisibleContentPosition;
+  expect(emptyOptions).toEqual({ disabled:false });
+  expect(app.list().props.inverted).toBe(false);
+  expect(app.list().props.initialScrollIndex).toBeUndefined();
+  await app.update([message(0),message(1)]);
+  const filledOptions=app.list().props.maintainVisibleContentPosition;
+  expect(filledOptions).toEqual({ disabled:false,startRenderingFromBottom:true });
+  expect(app.list().props.inverted).toBe(true);
+  expect(app.list().props.initialScrollIndex).toBe(0);
+  await app.footer();
+  expect(app.list().props.maintainVisibleContentPosition).toBe(filledOptions);
+  await app.update([]);
+  expect(app.list().props.maintainVisibleContentPosition).toBe(emptyOptions);
 });

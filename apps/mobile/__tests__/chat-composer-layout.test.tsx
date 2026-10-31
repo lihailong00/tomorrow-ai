@@ -141,8 +141,8 @@ async function setup(fontScale = 1) {
 }
 
 test.each([
-  [1, 51],
-  [2, 68],
+  [1, 44],
+  [2, 64],
 ])(
   'small-phone keyboard viewport keeps a complete single line at font scale %s',
   async (fontScale, minimum) => {
@@ -154,10 +154,10 @@ test.each([
     expect(app.inputStyle().minHeight).toBe(minimum);
     expect(app.inputStyle().maxHeight).toBeGreaterThanOrEqual(minimum);
     expect(app.input().props.value).toBe('Agjpqy TEST');
-    expect(app.inputStyle().fontSize).toBe(14);
+    expect(app.inputStyle().fontSize).toBe(16);
     expect(app.inputStyle().lineHeight).toBeUndefined();
     expect(app.inputStyle().includeFontPadding).toBe(true);
-    for (const label of ['选择附件', '开始录音', '发送消息']) {
+    for (const label of ['选择附件', '切换语音输入', '发送消息']) {
       const button = app.control(label);
       expect(button.props.disabled).toBe(false);
       expect(StyleSheet.flatten(button.props.style)).toMatchObject({
@@ -173,20 +173,20 @@ test('font, keyboard, and rotation changes resize the composer without replacing
   const app = await setup();
   await app.layout(180);
   await app.type('Keep this draft while changing display settings.');
-  expect(app.inputStyle().maxHeight).toBe(51);
+  expect(app.inputStyle().maxHeight).toBe(44);
 
   // A font-only Dimensions event must take effect without a new root layout.
   await app.dimensions(360, 640, 2);
-  expect(app.inputStyle().minHeight).toBe(68);
-  expect(app.inputStyle().maxHeight).toBe(68);
+  expect(app.inputStyle().minHeight).toBe(64);
+  expect(app.inputStyle().maxHeight).toBe(64);
   await app.layout(500);
   expect(app.inputStyle().maxHeight).toBe(110);
   await app.dimensions(640, 360, 2);
   await app.layout(160);
-  expect(app.inputStyle().maxHeight).toBe(68);
+  expect(app.inputStyle().maxHeight).toBe(64);
   await app.dimensions(640, 360, 1);
-  expect(app.inputStyle().minHeight).toBe(51);
-  expect(app.inputStyle().maxHeight).toBe(51);
+  expect(app.inputStyle().minHeight).toBe(44);
+  expect(app.inputStyle().maxHeight).toBe(44);
   expect(app.input().props.value).toBe(
     'Keep this draft while changing display settings.',
   );
@@ -208,7 +208,7 @@ test('large-font multiline drafts scroll in a bounded input and send every line'
     scrollEnabled: true,
     editable: true,
   });
-  expect(app.inputStyle().maxHeight).toBe(68);
+  expect(app.inputStyle().maxHeight).toBe(64);
   expect(app.control('发送消息').props.disabled).toBe(false);
 
   let finish!: (value: typeof reply) => void;
@@ -229,10 +229,17 @@ test('large-font multiline drafts scroll in a bounded input and send every line'
   );
   expect(app.input().props.value).toBe('');
   expect(app.input().props.editable).toBe(true);
-  expect(app.inputStyle().maxHeight).toBe(68);
-  for (const label of ['选择附件', '开始录音', '发送消息']) {
+  expect(app.inputStyle().maxHeight).toBe(64);
+  for (const label of ['选择附件', '发送消息']) {
     expect(app.control(label).props.disabled).toBe(true);
   }
+  // Changing presentation is safe during a reply; actually starting a recorder
+  // must remain blocked through both gesture and accessible button paths.
+  await app.press('切换语音输入');
+  const hold = app.composer().findAll(node => node.props.testID === 'chat-hold-to-talk')[0];
+  expect(hold.props.onStartShouldSetResponder()).toBe(false);
+  expect(app.control('开始录音').props.disabled).toBe(true);
+  await app.press('切换文字输入');
   await act(async () => {
     finish(reply);
     await sending;
@@ -241,7 +248,7 @@ test('large-font multiline drafts scroll in a bounded input and send every line'
   expect(app.input().props.editable).toBe(true);
   expect(app.control('发送消息').props.disabled).toBe(true);
   expect(app.control('选择附件').props.disabled).toBe(false);
-  expect(app.control('开始录音').props.disabled).toBe(false);
+  expect(app.control('切换语音输入').props.disabled).toBe(false);
   await app.close();
 });
 
@@ -267,8 +274,8 @@ test('a viewport shorter than the composer keeps its actions and attachments in 
   expect(app.messagePane()).not.toBe(composer);
   expect(app.messagePane().findAllByType(TextInput)).toHaveLength(0);
   expect(composer.findAllByType(TextInput)).toHaveLength(1);
-  expect(app.inputStyle().minHeight).toBe(68);
-  for (const label of ['选择附件', '开始录音', '发送消息']) {
+  expect(app.inputStyle().minHeight).toBe(64);
+  for (const label of ['选择附件', '切换语音输入', '发送消息']) {
     expect(
       composer.findAll(node => node.props.accessibilityLabel === label).length,
     ).toBeGreaterThan(0);
@@ -335,7 +342,7 @@ test('live native font changes resize the existing six-line input even while JS 
   const draft = 'Agjpqy TEST\nA12 2 Agjpqy\nA12 3 Agjpqy\nA12 4 Agjpqy\nA12 5 Agjpqy\nA12 6 Agjpqy';
   await app.type(draft);
   const originalInput = app.input().instance;
-  expect(app.inputStyle().minHeight).toBe(51);
+  expect(app.inputStyle().minHeight).toBe(44);
 
   // Android has applied a live font-only configuration change, without host
   // resume or a corresponding DeviceInfo Dimensions update.
@@ -344,8 +351,8 @@ test('live native font changes resize the existing six-line input even while JS 
     nativeEvent: { contentSize: { width: 350, height: 230 } },
   }));
   expect(Dimensions.get('window').fontScale).toBe(1);
-  expect(app.inputStyle().minHeight).toBe(68);
-  expect(app.inputStyle().maxHeight).toBe(68);
+  expect(app.inputStyle().minHeight).toBe(64);
+  expect(app.inputStyle().maxHeight).toBe(64);
   expect(app.inputStyle().lineHeight).toBeUndefined();
   expect(app.inputStyle().includeFontPadding).toBe(true);
   expect(app.input().instance).toBe(originalInput);
@@ -355,9 +362,9 @@ test('live native font changes resize the existing six-line input even while JS 
   await act(async () => app.input().props.onContentSizeChange({
     nativeEvent: { contentSize: { width: 350, height: 125 } },
   }));
-  expect(app.inputStyle().minHeight).toBe(51);
+  expect(app.inputStyle().minHeight).toBe(44);
   expect(app.input().props.value).toBe(draft);
-  for (const label of ['选择附件', '开始录音', '发送消息']) {
+  for (const label of ['选择附件', '切换语音输入', '发送消息']) {
     expect(app.control(label).props.disabled).toBe(false);
     expect(app.composer().findAll(node => node.props.accessibilityLabel === label).length).toBeGreaterThan(0);
   }
@@ -379,7 +386,7 @@ test('native font reads coalesce focus and content reflow bursts instead of feed
   expect(readScale).toHaveBeenCalledTimes(1);
   await act(async () => complete(2));
   expect(readScale).toHaveBeenCalledTimes(2);
-  expect(app.inputStyle().minHeight).toBe(68);
+  expect(app.inputStyle().minHeight).toBe(64);
   await act(async () => {});
   expect(readScale).toHaveBeenCalledTimes(2);
   await app.close();
@@ -395,7 +402,7 @@ test('a delayed native font result cannot resize the next account or route owner
   await app.changeOwner();
   await app.type('New owner draft');
   await act(async () => completeOld(2));
-  expect(app.inputStyle().minHeight).toBe(51);
+  expect(app.inputStyle().minHeight).toBe(44);
   expect(app.input().props.value).toBe('New owner draft');
   await app.close();
 });
@@ -406,7 +413,7 @@ test('font-read failure falls back to the current platform dimensions without ch
   await app.layout(37);
   await app.type('Keep this draft');
   await act(async () => app.input().props.onFocus());
-  expect(app.inputStyle().minHeight).toBe(68);
+  expect(app.inputStyle().minHeight).toBe(64);
   expect(app.input().props.value).toBe('Keep this draft');
   await app.close();
 });

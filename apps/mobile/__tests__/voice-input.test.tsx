@@ -106,6 +106,9 @@ async function setup() {
       );
     },
     press: async (label: string) => {
+      if (label === '开始录音' && !node(label)) {
+        await act(async () => node('切换语音输入').props.onPress());
+      }
       await act(async () => {
         await node(label).props.onPress();
       });

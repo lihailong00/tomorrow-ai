@@ -981,7 +981,7 @@ export function IntegrationsScreen() {
   );
 }
 
-function CloudConnection({
+export function CloudConnection({
   item,
   onChanged,
   onNotice,

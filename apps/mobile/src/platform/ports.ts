@@ -59,8 +59,9 @@ export interface Preferences {
   connectionError?: string;
   pendingConnection?: { url: string; instanceId: string };
 }
-export const defaultServerUrl =
-  'https://api.example.invalid';
+export const defaultServerUrl = 'https://api.example.invalid';
+const previousOfficialServer =
+  /^https:\/\/019f3a8c58c974999af3ad8af1fd1739\.ap-southeast-1\.a8g1v3\.xyz(?:\/v1)?\/*$/i;
 const legacyDefaultServer = /^http:\/\/10\.0\.2\.2:8080(?:\/v1)?\/*$/i;
 
 export const platform = {
@@ -119,11 +120,13 @@ export const platform = {
     }
     if (
       !preferences.serverUrlCustomized &&
-      legacyDefaultServer.test(preferences.serverUrl.trim())
+      (legacyDefaultServer.test(preferences.serverUrl.trim()) ||
+        previousOfficialServer.test(preferences.serverUrl.trim()))
     ) {
-      // The local server's credentials must never follow a service migration.
+      // Verify the new endpoint independently; never carry credentials across URLs.
       await platform.removeSession();
       preferences.serverUrl = defaultServerUrl;
+      delete preferences.connectionError;
       await platform.savePreferences(preferences);
     }
     return preferences;

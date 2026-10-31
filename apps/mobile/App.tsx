@@ -28,7 +28,6 @@ import { readableDate } from './src/domain/types';
 import { platform, Preferences, defaultServerUrl } from './src/platform/ports';
 import { AuthScreen, IntroScreen, SettingsScreen } from './src/screens/Account';
 import {
-  CapabilitiesScreen,
   HomeScreen,
   MemoriesScreen,
   TasksScreen,
@@ -36,6 +35,8 @@ import {
 import { ChatScreen, ConversationsScreen, createChatEntryState } from './src/screens/Chat';
 import { UploadsScreen } from './src/screens/Uploads';
 import { IntegrationsScreen } from './src/features/integrations/IntegrationsScreen';
+import { CapabilitiesScreen } from './src/features/capabilities/CapabilitiesScreen';
+import { capabilityAppearance } from './src/features/capabilities/model';
 import { TodosScreen } from './src/features/todos/TodosScreen';
 import { TodoDetail } from './src/features/todos/TodoDetail';
 import { TodoSources } from './src/features/todos/TodoSources';
@@ -45,6 +46,7 @@ import { GrowthSettingsScreen } from './src/features/growth/GrowthSettings';
 import { HealthScreen } from './src/features/health/HealthScreen';
 import { AiHistoryScreen } from './src/features/ai-history/AiHistoryScreen';
 import { appInputs } from './src/platform/appInputs';
+import { PhoneSourcesEntry } from './src/features/phone-sources/PhoneSourcesEntry';
 import { photoIndex } from './src/platform/photoIndex';
 import {
   ArtifactsScreen,
@@ -56,6 +58,7 @@ import {
 } from './src/screens/Details';
 import { IconButton, Loading } from './src/ui/components';
 import { colors, styles as s } from './src/ui/theme';
+import { chatAppearance } from './src/ui/ChatAppearance';
 import { AmbientBackground, AssistantOrb, Icon } from './src/ui/visuals';
 
 function Application() {
@@ -441,6 +444,9 @@ function Application() {
     }
   }
   const main = route.name === 'main';
+  const chatPage = route.name === 'chat' && Boolean(session);
+  const chatSurface = chatPage || (route.name === 'conversations' && Boolean(session));
+  const capabilitiesSurface = main && tab === 'capabilities' && Boolean(session);
   const tabs: Array<{
     id: MainTab;
     label: string;
@@ -485,8 +491,8 @@ function Application() {
       }}
     >
       <GrowthProvider>
-      <View style={s.screen}>
-        <AmbientBackground />
+      <View style={[s.screen, chatSurface && shell.chatCanvas, capabilitiesSurface && {backgroundColor:capabilityAppearance.background}]}>
+        {!chatSurface && !capabilitiesSurface && <AmbientBackground />}
         <SafeAreaView
           style={shell.safeArea}
           edges={['top', 'bottom']}
@@ -495,13 +501,28 @@ function Application() {
         >
           <StatusBar
             barStyle="dark-content"
-            backgroundColor={colors.background}
+            backgroundColor={chatSurface ? chatAppearance.surface : capabilitiesSurface ? capabilityAppearance.background : colors.background}
           />
           {route.name !== 'health' && <View
             testID="application-header"
-            style={[s.header, compactChatHeader && shell.hiddenHeader]}
+            style={[s.header, chatSurface && shell.chatHeader, compactChatHeader && shell.hiddenHeader]}
           >
-            {main ? (
+            {chatPage ? <>
+              <View style={shell.chatHeaderActions}>
+                <Pressable accessibilityRole="button" accessibilityLabel="返回" onPress={back} style={shell.chatHeaderButton}>
+                  <Icon name="back" size={22} color={chatAppearance.ink} />
+                </Pressable>
+                <Pressable accessibilityRole="button" accessibilityLabel="开启新对话" onPress={() => navigate({ name: 'chat' })} style={shell.chatHeaderButton}>
+                  <Icon name="compose" size={21} color={chatAppearance.ink} />
+                </Pressable>
+              </View>
+              <Text style={shell.chatTitle}>妥啦</Text>
+              <View style={[shell.chatHeaderActions, { justifyContent: 'flex-end' }]}>
+                <Pressable accessibilityRole="button" accessibilityLabel="历史对话" onPress={() => navigate({ name: 'conversations' })} style={shell.chatHeaderButton}>
+                  <Icon name="history" size={22} color={chatAppearance.ink} />
+                </Pressable>
+              </View>
+            </> : main ? (
               <View style={s.row}>
                 <AssistantOrb size={34} />
                 <Text style={[s.wordmark, shell.brand]}>妥啦</Text>
@@ -514,7 +535,7 @@ function Application() {
                 )}
               </View>
             )}
-            {route.name === 'chat' ? (
+            {chatPage ? null : route.name === 'chat' ? (
               <IconButton
                 label="历史对话"
                 icon="history"
@@ -542,6 +563,7 @@ function Application() {
             </Pressable>
           )}
           {session && <GrowthFeedbackBanner />}
+          {session && main && tab === 'today' && <PhoneSourcesEntry autoOpen onShowTodos={() => navigate({name: 'todos'})} />}
           <KeyboardAvoidingView
             key={entry.key}
             style={s.fill}
@@ -549,7 +571,7 @@ function Application() {
           >
             {page}
           </KeyboardAvoidingView>
-          {session && main && tab !== 'tasks' && (
+          {session && main && tab === 'today' && (
             <View style={shell.dockArea}>
               <View style={shell.dock}>
                 <Pressable
@@ -613,7 +635,11 @@ const shell = StyleSheet.create({
   hiddenHeader: { display: 'none' },
   safeArea: { flex: 1, backgroundColor: 'transparent' },
   brand: { marginLeft: 5 },
-  chatTitle: { color: colors.ink, fontSize: 17, fontWeight: '500' },
+  chatTitle: { flex: 1, textAlign: 'center', color: chatAppearance.ink, fontSize: 17, fontWeight: '500' },
+  chatCanvas: { backgroundColor: chatAppearance.background },
+  chatHeader: { minHeight: 60, paddingHorizontal: 8, paddingVertical: 4, marginBottom: 0, backgroundColor: chatAppearance.surface },
+  chatHeaderActions: { width: 88, flexDirection: 'row', alignItems: 'center' },
+  chatHeaderButton: { width: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   selectedTab: {
     backgroundColor: 'rgba(234,241,255,0.85)',
   },

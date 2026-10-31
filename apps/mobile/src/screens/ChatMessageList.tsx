@@ -32,6 +32,9 @@ type ScrollPacket = Parameters<NonNullable<ScrollViewProps['onScroll']>>[0];
 type Destination = { anchor: MessageAnchor } | { latest: true };
 const separators = { highlight() {}, unhighlight() {}, updateProps() {} };
 const maintainVisibleContentPosition = { disabled: false };
+// Inverted short collections put this SDK adjustment on the visual bottom,
+// keeping the oldest visible message next to the header without a spacer.
+const invertedMaintainVisibleContentPosition = { disabled: false, startRenderingFromBottom: true };
 
 function rememberHeight(viewport: MessageViewport, item: Message, height: number) {
   const key = messageRowKey(item);
@@ -303,7 +306,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     inverted={inverted}
     initialScrollIndex={messages.length ? initialIndex : undefined}
     initialScrollIndexParams={initial ? { viewOffset: initial.offset } : undefined}
-    maintainVisibleContentPosition={maintainVisibleContentPosition}
+    maintainVisibleContentPosition={inverted ? invertedMaintainVisibleContentPosition : maintainVisibleContentPosition}
     style={style}
     contentContainerStyle={contentContainerStyle}
     ListHeaderComponent={firstItem}

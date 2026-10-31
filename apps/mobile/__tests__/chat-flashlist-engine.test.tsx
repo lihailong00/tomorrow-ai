@@ -1,5 +1,6 @@
 import React from 'react';
-import { ScrollView, Text } from 'react-native';
+import { ScrollView, Text, StyleSheet } from 'react-native';
+import { ViewHolderCollection } from '@shopify/flash-list/dist/recyclerview/ViewHolderCollection';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { FlashList, FlashListRef } from '@shopify/flash-list';
 import * as measurements from '@shopify/flash-list/dist/recyclerview/utils/measureLayout';
@@ -21,9 +22,10 @@ test('installed engine retains a bounded nonempty inverted window across all 26 
   const ref = React.createRef<FlashListRef<(typeof all)[number]>>();
   const renderItem = ({ item }: { item: (typeof all)[number] }) =>
     <Text testID={`row-${item.id}`}>{item.content}</Text>;
+  const options = { disabled:false,startRenderingFromBottom:true };
   const render = () => <FlashList ref={ref} testID="engine-list" data={data}
     renderItem={renderItem} keyExtractor={item => item.id} inverted
-    initialScrollIndex={0} extraData={`${width}:${scale}`}
+    initialScrollIndex={0} extraData={`${width}:${scale}`} maintainVisibleContentPosition={options}
     ListHeaderComponent={<Text>Latest spacing</Text>}
     ListFooterComponent={<Text>History control</Text>} />;
   let tree!: ReactTestRenderer;
@@ -64,3 +66,35 @@ test('installed engine retains a bounded nonempty inverted window across all 26 
     jest.useRealTimers();
   }
 }, 30000);
+
+test('installed engine moves a short inverted collection gap away from header and removes adjustment as content grows', async () => {
+  jest.useFakeTimers();
+  const width=360;
+  let data=[{id:'latest',height:100},{id:'earlier',height:150}];
+  (measurements.measureParentSize as jest.Mock).mockImplementation(() => ({ width,height:640 }));
+  (measurements.measureFirstChildLayout as jest.Mock).mockImplementation(() => ({ x:0,y:24,width,height:640 }));
+  (measurements.measureItemLayout as jest.Mock).mockImplementation((view:any) => ({ x:0,y:0,width,height:data[view.props.index]?.height ?? 125 }));
+  const options={ disabled:false,startRenderingFromBottom:true };
+  const ref=React.createRef<FlashListRef<typeof data[number]>>();
+  const render=()=> <FlashList ref={ref} data={data} inverted initialScrollIndex={0}
+    maintainVisibleContentPosition={options} keyExtractor={item=>item.id}
+    renderItem={({item})=><Text testID={'short-row-'+item.id}>{item.id}</Text>} />;
+  let tree!:ReactTestRenderer;
+  try {
+    await act(async () => { tree=create(render()); await jest.advanceTimersByTimeAsync(200); });
+    const collection=()=>tree.root.findByType(ViewHolderCollection);
+    expect(ref.current!.getChildContainerDimensions().height).toBe(250);
+    expect(collection().props.getAdjustmentMargin()).toBe(366);
+    expect(ref.current!.props.initialScrollIndex).toBe(0);
+    expect(ref.current!.getFirstVisibleIndex()).toBe(0);
+    const shortContainer=collection().findAll(node=>node.props.style && StyleSheet.flatten(node.props.style).marginTop===366);
+    expect(shortContainer.length).toBeGreaterThan(0);
+    data=[...data,...Array.from({length:18},(_,index)=>({id:'older-'+index,height:125}))];
+    await act(async () => { tree.update(render()); await jest.advanceTimersByTimeAsync(200); });
+    expect(ref.current!.getChildContainerDimensions().height).toBeGreaterThan(640);
+    expect(collection().props.getAdjustmentMargin()).toBe(0);
+    expect(ref.current!.props.initialScrollIndex).toBe(0);
+    expect(ref.current!.computeVisibleIndices().endIndex).toBeGreaterThanOrEqual(0);
+    expect(tree.root.findAllByType(Text).some(node=>node.props.testID==='short-row-latest')).toBe(true);
+  } finally { await act(async () => tree?.unmount()); jest.useRealTimers(); }
+},30000);

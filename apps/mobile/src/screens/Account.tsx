@@ -17,6 +17,7 @@ import { AssistantOrb, Icon } from '../ui/visuals';
 import { normalizePhoneNumber } from '../domain/phone';
 import { validatePassword } from '../domain/password';
 import { PhotoIndexSettings } from '../features/photo-index/PhotoIndexSettings';
+import { PhoneSourcesEntry } from '../features/phone-sources/PhoneSourcesEntry';
 import { EmailAuthScreen } from '../features/instances/EmailAuthScreen';
 import { InstanceConnectionCard } from '../features/instances/InstanceConnectionCard';
 import { version as appVersion } from '../../package.json';
@@ -558,6 +559,7 @@ export function SettingsScreen() {
       <InstanceConnectionCard />
       {user && (
         <>
+          <PhoneSourcesEntry onShowTodos={() => navigate({name: 'todos'})} />
           <Section title="个人资料" />
           <Card>
             <Text style={s.small}>{user.phone ?? user.email}</Text>

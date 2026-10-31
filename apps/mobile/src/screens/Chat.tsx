@@ -1,6 +1,8 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   ActivityIndicator,
+  AppState,
+  Keyboard,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -21,11 +23,13 @@ import {
   Empty,
   ErrorNotice,
   Loading,
-  Pill,
 } from '../ui/components';
 import { ResultText } from '../ui/ResultText';
-import { colors, styles as s } from '../ui/theme';
-import { AssistantOrb, Icon } from '../ui/visuals';
+import { ChatModeMotion, useChatReducedMotion } from '../ui/ChatMotion';
+import { ChatVoiceOverlay } from '../ui/ChatVoiceOverlay';
+import { chatAppearance as appearance } from '../ui/ChatAppearance';
+import { colors as historyColors, styles as s } from '../ui/theme';
+import { Icon } from '../ui/visuals';
 import { ModeNotice, usePagedList } from './Main';
 import { createMessageHistory, mergeMessageHistory } from './messageHistory';
 import { ChatMessageList } from './ChatMessageList';
@@ -33,8 +37,22 @@ import { createChatStreamController, type ChatProgress, type ChatStreamControlle
 
 type Attachment = { file: LocalFile; upload?: Upload; transcript?: string };
 type VoiceInput = { key: string; file: LocalFile; upload?: Upload; text?: string };
+type HoldRecording = { held: boolean; cancelled: boolean; started: boolean; ended: boolean; lease: object; startY?: number };
 type VoiceRequest = { cancel: () => void; release: () => void };
 const INPUT_LINE_ALLOWANCE = 23;
+// The microphone is process-wide, including permission requests from an old route.
+let activeRecorder: object | null = null;
+const recorderStops = new WeakMap<object, Promise<LocalFile | null>>();
+function stopRecorder(lease: object | null): Promise<LocalFile | null> {
+  if (!lease) return platform.stopRecording();
+  let pending = recorderStops.get(lease);
+  if (!pending) {
+    pending = platform.stopRecording().catch(failure => { recorderStops.delete(lease); throw failure; });
+    recorderStops.set(lease, pending);
+  }
+  return pending;
+}
+const releaseRecorder = (lease: object | null) => { if (lease && activeRecorder === lease) activeRecorder = null; };
 type ChatSnapshot = {
   id?: string;
   draft: string;
@@ -113,7 +131,9 @@ export function ChatScreen({
 }) {
   const { api, invalidate, formatDate, user, preferences, navigate } = useApp();
   const { height: windowHeight, fontScale } = useWindowDimensions();
+  const reducedMotion = useChatReducedMotion();
   const [availableHeight, setAvailableHeight] = useState(windowHeight);
+  const [composerHeight, setComposerHeight] = useState(68);
   const localState = useRef<{ api: typeof api; value: ChatEntryState } | null>(null);
   if (!localState.current || localState.current.api !== api) {
     localState.current = { api, value: createChatEntryState(conversationId, prompt) };
@@ -135,6 +155,12 @@ export function ChatScreen({
   draftRef.current = draft;
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
+  const [voiceMode, setVoiceMode] = useState(false);
+  const [holdActive, setHoldActive] = useState(false);
+  const [holdCancelled, setHoldCancelled] = useState(false);
+  const [captureBusy, setCaptureBusy] = useState(false);
+  const recorderLease = useRef<object | null>(null);
+  const holdOwner = useMemo(() => ({ active: true, gesture: null as HoldRecording | null }), [api, state]);
   const mounted = useRef(true);
   const voiceOwner = useRef({ api, state });
   voiceOwner.current = { api, state };
@@ -143,6 +169,27 @@ export function ChatScreen({
   const composerScroll = useRef<ScrollView>(null);
   const composerTop = useRef(0);
   const inputFocused = useRef(false);
+  const inputRef = useRef<TextInput>(null);
+  const focusAfterModeChange = useRef(false);
+  useEffect(() => {
+    // Wait until display:none is removed before focusing the native EditText.
+    if (!voiceMode && focusAfterModeChange.current) {
+      focusAfterModeChange.current = false;
+      inputRef.current?.focus();
+    }
+  }, [voiceMode]);
+  const toggleInputMode = () => {
+    if (voiceMode) {
+      focusAfterModeChange.current = true;
+      setVoiceMode(false);
+    } else {
+      focusAfterModeChange.current = false;
+      inputRef.current?.blur();
+      inputFocused.current = false;
+      Keyboard.dismiss();
+      setVoiceMode(true);
+    }
+  };
   const [nativeFontScale, setNativeFontScale] = useState<number | null>(null);
   const inputScaleOwner = useMemo(() => ({ active: true, running: false, pending: false }), [api, state]);
   const currentInputScaleOwner = useRef(inputScaleOwner);
@@ -233,17 +280,27 @@ export function ChatScreen({
   }, [api, initialConversationId, state]);
   useEffect(() => {
     mounted.current = true;
+    holdOwner.active = true;
+    recordingRef.current = false;
+    setRecording(false); setHoldActive(false); setHoldCancelled(false); setCaptureBusy(false);
     return () => {
       mounted.current = false;
+      holdOwner.active = false;
+      if (holdOwner.gesture) {
+        holdOwner.gesture.held = false;
+        holdOwner.gesture.cancelled = true;
+        if (recordingRef.current) holdOwner.gesture.ended = true;
+      }
       attachmentAbort.current?.abort();
       // An authorized conversion belongs to the retained route, not this mount.
       if (!state.scope?.isRetained()) { state.voiceRequest?.cancel(); state.disposeStreams(); }
       state.history.dispose();
       if (recordingRef.current) {
-        platform.stopRecording().catch(() => {});
+        const lease = recorderLease.current;
+        stopRecorder(lease).finally(() => releaseRecorder(lease)).catch(() => {});
       }
     };
-  }, [api, state]);
+  }, [api, state, holdOwner]);
   useEffect(() => {
     if (!recording) {
       return;
@@ -353,18 +410,102 @@ export function ChatScreen({
     }
   };
   const finishRecording = async () => {
-    const file = await platform.stopRecording();
-    recordingRef.current = false;
-    setRecording(false);
-    if (file && mounted.current) {
+    if (holdOwner.gesture?.started) {
+      holdOwner.gesture.held = false; holdOwner.gesture.ended = true;
+      setHoldActive(false);
+    }
+    const lease = recorderLease.current;
+    let file: LocalFile | null;
+    try {
+      file = await stopRecorder(lease);
+    } finally {
+      // Native adapters release their recorder even if finalizing a short clip fails.
+      releaseRecorder(lease);
+      recordingRef.current = false;
+      if (mounted.current) setRecording(false);
+    }
+    if (file && mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state) {
+      setVoiceMode(false);
       await convertVoice({ key: newRequestId(), file });
     }
   };
+  const reportVoiceFailure = (failure: unknown) => {
+    if (holdOwner.active && mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state)
+      state.update(old => ({ ...old, voiceError: errorMessage(failure) }));
+  };
+  const endHold = async (gesture: HoldRecording) => {
+    if (!gesture.started || gesture.ended) return;
+    gesture.ended = true; gesture.held = false;
+    try {
+      if (holdOwner.active && mounted.current) setHoldActive(false);
+      if (gesture.cancelled || !holdOwner.active || !mounted.current ||
+          voiceOwner.current.api !== api || voiceOwner.current.state !== state) {
+        try {
+          await stopRecorder(gesture.lease);
+        } finally {
+          releaseRecorder(gesture.lease);
+          recordingRef.current = false;
+          if (holdOwner.active && mounted.current) setRecording(false);
+        }
+      } else {
+        await finishRecording();
+      }
+    } finally {
+      if (holdOwner.active && mounted.current) setCaptureBusy(false);
+    }
+  };
+  const beginHold = (pageY?: number) => {
+    if (activeRecorder || !holdOwner.active || recordingRef.current || (holdOwner.gesture && !holdOwner.gesture.ended) ||
+        fileAction.busy || sending || voice) return;
+    const lease = {}; activeRecorder = lease; recorderLease.current = lease;
+    const gesture: HoldRecording = { held: true, cancelled: false, started: false, ended: false, lease, startY: pageY };
+    holdOwner.gesture = gesture;
+    setHoldActive(true); setHoldCancelled(false); setCaptureBusy(true);
+    state.update(old => ({ ...old, voiceError: null }));
+    void (async () => {
+      try {
+        await platform.startRecording();
+        gesture.started = true;
+        // A permission dialog may resolve after release or after this route leaves.
+        if (!holdOwner.active || !mounted.current || voiceOwner.current.api !== api || voiceOwner.current.state !== state)
+          gesture.cancelled = true;
+        if (holdOwner.active && mounted.current) {
+          recordingRef.current = true; setSeconds(0); setRecording(true);
+        }
+        if (!gesture.held || gesture.cancelled) await endHold(gesture);
+      } catch (failure) {
+        gesture.ended = true;
+        if (holdOwner.active && mounted.current) {
+          setHoldActive(false);
+          if (!gesture.started) { setRecording(false); recordingRef.current = false; }
+          setCaptureBusy(false);
+        }
+        if (!gesture.started) releaseRecorder(lease);
+        reportVoiceFailure(failure);
+      }
+    })();
+  };
+  const releaseHold = (cancel = false) => {
+    const gesture = holdOwner.gesture;
+    if (!gesture || gesture.ended) return;
+    gesture.held = false; gesture.cancelled = gesture.cancelled || cancel;
+    setHoldActive(false);
+    if (gesture.started) void endHold(gesture).catch(reportVoiceFailure);
+  };
+  useEffect(() => {
+    const subscription = AppState?.addEventListener('change', next => {
+      if (next !== 'active') releaseHold(true);
+    });
+    return () => subscription?.remove();
+    // The listener is bound to the recording owner; gesture state lives in its ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holdOwner]);
   useEffect(() => {
     if (!recording || seconds < 115) {
       return;
     }
-    fileAction.run(finishRecording);
+    const gesture = holdOwner.gesture;
+    fileAction.run(() => gesture?.started && !gesture.ended ? endHold(gesture) : finishRecording());
     // Recording is deliberately bounded; native adapter has its own hard limit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording, seconds]);
@@ -381,7 +522,7 @@ export function ChatScreen({
       voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
       (state.scope && !state.scope.isRetained()) ||
       !text || before.sending || awaitingInitialConversation() ||
-      recording || fileAction.busy || voice || !ready) return;
+      recording || captureBusy || activeRecorder || fileAction.busy || voice || !ready) return;
     const requestId = newRequestId();
     const userKey = `${requestId}:user`;
     const assistantKey = `${requestId}:assistant`;
@@ -483,7 +624,7 @@ export function ChatScreen({
     !draft.trim() ||
     awaitingInitialConversation() ||
     sending ||
-    recording ||
+    recording || captureBusy ||
     Boolean(voice) ||
     fileAction.busy ||
     !attachmentReady;
@@ -516,18 +657,14 @@ export function ChatScreen({
         )}
         {messages.length === 0 && !history.loading && (
           <View style={chat.welcome}>
-            <View style={chat.welcomeOrb}>
-              <AssistantOrb size={76} />
-            </View>
-            <Text style={chat.welcomeTitle}>有什么想聊的？</Text>
+            <Text style={chat.welcomeTitle}>今天想聊点什么？</Text>
             <Text style={chat.welcomeBody}>
-              一个问题、一个想法，都可以从这里开始。
+              一个问题，一个想法，都可以。
             </Text>
             <View style={chat.suggestions}>
               {[
-                '帮我梳理今天的重点',
-                '把一个目标拆成小步骤',
-                '结合我的记忆给点建议',
+                '帮我安排一下明天',
+                '帮我写一封简短回复',
               ].map(value => (
                 <Pressable
                   accessibilityRole="button"
@@ -536,7 +673,6 @@ export function ChatScreen({
                   style={chat.suggestion}
                 >
                   <Text style={chat.suggestionText}>{value}</Text>
-                  <Icon name="arrowUp" size={14} color={colors.secondary} />
                 </Pressable>
               ))}
             </View>
@@ -560,9 +696,9 @@ export function ChatScreen({
           style={[chat.todoDiscovery, sending && s.disabled]}
           onPress={() => navigate({ name: 'todoSources', conversationId: id })}
         >
-          <Icon name="tasks" size={15} color={colors.secondary} />
+          <Icon name="tasks" size={15} color={appearance.secondary} />
           <Text style={chat.todoDiscoveryText}>从这段对话发现待办</Text>
-          <Icon name="chevronRight" size={14} color={colors.secondary} />
+          <Icon name="chevronRight" size={14} color={appearance.secondary} />
         </Pressable>
       )}
     </View>
@@ -585,9 +721,13 @@ export function ChatScreen({
         keyboardShouldPersistTaps="handled"
         nestedScrollEnabled
         bounces={false}
-        onLayout={revealFocusedInput}
+        onLayout={event => {
+          const height = event?.nativeEvent?.layout?.height;
+          if (typeof height === 'number' && Number.isFinite(height) && height > 0) setComposerHeight(previous => previous === height ? previous : height);
+          revealFocusedInput();
+        }}
       >
-        {(fileAction.error || voiceError || attachment || recording || voice) && (
+        {(fileAction.error || voiceError || attachment || voice) && (
           <ScrollView
             style={[chat.composerSupport, { maxHeight: supportMaxHeight }]}
             keyboardShouldPersistTaps="handled"
@@ -600,43 +740,13 @@ export function ChatScreen({
                 附件最多 25 MB。录音会自动转成文字。
               </Text>
             )}
-            {recording && (
-              <View style={chat.recordingPanel}>
-                <View style={chat.recordingInfo}>
-                  <View style={chat.recordingDot} />
-                  <View>
-                    <Text style={chat.recordingLabel}>
-                      正在录音 ·{' '}
-                      {String(Math.floor(seconds / 60)).padStart(2, '0')}:
-                      {String(seconds % 60).padStart(2, '0')}
-                    </Text>
-                    <Text style={chat.recordingHint}>
-                      结束后自动转成文字，确认后再发送 · 最长 120 秒
-                    </Text>
-                  </View>
-                </View>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="结束录音"
-                  disabled={fileAction.busy}
-                  style={chat.stopButton}
-                  onPress={() => fileAction.run(finishRecording)}
-                >
-                  {fileAction.busy ? (
-                    <ActivityIndicator size="small" color={colors.danger} />
-                  ) : (
-                    <Text style={chat.stopText}>结束</Text>
-                  )}
-                </Pressable>
-              </View>
-            )}
             {voice && (
               <Card style={chat.attachmentCard}>
                 <View style={[s.row, { gap: 10 }]}>
                   {voiceBusy ? (
-                    <ActivityIndicator color={colors.accent} />
+                    <ActivityIndicator color={appearance.accent} />
                   ) : (
-                    <Icon name="mic" size={20} color={colors.accent} />
+                    <Icon name="mic" size={20} color={appearance.accent} />
                   )}
                   <Text style={[s.body, s.fill, { fontSize: 12 }]}>
                     {voicePhase}
@@ -654,7 +764,7 @@ export function ChatScreen({
                     }}
                     style={chat.removeButton}
                   >
-                    <Icon name="close" size={18} color={colors.secondary} />
+                    <Icon name="close" size={18} color={appearance.secondary} />
                   </Pressable>
                 </View>
                 {!voiceBusy && !fileAction.busy && (
@@ -674,7 +784,7 @@ export function ChatScreen({
                     <Icon
                       name={isAudioFile(attachment.file) ? 'mic' : 'file'}
                       size={20}
-                      color={colors.accent}
+                      color={appearance.accent}
                     />
                   </View>
                   <View style={s.fill}>
@@ -696,7 +806,7 @@ export function ChatScreen({
                     onPress={() => setAttachment(null)}
                     style={chat.removeButton}
                   >
-                    <Icon name="close" size={18} color={colors.secondary} />
+                    <Icon name="close" size={18} color={appearance.secondary} />
                   </Pressable>
                 </View>
                 {!attachment.upload ? (
@@ -758,7 +868,7 @@ export function ChatScreen({
                   !attachment.transcript &&
                   !isAudioFile(attachment.file) && (
                     <Text
-                      style={[s.small, { color: colors.amber, marginTop: 6 }]}
+                      style={[s.small, { color: appearance.secondary, marginTop: 6 }]}
                     >
                       已真实保存。暂不能解析 PDF、PPT
                       或图片，不会将其作为已读资料。
@@ -796,7 +906,18 @@ export function ChatScreen({
             revealFocusedInput();
           }}
         >
+          <ChatModeMotion mode={voiceMode ? 'voice' : 'text'} reducedMotion={reducedMotion}>
+          <View style={chat.composerRow}>
+          {navigationActions}
+          <Pressable accessibilityRole="button" accessibilityLabel={voiceMode ? '切换文字输入' : '切换语音输入'}
+            disabled={recording || captureBusy || fileAction.busy || Boolean(voice)}
+            style={chat.toolButton} onPress={toggleInputMode}>
+            <Icon name={voiceMode ? 'keyboard' : 'mic'} size={23} color={appearance.secondary} />
+          </Pressable>
           <TextInput
+            ref={inputRef}
+            accessibilityElementsHidden={voiceMode}
+            importantForAccessibility={voiceMode ? 'no-hide-descendants' : 'auto'}
             accessibilityLabel="给助手的消息"
             multiline
             scrollEnabled
@@ -804,9 +925,9 @@ export function ChatScreen({
             placeholder={
               recording
                 ? '正在录音，结束后继续输入…'
-                : '发消息，或说说你的想法…'
+                : '发消息…'
             }
-            placeholderTextColor={colors.muted}
+            placeholderTextColor={appearance.secondary}
             value={draft}
             onChangeText={setDraft}
             onContentSizeChange={refreshInputFontScale}
@@ -822,11 +943,27 @@ export function ChatScreen({
             style={[
               chat.input,
               { minHeight: inputMinHeight, maxHeight: inputMaxHeight },
+              voiceMode && chat.hiddenInput,
             ]}
           />
+          {voiceMode && <View testID="chat-hold-to-talk" accessible={false}
+            style={[chat.holdButton, holdActive && chat.holdPressed, holdActive && holdCancelled && chat.recordingCancelled]}
+            onStartShouldSetResponder={() => !fileAction.busy && !sending && !voice}
+            onResponderGrant={event => beginHold(event?.nativeEvent?.pageY)}
+            onResponderRelease={() => releaseHold()}
+            onResponderTerminationRequest={() => true}
+            onResponderTerminate={() => releaseHold(true)}
+            onResponderMove={event => {
+              const gesture = holdOwner.gesture;
+              if (!gesture?.held || gesture.startY === undefined) return;
+              gesture.cancelled = gesture.startY - event.nativeEvent.pageY > 44;
+              setHoldCancelled(gesture.cancelled);
+            }}
+            onTouchCancel={() => releaseHold(true)}>
+            <Text style={[chat.holdText, holdActive && holdCancelled && chat.cancelText]}>{holdActive ? holdCancelled ? '松开取消' : '松开转文字' : '按住说话'}</Text>
+          </View>}
           <View style={chat.composerActions}>
             <View style={chat.inputTools}>
-              {navigationActions}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="选择附件"
@@ -835,7 +972,7 @@ export function ChatScreen({
                   (fileAction.busy || recording || sending) &&
                     s.disabled,
                 ]}
-                disabled={fileAction.busy || recording || sending}
+                disabled={fileAction.busy || recording || captureBusy || sending}
                 onPress={() =>
                   fileAction.run(async ({ isCurrent }) => {
                     const file = await platform.pickDocument();
@@ -845,9 +982,9 @@ export function ChatScreen({
                   })
                 }
               >
-                <Icon name="plus" size={23} color={colors.secondary} />
+                <Icon name="plus" size={23} color={appearance.secondary} />
               </Pressable>
-              <Pressable
+              {voiceMode && <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={recording ? '结束录音' : '开始录音'}
                 style={[
@@ -855,20 +992,25 @@ export function ChatScreen({
                   recording && chat.recordingTool,
                   (fileAction.busy || sending) && s.disabled,
                 ]}
-                disabled={fileAction.busy || sending || Boolean(voice)}
+                disabled={fileAction.busy || sending || Boolean(voice) || captureBusy}
                 onPress={() =>
                   fileAction.run(async ({ isCurrent }) => {
                     if (recording) {
                       await finishRecording();
                     } else {
-                      await platform.startRecording();
-                      if (!isCurrent()) {
-                        await platform.stopRecording().catch(() => {});
-                        return;
+                      if (activeRecorder) throw new Error('上一段录音尚未结束，请稍后重试。');
+                      const lease = {}; activeRecorder = lease; recorderLease.current = lease;
+                      try {
+                        await platform.startRecording();
+                        if (!isCurrent()) {
+                          await stopRecorder(lease); releaseRecorder(lease);
+                          return;
+                        }
+                        recordingRef.current = true;
+                        setSeconds(0); setRecording(true);
+                      } catch (failure) {
+                        releaseRecorder(lease); throw failure;
                       }
-                      recordingRef.current = true;
-                      setSeconds(0);
-                      setRecording(true);
                     }
                   })
                 }
@@ -876,16 +1018,11 @@ export function ChatScreen({
                 {recording ? (
                   <View style={chat.stopSymbol} />
                 ) : (
-                  <Icon name="mic" size={21} color={colors.secondary} />
+                  <Icon name="mic" size={21} color={appearance.secondary} />
                 )}
-              </Pressable>
-              {!navigationActions && (
-                <Text numberOfLines={1} style={chat.memoryHint}>
-                  记忆由你主动添加
-                </Text>
-              )}
+              </Pressable>}
             </View>
-            <Pressable
+            {!voiceMode && <Pressable
               accessibilityRole="button"
               accessibilityLabel="发送消息"
               disabled={sendDisabled}
@@ -898,13 +1035,18 @@ export function ChatScreen({
                 <Icon
                   name="arrowUp"
                   size={23}
-                  color={sendDisabled ? colors.secondary : '#FFFFFF'}
+                  color={sendDisabled ? appearance.secondary : appearance.onAccent}
                 />
               )}
-            </Pressable>
+            </Pressable>}
           </View>
+          </View>
+          </ChatModeMotion>
         </View>
       </ScrollView>
+      {recording && <ChatVoiceOverlay seconds={seconds} cancelled={holdActive && holdCancelled} holding={holdActive}
+        bottom={composerHeight} availableHeight={availableHeight - composerHeight - 8}
+        fontScale={nativeFontScale ?? fontScale} reducedMotion={reducedMotion} />}
     </View>
   );
 }
@@ -926,16 +1068,16 @@ const ChatMessage = memo(function ChatMessage({
       collapsable={false}
       style={chat.userBubble}
     >
-      <Text selectable style={[s.body, { color: colors.ink }]}>
+      <Text selectable style={chat.userText}>
         {message.content}
       </Text>
-      {message.delivery === 'sending' && <Text style={s.small}>发送中…</Text>}
+      {message.delivery === 'sending' && <Text style={chat.userMeta}>发送中…</Text>}
       {message.delivery === 'failed' && <View>
-        <Text style={s.small}>{message.stream_error ?? '发送未完成，已保留这条消息。'}</Text>
-        <Button variant="ghost" onPress={() => retry(message.client_key ?? message.id)}>重试</Button>
+        <Text style={chat.userMeta}>{message.stream_error ?? '发送未完成，已保留这条消息。'}</Text>
+        <Button variant="secondary" onPress={() => retry(message.client_key ?? message.id)}>重试</Button>
       </View>}
       {(message.attachments ?? []).map(file => (
-        <Text key={file.upload_id} selectable style={s.small}>
+        <Text key={file.upload_id} selectable style={chat.userMeta}>
           附件：{file.name}
           {file.unavailable ? '（已删除或不可用）' : ''}
         </Text>
@@ -947,15 +1089,11 @@ const ChatMessage = memo(function ChatMessage({
       collapsable={false}
       style={chat.assistantMessage}
     >
-      <View style={chat.messageIdentity}>
-        <AssistantOrb size={22} />
-        <Text style={chat.assistantName}>妥啦</Text>
-        {message.model_mode === 'local' && <Pill tone="neutral">本地生成</Pill>}
-      </View>
       <View style={chat.answer}>
-        {message.content ? <ResultText content={message.content} /> : null}
+        {message.model_mode === 'local' && <Text style={chat.timestamp}>本地生成</Text>}
+        {message.content ? <ResultText content={message.content} textStyle={chat.answerText} /> : null}
         {message.stream_status ? <View style={chat.thinking}>
-          <ActivityIndicator color={colors.accent} size="small" />
+          <ActivityIndicator color={appearance.accent} size="small" />
           <Text style={s.small}>{message.stream_status}</Text>
         </View> : null}
         {message.stream_error && <Text style={s.small}>{message.stream_error}</Text>}
@@ -968,7 +1106,7 @@ const ChatMessage = memo(function ChatMessage({
             onPress={() => share(message.content)}
           >
             <Text style={chat.shareText}>分享</Text>
-            <Icon name="arrowRight" size={14} color={colors.secondary} />
+            <Icon name="arrowRight" size={14} color={appearance.secondary} />
           </Pressable>
         </View>}
       </View>
@@ -1002,7 +1140,7 @@ export function ConversationsScreen() {
           style={chat.newConversation}
           onPress={() => navigate({ name: 'chat' })}
         >
-          <Icon name="plus" size={21} color={colors.accent} />
+          <Icon name="plus" size={21} color={historyColors.accent} />
         </Pressable>
       </View>
       <ErrorNotice message={data.error} retry={data.refresh} />
@@ -1027,7 +1165,7 @@ export function ConversationsScreen() {
                     {formatDate(item.updated_at)}
                   </Text>
                 </View>
-                <Icon name="chevronRight" size={18} color={colors.secondary} />
+                <Icon name="chevronRight" size={18} color={historyColors.secondary} />
               </Pressable>
             ))}
           </View>
@@ -1044,9 +1182,9 @@ export function ConversationsScreen() {
 }
 
 const chat = StyleSheet.create({
-  chatRoot: { minHeight: 0 },
+  chatRoot: { minHeight: 0, backgroundColor: appearance.background },
   messagePane: { flex: 1, minHeight: 0 },
-  messages: { paddingHorizontal: 24, flexGrow: 1 },
+  messages: { paddingHorizontal: 20, paddingTop: 20, flexGrow: 1 },
   messageFooter: { paddingBottom: 24 },
   todoDiscovery: {
     minHeight: 44,
@@ -1056,61 +1194,57 @@ const chat = StyleSheet.create({
     justifyContent: 'center',
     gap: 7,
   },
-  todoDiscoveryText: { fontSize: 12, color: colors.secondary },
-  welcome: { alignItems: 'center', paddingTop: 27, paddingBottom: 12 },
-  welcomeOrb: { marginBottom: 19 },
+  todoDiscoveryText: { fontSize: 12, color: appearance.secondary },
+  welcome: { alignItems: 'flex-start', paddingTop: 40, paddingBottom: 18 },
   welcomeTitle: {
-    fontSize: 23,
-    lineHeight: 33,
+    fontSize: 21,
+    lineHeight: 30,
     fontWeight: '500',
-    color: colors.ink,
+    color: appearance.ink,
   },
   welcomeBody: {
-    fontSize: 12,
-    lineHeight: 21,
-    color: colors.secondary,
+    fontSize: 14,
+    lineHeight: 24,
+    color: appearance.secondary,
     marginTop: 9,
-    textAlign: 'center',
+    textAlign: 'left',
   },
-  suggestions: { alignItems: 'center', gap: 9, marginTop: 23, width: '100%' },
+  suggestions: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 20, width: '100%' },
   suggestion: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 14,
-    backgroundColor: colors.surface,
-    borderRadius: 24,
+    backgroundColor: appearance.surface,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: appearance.line,
     minHeight: 44,
-    paddingVertical: 11,
-    paddingHorizontal: 17,
+    paddingVertical: 5,
+    paddingHorizontal: 12,
   },
-  suggestionText: { color: colors.text, fontSize: 12, lineHeight: 20 },
+  suggestionText: { color: appearance.ink, fontSize: 12, lineHeight: 20 },
   userBubble: {
     alignSelf: 'flex-end',
-    maxWidth: '90%',
-    backgroundColor: colors.blueLight,
-    paddingHorizontal: 17,
-    paddingVertical: 13,
-    borderRadius: 21,
-    borderBottomRightRadius: 7,
-    marginTop: 20,
+    maxWidth: '75%',
+    backgroundColor: appearance.accent,
+    paddingHorizontal: 15,
+    paddingVertical: 11,
+    borderRadius: 18,
+    borderBottomRightRadius: 6,
+    marginTop: 24,
   },
-  assistantMessage: { marginTop: 25 },
-  messageIdentity: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    marginBottom: 13,
-  },
-  assistantName: { fontSize: 12, color: colors.ink, fontWeight: '500' },
-  answer: { paddingLeft: 1 },
+  userText: { color: appearance.onAccent, fontSize: 15, lineHeight: 26 },
+  answerText: { color: appearance.ink, fontSize: 15, lineHeight: 28 },
+  assistantMessage: { marginTop: 24 },
+  answer: { paddingRight: 12 },
   answerFooter: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     marginTop: 3,
   },
-  timestamp: { fontSize: 10, lineHeight: 17, color: colors.secondary },
+  timestamp: { fontSize: 10, lineHeight: 17, color: appearance.secondary },
   shareButton: {
     minWidth: 50,
     minHeight: 44,
@@ -1119,7 +1253,7 @@ const chat = StyleSheet.create({
     justifyContent: 'flex-end',
     gap: 4,
   },
-  shareText: { fontSize: 11, lineHeight: 18, color: colors.secondary },
+  shareText: { fontSize: 11, lineHeight: 18, color: appearance.secondary },
   thinking: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1128,10 +1262,10 @@ const chat = StyleSheet.create({
     marginBottom: 8,
   },
   composerArea: {
-    paddingHorizontal: 16,
-    paddingTop: 9,
-    paddingBottom: 12,
-    backgroundColor: colors.background,
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 10,
+    backgroundColor: appearance.background,
     flexShrink: 0,
   },
   composerViewport: { flexGrow: 0, flexShrink: 1, minHeight: 0 },
@@ -1144,48 +1278,47 @@ const chat = StyleSheet.create({
   attachmentHint: {
     fontSize: 10,
     lineHeight: 17,
-    color: colors.secondary,
+    color: appearance.secondary,
     textAlign: 'center',
     paddingBottom: 6,
   },
   composer: {
     flexShrink: 0,
-    backgroundColor: colors.surface,
+    backgroundColor: appearance.surface,
     borderWidth: 1,
-    borderColor: '#EDF0F6',
-    borderRadius: 28,
-    paddingHorizontal: 9,
-    paddingTop: 4,
-    shadowColor: '#5671AA',
+    borderColor: appearance.line,
+    borderRadius: 25,
+    paddingHorizontal: 3,
+    paddingVertical: 3,
+    shadowColor: appearance.ink,
     shadowOpacity: 0.07,
     shadowRadius: 15,
     shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
+    elevation: 0,
   },
   input: {
-    fontSize: 14,
+    flex: 1,
+    fontSize: 16,
     // A fixed lineHeight leaves a stale Android CustomLineHeightSpan after a
     // live fontScale change. Native font metrics keep complete glyphs visible.
     includeFontPadding: true,
-    minHeight: 51,
+    minHeight: 44,
     maxHeight: 145,
-    paddingHorizontal: 10,
-    paddingTop: 12,
-    paddingBottom: 10,
-    color: colors.ink,
+    paddingHorizontal: 4,
+    paddingTop: 9,
+    paddingBottom: 9,
+    color: appearance.ink,
     textAlignVertical: 'top',
   },
   composerActions: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingBottom: 7,
+    flexShrink: 0,
   },
   inputTools: {
     flexDirection: 'row',
     alignItems: 'center',
-    flex: 1,
-    marginRight: 8,
   },
   toolButton: {
     width: 44,
@@ -1195,13 +1328,12 @@ const chat = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  memoryHint: {
-    fontSize: 10,
-    lineHeight: 17,
-    color: colors.secondary,
-    flex: 1,
-    marginLeft: 4,
-  },
+  composerRow: { flexDirection: 'row', alignItems: 'flex-end' },
+  hiddenInput: { display: 'none' },
+  holdButton: { flex: 1, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 18 },
+  holdPressed: { backgroundColor: appearance.tint },
+  holdText: { fontSize: 16, color: appearance.ink, fontWeight: '500' },
+  userMeta: { fontSize: 12, lineHeight: 18, color: appearance.onAccent },
   sendButton: {
     width: 44,
     height: 44,
@@ -1209,59 +1341,17 @@ const chat = StyleSheet.create({
     borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.accent,
+    backgroundColor: appearance.accent,
   },
-  sendDisabled: { backgroundColor: '#EEF1F7' },
-  recordingPanel: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-    paddingLeft: 14,
-    paddingRight: 6,
-    paddingVertical: 7,
-    borderRadius: 20,
-    backgroundColor: colors.dangerLight,
-    marginBottom: 10,
-  },
-  recordingInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 9,
-    flex: 1,
-  },
-  recordingDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.danger,
-  },
-  recordingLabel: {
-    fontSize: 12,
-    lineHeight: 20,
-    color: colors.danger,
-    fontWeight: '500',
-  },
-  recordingHint: { fontSize: 10, lineHeight: 17, color: colors.danger },
-  stopButton: {
-    minWidth: 48,
-    minHeight: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 10,
-  },
-  stopText: {
-    fontSize: 12,
-    lineHeight: 20,
-    color: colors.danger,
-    fontWeight: '600',
-  },
-  recordingTool: { backgroundColor: colors.dangerLight },
+  sendDisabled: { backgroundColor: appearance.keyboard },
+  recordingCancelled: { backgroundColor: appearance.cancellation },
+  cancelText: { color: appearance.ink },
+  recordingTool: { backgroundColor: appearance.cancellation },
   stopSymbol: {
     width: 13,
     height: 13,
     borderRadius: 3,
-    backgroundColor: colors.danger,
+    backgroundColor: appearance.cancellationText,
   },
   attachmentCard: { padding: 12, borderRadius: 20, marginBottom: 10 },
   fileIcon: {
@@ -1270,7 +1360,7 @@ const chat = StyleSheet.create({
     borderRadius: 11,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: colors.blueLight,
+    backgroundColor: appearance.tint,
   },
   removeButton: {
     width: 44,
@@ -1289,25 +1379,25 @@ const chat = StyleSheet.create({
   conversationsTitle: {
     fontSize: 25,
     lineHeight: 35,
-    color: colors.ink,
+    color: historyColors.ink,
     fontWeight: '500',
   },
   conversationsSubtitle: {
     fontSize: 12,
     lineHeight: 20,
-    color: colors.secondary,
+    color: historyColors.secondary,
     marginTop: 6,
   },
   newConversation: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: colors.blueLight,
+    backgroundColor: historyColors.blueLight,
     alignItems: 'center',
     justifyContent: 'center',
   },
   conversationList: {
-    backgroundColor: colors.surface,
+    backgroundColor: historyColors.surface,
     borderRadius: 23,
     overflow: 'hidden',
   },
@@ -1319,18 +1409,18 @@ const chat = StyleSheet.create({
     paddingVertical: 18,
     minHeight: 86,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderColor: colors.line,
+    borderColor: historyColors.line,
   },
   conversationName: {
     fontSize: 14,
     lineHeight: 23,
-    color: colors.ink,
+    color: historyColors.ink,
     fontWeight: '500',
   },
   conversationDate: {
     fontSize: 11,
     lineHeight: 18,
-    color: colors.secondary,
+    color: historyColors.secondary,
     marginTop: 5,
   },
 });

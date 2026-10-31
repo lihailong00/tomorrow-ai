@@ -19,7 +19,7 @@ const memory = (id: string, kind = 'fact') => ({
   id,
   kind,
   title: `记忆${id}`,
-  content: 'fixture',
+  content: `记忆内容${id}`,
   source: 'test',
   updated_at: '',
 });
@@ -129,7 +129,7 @@ it('continues task pages, deduplicates overlaps, and finds older active tasks th
   await act(async () => tree.unmount());
 });
 
-it('discards a late memory page after changing category and refreshes from the first page', async () => {
+it('discards a late memory page after refreshing the compact memory view', async () => {
   const late = deferred<{
     items: ReturnType<typeof memory>[];
     next_offset: null;
@@ -138,10 +138,6 @@ it('discards a late memory page after changing category and refreshes from the f
     .fn()
     .mockResolvedValueOnce({ items: [memory('new')], next_offset: 50 })
     .mockReturnValueOnce(late.promise)
-    .mockResolvedValueOnce({
-      items: [memory('person', 'person')],
-      next_offset: null,
-    })
     .mockResolvedValueOnce({
       items: [memory('fresh-person', 'person')],
       next_offset: null,
@@ -156,25 +152,21 @@ it('discards a late memory page after changing category and refreshes from the f
     );
   });
   await act(async () => {
-    tree.root
-      .findAllByType(Button)
-      .find(node => node.props.children === '加载更多记忆')!
-      .props.onPress();
+    tree.root.findAll(node => node.props.accessibilityLabel === '查看全部记忆' && typeof node.props.onPress === 'function').pop()!.props.onPress();
   });
   await act(async () => {
-    pressFilter(tree, '人物');
+    tree.root.findAll(node => node.props.accessibilityLabel === '加载更多记忆' && typeof node.props.onPress === 'function').pop()!.props.onPress();
   });
-  expect(memories).toHaveBeenLastCalledWith('person', { offset: 0, limit: 50 });
-  await act(async () => {
-    late.resolve({ items: [memory('stale')], next_offset: null });
-  });
-  expect(texts(tree)).toContain('记忆person');
-  expect(texts(tree)).not.toContain('记忆stale');
+  expect(memories).toHaveBeenLastCalledWith(undefined, { offset: 50, limit: 50 });
   await act(async () => {
     tree.root.findByType(RefreshControl).props.onRefresh();
   });
-  expect(memories).toHaveBeenLastCalledWith('person', { offset: 0, limit: 50 });
-  expect(texts(tree)).toContain('记忆fresh-person');
-  expect(texts(tree)).not.toContain('记忆person');
+  expect(memories).toHaveBeenLastCalledWith(undefined, { offset: 0, limit: 50 });
+  await act(async () => {
+    late.resolve({ items: [memory('stale')], next_offset: null });
+  });
+  expect(texts(tree)).toContain('记忆内容fresh-person');
+  expect(texts(tree)).not.toContain('记忆内容stale');
+  expect(texts(tree)).not.toContain('记忆内容new');
   await act(async () => tree.unmount());
 });

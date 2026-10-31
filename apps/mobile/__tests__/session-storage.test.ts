@@ -46,11 +46,13 @@ describe('cloud service defaults', () => {
     },
   );
 
-  it.each(['http://10.0.2.2:8080', 'http://10.0.2.2:8080/v1/'])(
+  it.each(['http://10.0.2.2:8080', 'http://10.0.2.2:8080/v1/',
+    'https://api.example.invalid',
+    'https://api.example.invalid/v1/'])(
     'migrates the old default %s after removing its local session',
     async url => {
       (AsyncStorage.getItem as jest.Mock).mockResolvedValue(
-        JSON.stringify({ serverUrl: url, onboarded: true }),
+        JSON.stringify({ serverUrl: url, onboarded: true, connectionError: 'previous endpoint unavailable' }),
       );
       let finishRemoval!: () => void;
       NativeModules.TomorrowPlatform.secureRemove.mockImplementationOnce(
@@ -81,6 +83,8 @@ describe('cloud service defaults', () => {
 
   it.each([
     { serverUrl: 'https://my-service.example', onboarded: true },
+    { serverUrl: 'https://api.example.invalid', onboarded: true, serverUrlCustomized: true },
+    { serverUrl: 'https://api.example.invalid.example.org', onboarded: true },
     { serverUrl: 'http://192.168.1.8:8080', onboarded: true },
     {
       serverUrl: 'http://10.0.2.2:8080',

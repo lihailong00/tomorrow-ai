@@ -13,8 +13,6 @@ import {
   chineseDayLabel,
   frequencies,
   isActiveTask,
-  memoryKinds,
-  MemoryKind,
   RuntimeInfo,
   Task,
   taskStatuses,
@@ -23,6 +21,7 @@ import { Button, ErrorNotice, Loading, Notice } from '../ui/components';
 import { colors } from '../ui/theme';
 import { AssistantOrb, Icon } from '../ui/visuals';
 import { platform } from '../platform/ports';
+import { MemoryHome } from '../features/memory/MemoryHome';
 
 type IconName = React.ComponentProps<typeof Icon>['name'];
 const accent = colors.accent;
@@ -720,126 +719,9 @@ export function TasksScreen() {
 }
 
 export function MemoriesScreen() {
-  const { api, navigate, revision, formatDate } = useApp();
-  const [kind, setKind] = useState<MemoryKind | undefined>();
-  const data = usePagedList(
-    offset => api.memories(kind, { offset, limit: 50 }),
-    [api, kind, revision],
-  );
-  const kindTint: Record<MemoryKind, string> = {
-    preference: tint.blue,
-    person: tint.peach,
-    project: tint.lilac,
-    goal: '#ECF1FD',
-    fact: '#F0F1F7',
-  };
+  const { api, user, preferences } = useApp();
   return (
-    <ScrollView
-      showsVerticalScrollIndicator={false}
-      refreshControl={
-        <RefreshControl
-          refreshing={data.loading && data.items.length > 0}
-          onRefresh={data.refresh}
-          tintColor={accent}
-        />
-      }
-      contentContainerStyle={v.pageContent}
-    >
-      <PageHeader
-        title="记忆"
-        subtitle="你希望我记住的事，由你决定。"
-        action="新增记忆"
-        onAction={() => navigate({ name: 'memory' })}
-      />
-      <View style={v.memoryInfo}>
-        <Icon name="memory" size={18} color="#8B86B5" />
-        <Text style={v.memoryInfoText}>
-          只保存你主动添加的内容，随时修改或删除。
-        </Text>
-      </View>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={v.memoryFilters}
-      >
-        {[[undefined, '全部'], ...Object.entries(memoryKinds)].map(
-          ([id, label]) => (
-            <Pressable
-              accessibilityRole="button"
-              key={id ?? 'all'}
-              onPress={() => setKind(id as MemoryKind | undefined)}
-              style={[v.filter, kind === id && v.filterSelected]}
-            >
-              <Text style={[v.filterText, kind === id && v.filterTextSelected]}>
-                {label}
-              </Text>
-            </Pressable>
-          ),
-        )}
-      </ScrollView>
-      <ErrorNotice message={data.error} retry={data.refresh} />
-      {data.loading && !data.items.length && <Loading />}
-      {data.items.length ? (
-        data.items.map(memory => (
-          <Pressable
-            key={memory.id}
-            accessibilityRole="button"
-            accessibilityLabel={'编辑记忆' + memory.title}
-            onPress={() => navigate({ name: 'memory', memory })}
-            style={({ pressed }) => [v.memoryCard, pressed && v.pressed]}
-          >
-            <View style={v.memoryCardHeader}>
-              <View
-                style={[
-                  v.memoryKind,
-                  { backgroundColor: kindTint[memory.kind] },
-                ]}
-              >
-                <Icon
-                  name={
-                    memory.kind === 'project'
-                      ? 'file'
-                      : memory.kind === 'goal'
-                      ? 'sparkles'
-                      : 'memory'
-                  }
-                  size={13}
-                  color="#8F93B8"
-                />
-                <Text style={v.memoryKindText}>{memoryKinds[memory.kind]}</Text>
-              </View>
-              <Icon name="more" size={18} color="#A0A7B6" />
-            </View>
-            <Text style={v.memoryTitle}>{memory.title}</Text>
-            <Text style={v.memoryBody} numberOfLines={4}>
-              {memory.content}
-            </Text>
-            <View style={v.memorySource}>
-              <Text style={v.sourceText} numberOfLines={1}>
-                来源：{memory.source || '你主动添加'}
-              </Text>
-              <Text style={v.sourceText}>{formatDate(memory.updated_at)}</Text>
-            </View>
-          </Pressable>
-        ))
-      ) : !data.loading && !data.error ? (
-        <PageEmpty
-          icon="memory"
-          title={
-            kind ? '还没有' + memoryKinds[kind] + '记忆' : '从一条偏好开始'
-          }
-          body="例如「我喜欢在上午处理重要工作」。你添加的记忆会帮助我提供更合适的建议。"
-          action="添加记忆"
-          onAction={() => navigate({ name: 'memory' })}
-        />
-      ) : null}
-      {data.hasMore && (
-        <Button variant="ghost" disabled={data.loading} onPress={data.loadMore}>
-          {data.loading ? '正在加载…' : '加载更多记忆'}
-        </Button>
-      )}
-      <Text style={v.bottomNote}>删除的记忆将不再用于之后的回答。</Text>
-    </ScrollView>
+    <MemoryHome key={`${api.baseUrl}:${user?.id ?? ''}:${preferences?.instance?.id ?? ''}`} />
   );
 }
 
@@ -1586,64 +1468,6 @@ const v = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 3,
-  },
-  memoryInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 9,
-    borderRadius: 17,
-    backgroundColor: 'rgba(238,234,254,0.48)',
-    padding: 13,
-    marginBottom: 16,
-  },
-  memoryInfoText: { fontSize: 11, lineHeight: 20, color: '#9693AD', flex: 1 },
-  memoryFilters: { flexDirection: 'row', gap: 7, paddingBottom: 19 },
-  memoryCard: {
-    borderRadius: 22,
-    padding: 18,
-    backgroundColor: 'rgba(255,255,255,0.78)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.95)',
-    marginBottom: 12,
-  },
-  memoryCardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  memoryKind: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    borderRadius: 9,
-    paddingVertical: 5,
-    paddingHorizontal: 8,
-  },
-  memoryKindText: { fontSize: 10, color: '#8A91AC' },
-  memoryTitle: {
-    fontSize: 15,
-    lineHeight: 23,
-    fontWeight: '500',
-    color: '#465064',
-    marginTop: 12,
-  },
-  memoryBody: { fontSize: 13, lineHeight: 23, color: secondary, marginTop: 7 },
-  memorySource: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderColor: '#EDF0F6',
-    paddingTop: 12,
-    marginTop: 15,
-  },
-  bottomNote: {
-    fontSize: 11,
-    lineHeight: 19,
-    textAlign: 'center',
-    color: '#ABB1BF',
-    marginTop: 18,
   },
   assistantCard: {
     flexDirection: 'row',

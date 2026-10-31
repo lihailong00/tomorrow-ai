@@ -559,6 +559,7 @@ test('leaving a chat stops recording and a late picker cannot change its retaine
   const app = await setup(chatApi());
   await app.navigate({ name: 'chat' });
   (platform.stopRecording as jest.Mock).mockClear();
+  await act(async () => app.labelled('切换语音输入').props.onPress());
   await act(async () => app.labelled('开始录音').props.onPress());
   await app.navigate({ name: 'conversations' });
   expect(platform.stopRecording).toHaveBeenCalledTimes(1);

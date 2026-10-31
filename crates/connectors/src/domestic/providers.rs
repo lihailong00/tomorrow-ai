@@ -306,6 +306,17 @@ async fn amap_read_with_key(client: &Client, query: &Value, key: &str) -> Result
     let operation = text_arg(query, "operation", 32)?.unwrap_or("search");
     let limit = bounded_number(query, "limit", 10, ITEM_LIMIT as u64)? as usize;
     match operation {
+        "weather" => {
+            let city = required_arg(query, "city", 6)?;
+            if city.len() != 6 || !city.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(ConnectorError::invalid());
+            }
+            let value = json_response(client.get("https://restapi.amap.com/v3/weather/weatherInfo").query(&[
+                ("key", key), ("city", city.to_owned()), ("extensions", "base".to_owned()), ("output", "JSON".to_owned()),
+            ])).await?;
+            amap_success(&value)?;
+            amap_weather_result(&value)
+        }
         "search" => {
             let keywords = required_arg(query, "keywords", 200)?;
             let city = text_arg(query, "city", 80)?.unwrap_or("");
@@ -377,6 +388,22 @@ async fn amap_read_with_key(client: &Client, query: &Value, key: &str) -> Result
         }
         _ => Err(unsupported()),
     }
+}
+
+fn amap_weather_result(value: &Value) -> Result<Value> {
+    let live = value["lives"].as_array().and_then(|items| items.first()).ok_or_else(provider_error)?;
+    let city = clipped(live, "city", 80);
+    let weather = clipped(live, "weather", 80);
+    let temperature = clipped(live, "temperature", 16);
+    let reported_at = clipped(live, "reporttime", 40);
+    if city.is_empty() || weather.is_empty() || temperature.is_empty() || reported_at.is_empty() {
+        return Err(provider_error());
+    }
+    Ok(json!({"source":"amap", "operation":"weather", "items":[{
+        "id":format!("weather-{}", clipped(live, "adcode", 6)), "title":city,
+        "text":format!("{} · {}℃ · {}风 {}级 · 湿度 {}%\n更新时间：{}（北京时间）", weather, temperature,
+            clipped(live,"winddirection",32),clipped(live,"windpower",32),clipped(live,"humidity",16),reported_at)
+    }]}))
 }
 
 fn yuque_url(parts: &[&str]) -> Result<Url> {
@@ -719,6 +746,17 @@ mod tests {
         );
         assert!(zhihu_success(&json!({"Message":"ok"})).is_err());
         assert!(amap_success(&json!({"status":"0","infocode":"10001","info":"secret"})).is_err());
+    }
+
+    #[test]
+    fn weather_requires_actual_city_temperature_and_update_time() {
+        let result = amap_weather_result(&json!({"lives":[{"city":"上海市","adcode":"310000","weather":"小雨","temperature":"18","reporttime":"2026-10-31 14:00:00","winddirection":"东","windpower":"3","humidity":"80"}]})).unwrap();
+        assert_eq!(result["operation"], "weather");
+        assert_eq!(result["items"][0]["title"], "上海市");
+        assert!(result["items"][0]["text"].as_str().unwrap().contains("18℃"));
+        for value in [json!({}), json!({"lives":[]}), json!({"lives":[{"city":"上海市","weather":"晴"}]})] {
+            assert!(amap_weather_result(&value).is_err());
+        }
     }
 
     #[test]

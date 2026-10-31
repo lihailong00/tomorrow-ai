@@ -91,7 +91,7 @@ test('native anchoring skips the fixed header and keeps the same message View th
   const pane = () => app.tree.root.findByType(FlashList);
   const row = (id: string) => app.tree.root.findAllByType(View).find(node => node.props.testID === `chat-message-${id}`)!;
   // The inverted list keeps the visual history heading in its native footer.
-  expect(pane().props.maintainVisibleContentPosition).toEqual({ disabled: false });
+  expect(pane().props.maintainVisibleContentPosition).toEqual({ disabled: false, startRenderingFromBottom: true });
   expect(pane().props.ListFooterComponent.props).toMatchObject({ testID: 'chat-history-header', collapsable: false });
   expect(row('recent').props).toMatchObject({ testID: 'chat-message-recent', collapsable: false });
   const retainedRow = row('recent');
