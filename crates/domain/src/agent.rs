@@ -732,6 +732,7 @@ impl Repository {
                     return Err(DomainError::Conflict("记忆已被更新，请先重新查询".into()));
                 }
                 if name == "delete_memory" {
+                    crate::automatic_memory::forget_tx(&mut tx, &user_id, id).await?;
                     sqlx::query(
                         "DELETE FROM resources WHERE id=$1 AND user_id=$2 AND kind='memory'",
                     )
@@ -741,6 +742,9 @@ impl Repository {
                     .await?;
                     json!({"id":id,"deleted":true})
                 } else {
+                    sqlx::query("UPDATE memory_preferences SET epoch=epoch+1 WHERE user_id=$1").bind(&user_id).execute(&mut *tx).await?;
+                    sqlx::query("DELETE FROM memory_receipts WHERE user_id=$1 AND memory_id=$2").bind(&user_id).bind(id).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE memory_provenance SET expires_at=0 WHERE user_id=$1 AND memory_id=$2").bind(&user_id).bind(id).execute(&mut *tx).await?;
                     memory.content = validate_text(required(&args, "content")?, "记忆内容", 10000)?;
                     memory.version += 1;
                     memory.updated_at = timestamp(now());

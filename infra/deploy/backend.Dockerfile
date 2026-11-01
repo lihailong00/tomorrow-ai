@@ -11,6 +11,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
+    find crates migrations -type f -exec touch {} + && touch Cargo.toml Cargo.lock && \
     if [ "$BUILD_API_ONLY" = "1" ]; then \
         cargo build --release --locked -p tomorrow-api --bin tomorrow-api && \
         mkdir -p /out && cp target/release/tomorrow-api /out/; \

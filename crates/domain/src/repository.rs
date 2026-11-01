@@ -253,11 +253,16 @@ impl Repository {
             serde_json::to_string(&old).map_err(|e| DomainError::Internal(e.to_string()))?;
         let new_json =
             serde_json::to_string(&memory).map_err(|e| DomainError::Internal(e.to_string()))?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE memory_preferences SET epoch=epoch+1 WHERE user_id=$1").bind(user_id).execute(&mut *tx).await?;
         let changed=sqlx::query("UPDATE resources SET body=$1,updated_at=$2 WHERE user_id=$3 AND id=$4 AND kind='memory' AND body=$5")
-            .bind(new_json).bind(now()).bind(user_id).bind(id).bind(old_json).execute(&self.pool).await?.rows_affected();
+            .bind(new_json).bind(now()).bind(user_id).bind(id).bind(old_json).execute(&mut *tx).await?.rows_affected();
         if changed == 0 {
             return Err(DomainError::Conflict("记忆已被更新，请刷新后再修改".into()));
         }
+        sqlx::query("DELETE FROM memory_receipts WHERE user_id=$1 AND memory_id=$2").bind(user_id).bind(id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE memory_provenance SET expires_at=0 WHERE user_id=$1 AND memory_id=$2").bind(user_id).bind(id).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(memory)
     }
     pub async fn create_task(&self, user_id: &str, input: CreateTask) -> Result<Task, DomainError> {
@@ -964,6 +969,7 @@ impl Repository {
             }
         }
         crate::chat_messages::track_request_tx(&mut transaction,user_id,request_key.as_deref(),&turn.user_message,&turn.assistant_message.id,replacement.map_or(0,|r|r.revision+1)).await?;
+        crate::automatic_memory::enqueue(&mut transaction, user_id, &turn.user_message, &turn.assistant_message.id).await?;
         if let Some(key) = &request_key {
             crate::chat_stream::finish_tx(&mut transaction,user_id,key,attempt_token,&turn.response).await?;
         }
@@ -1138,6 +1144,7 @@ impl Repository {
         sqlx::raw_sql(include_str!("../../../migrations/sqlite/014_daily_growth.sql"))
             .execute(&pool).await?;
         crate::chat_messages::initialize(&pool).await?;
+        sqlx::raw_sql(crate::automatic_memory::SCHEMA).execute(&pool).await?;
         // Authentication checks this table even in non-admin processes such as
         // attachment and connector services; it must exist before any login.
         sqlx::query("CREATE TABLE IF NOT EXISTS admin_user_controls(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,disabled BIGINT NOT NULL DEFAULT 0,updated_at BIGINT NOT NULL)")
@@ -1334,15 +1341,20 @@ impl Repository {
         kind: &str,
         id: &str,
     ) -> Result<(), DomainError> {
+        let mut tx = self.pool.begin().await?;
+        if kind == "memory" {
+            crate::automatic_memory::forget_tx(&mut tx, user_id, id).await?;
+        }
         let result = sqlx::query("DELETE FROM resources WHERE user_id=$1 AND kind=$2 AND id=$3")
             .bind(user_id)
             .bind(kind)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         if result.rows_affected() == 0 {
             return Err(DomainError::NotFound);
         }
+        tx.commit().await?;
         Ok(())
     }
 }

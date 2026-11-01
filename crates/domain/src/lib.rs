@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod automatic_memory;
 pub mod auth;
 pub mod chat_stream;
 pub mod chat_messages;

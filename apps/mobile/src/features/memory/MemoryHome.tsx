@@ -27,6 +27,7 @@ import {
   selectMemoryHighlights,
 } from './memoryModel';
 import { useMemoryCollection } from './useMemoryCollection';
+import { AutomaticMemorySettings } from './AutomaticMemory';
 
 const appearance = {
   ink: '#303849',
@@ -250,6 +251,7 @@ export function MemoryHome() {
             <Icon name="plus" size={23} color={appearance.accent} />
           </Pressable>
         </View>
+        <AutomaticMemorySettings />
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="从对话里整理记忆，先列出候选供你确认"

@@ -250,6 +250,7 @@ pub(crate) async fn replace_tx(
 ) -> Result<(), DomainError> {
     validate_replacement_tx(tx, user, replacement).await?;
     invalidate_tx(tx, user, &replacement.original.id, keep).await?;
+    crate::automatic_memory::cancel_source_tx(tx, user, &replacement.original.id).await?;
     if let Some(id) = &replacement.assistant_id {
         sqlx::query("DELETE FROM resources WHERE id=$1 AND user_id=$2 AND kind='message'")
             .bind(id)
@@ -366,6 +367,7 @@ impl Repository {
         }
         let replacement = original_tx(&mut tx, user, conversation, id).await?;
         invalidate_tx(&mut tx, user, id, None).await?;
+        crate::automatic_memory::cancel_source_tx(&mut tx, user, id).await?;
         for id in replacement.removed_message_ids() {
             sqlx::query("DELETE FROM resources WHERE id=$1 AND user_id=$2 AND kind='message'")
                 .bind(id)

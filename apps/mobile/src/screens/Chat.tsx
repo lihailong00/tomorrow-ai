@@ -29,6 +29,7 @@ import {
   Loading,
 } from '../ui/components';
 import { ResultText } from '../ui/ResultText';
+import { AutomaticMemoryConsent, AutomaticMemoryNotice } from '../features/memory/AutomaticMemory';
 import { ChatModeMotion, useChatReducedMotion } from '../ui/ChatMotion';
 import { ChatVoiceOverlay } from '../ui/ChatVoiceOverlay';
 import { ChatDeleteConfirmation, ChatMessageActions, ChatTextSelection, type MessageAction, type MessageAnchor } from '../ui/ChatMessageActions';
@@ -379,9 +380,15 @@ export function ChatScreen({
       if (actionOwnerCurrent(target.owner)) { deletingRef.current = false; setDeleting(false); }
     }
   };
+  const latestAssistantId = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index--) {
+      if (messages[index].role === 'assistant') return messages[index].id;
+    }
+    return undefined;
+  }, [messages]);
   const renderMessage = useCallback(({ item }: { item: Message }) =>
-    <ChatMessage message={item} formatDate={formatDate} share={shareMessage} retry={retryMessage} menu={showMessageMenu} />,
-    [formatDate, shareMessage, retryMessage, showMessageMenu]);
+    <ChatMessage message={item} observeMemory={item.id === latestAssistantId} formatDate={formatDate} share={shareMessage} retry={retryMessage} menu={showMessageMenu} />,
+    [formatDate, shareMessage, retryMessage, showMessageMenu, latestAssistantId]);
   const attachmentReady = isReadableAttachment(attachment);
   useEffect(() => {
     void state.history.ensure(api, initialConversationId, applyHistory, canApplyHistory);
@@ -961,6 +968,7 @@ export function ChatScreen({
       capabilities.error, capabilities.refresh, capabilities.value, messages.length, conversationId, setDraft]);
   const messageFooter = useMemo(() => (
     <View style={chat.messageFooter}>
+      <AutomaticMemoryConsent />
       {id && messages.length > 0 && (
         <Pressable
           accessibilityRole="button"
@@ -1282,12 +1290,14 @@ export function ChatScreen({
 
 const ChatMessage = memo(function ChatMessage({
   message,
+  observeMemory,
   formatDate,
   share,
   retry,
   menu,
 }: {
   message: Message;
+  observeMemory: boolean;
   formatDate: (value: string) => string;
   share: (content: string) => unknown;
   retry: (key: string) => unknown;
@@ -1338,6 +1348,7 @@ const ChatMessage = memo(function ChatMessage({
       <View style={chat.answer}>
         {message.model_mode === 'local' && <Text style={chat.timestamp}>本地生成</Text>}
         {message.content ? <ResultText content={message.content} textStyle={chat.answerText} /> : null}
+        {!message.stream_status && !message.stream_error && message.model_mode === 'llm' && <AutomaticMemoryNotice replyId={message.id} active={observeMemory && Date.now() - Date.parse(message.created_at) < 120000} />}
         {message.stream_status ? <View style={chat.thinking}>
           <ActivityIndicator color={appearance.accent} size="small" />
           <Text style={s.small}>{message.stream_status}</Text>
