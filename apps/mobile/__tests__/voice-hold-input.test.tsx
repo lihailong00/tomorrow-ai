@@ -1,6 +1,6 @@
 import { addChatStreamMock } from '../test/chatStreamMock';
 import React from 'react';
-import { Keyboard, Text, TextInput } from 'react-native';
+import { Keyboard, ScrollView, StyleSheet, Text, TextInput } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { ChatScreen, createChatEntryState } from '../src/screens/Chat';
 import { ChatVoiceOverlay } from '../src/ui/ChatVoiceOverlay';
@@ -178,6 +178,39 @@ test('hold release transcribes once and automatically sends its text once', asyn
   expect(app.api.chat).toHaveBeenCalledTimes(1);
   expect(app.api.chat).toHaveBeenCalledWith('明天下午提醒我开会。', undefined, expect.any(String), []);
   expect(app.text()).not.toContain('voice.m4a'); await app.unmount();
+});
+
+test('compact recording hides secondary tools without remounting the held control or losing the draft', async () => {
+  const app = await setup();
+  await app.input('已有草稿');
+  await app.press('切换语音输入');
+  const beforeHold = gestureNode(app);
+  const input = app.tree().root.findByType(TextInput);
+  await act(async () => beforeHold.props.onResponderGrant(event(200)));
+  expect(gestureNode(app)).toBe(beforeHold);
+  expect(app.tree().root.findByType(TextInput)).toBe(input);
+  const secondary = app.tree().root.findAll(n => n.props.testID === 'chat-composer-secondary')[0];
+  expect(StyleSheet.flatten(secondary.props.style).display).toBe('none');
+  for (const label of ['拍照', '选择附件', '切换文字输入']) {
+    const tool = app.tree().root.findAll(n => n.props.accessibilityLabel === label && typeof n.props.onPress === 'function')[0];
+    expect(StyleSheet.flatten(tool.props.style).display).toBe('none');
+  }
+  const composer = app.tree().root.findAllByType(ScrollView).find(n => n.props.testID === 'chat-composer-scroll')!;
+  expect(composer.props.scrollEnabled).toBe(false);
+  await act(async () => composer.props.onLayout({ nativeEvent: { layout: { height: 78 } } }));
+  expect(app.tree().root.findByType(ChatVoiceOverlay).props.composerHeight).toBe(78);
+  const overlay = app.tree().root.findAll(n => n.props.testID === 'chat-voice-overlay')[0];
+  expect(StyleSheet.flatten(overlay.props.style).bottom).toBe(0);
+  const bar = app.tree().root.findAll(n => n.props.testID === 'unified-input-bar')[0];
+  expect(StyleSheet.flatten(bar.props.style)).toMatchObject({ backgroundColor: 'transparent', elevation: 0 });
+  await act(async () => gestureNode(app).props.onResponderMove(event(100)));
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  expect(app.value()).toBe('已有草稿');
+  expect(app.tree().root.findByType(TextInput)).toBe(input);
+  expect(gestureNode(app)).toBe(beforeHold);
+  expect(app.api.transcribe).not.toHaveBeenCalled();
+  expect(app.tree().root.findAllByType(ScrollView).find(n => n.props.testID === 'chat-composer-scroll')!.props.scrollEnabled).toBe(true);
+  await app.unmount();
 });
 
 test('voice mode has one accessible central control and no legacy recorder or send buttons', async () => {

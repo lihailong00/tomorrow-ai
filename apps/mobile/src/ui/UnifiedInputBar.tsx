@@ -42,6 +42,7 @@ export interface UnifiedInputBarProps {
   holding?: boolean;
   cancelled?: boolean;
   recording?: boolean;
+  compactRecording?: boolean;
   voiceBusy?: boolean;
   voiceLabel?: string;
   voiceHint?: string;
@@ -71,7 +72,7 @@ export function UnifiedInputBar({
   hasPayload,
   holding,
   cancelled,
-  recording,
+  compactRecording = false,
   voiceBusy,
   voiceLabel,
   voiceHint,
@@ -89,13 +90,13 @@ export function UnifiedInputBar({
   const holdLabel = voiceLabel ??
     (holding ? cancelled ? '松开取消' : '松开发送' : voiceBusy ? '识别中…' : '按住说话');
   return (
-    <View style={c.bar} testID="unified-input-bar">
+    <View style={[c.bar, compactRecording && c.recordingBar]} testID="unified-input-bar">
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="拍照"
         disabled={toolsDisabled}
         onPress={onCamera}
-        style={[c.tool, toolsDisabled && c.disabled]}
+        style={[c.tool, toolsDisabled && c.disabled, compactRecording && c.hidden]}
       >
         <Icon name="camera" size={25} color={colors.secondary} />
       </Pressable>
@@ -137,10 +138,12 @@ export function UnifiedInputBar({
           style={[
             c.hold,
             holding && c.holding,
+            compactRecording && c.recordingHold,
             holding && cancelled && c.cancelled,
+            compactRecording && holding && cancelled && c.recordingCancelled,
           ]}
         >
-          <Text style={[c.holdText, holding && cancelled && c.cancelText]}>
+          <Text style={[c.holdText, compactRecording && c.recordingText, holding && cancelled && c.cancelText]}>
             {holdLabel}
           </Text>
         </View>
@@ -150,7 +153,7 @@ export function UnifiedInputBar({
         accessibilityLabel={voiceMode ? '切换文字输入' : '切换语音输入'}
         disabled={modeDisabled}
         onPress={onToggleMode}
-        style={[c.tool, modeDisabled && c.disabled]}
+        style={[c.tool, modeDisabled && c.disabled, compactRecording && c.hidden]}
       >
         <View style={c.modeCircle}>
           <Icon
@@ -165,7 +168,7 @@ export function UnifiedInputBar({
         accessibilityLabel="选择附件"
         disabled={toolsDisabled}
         onPress={onAttach}
-        style={[c.tool, toolsDisabled && c.disabled]}
+        style={[c.tool, toolsDisabled && c.disabled, compactRecording && c.hidden]}
       >
         <Icon name="plus" size={25} color={colors.secondary} />
       </Pressable>
@@ -274,6 +277,23 @@ const c = StyleSheet.create({
     justifyContent: 'center',
     borderRadius: 21,
   },
+  recordingBar: {
+    backgroundColor: 'transparent',
+    borderColor: 'transparent',
+    borderWidth: 0,
+    paddingHorizontal: 0,
+    paddingVertical: 5,
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  recordingHold: {
+    minHeight: 54,
+    borderRadius: 27,
+    paddingHorizontal: 12,
+    backgroundColor: colors.voiceHold,
+  },
+  recordingText: { color: colors.voiceHoldText },
+  recordingCancelled: { backgroundColor: colors.voiceCancelledHold },
   modeCircle: {
     width: 36,
     height: 36,

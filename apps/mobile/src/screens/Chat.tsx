@@ -988,6 +988,7 @@ export function ChatScreen({
         style={chat.composerViewport}
         contentContainerStyle={chat.composerArea}
         keyboardShouldPersistTaps="handled"
+        scrollEnabled={!recording && !holdActive}
         nestedScrollEnabled
         bounces={false}
         onLayout={event => {
@@ -996,7 +997,7 @@ export function ChatScreen({
           revealFocusedInput();
         }}
       >
-        {(fileAction.error || voiceError || attachment || voice || (editing && sendError)) && (
+        {!recording && (fileAction.error || voiceError || attachment || voice || (editing && sendError)) && (
           <ScrollView
             style={[chat.composerSupport, { maxHeight: supportMaxHeight }]}
             keyboardShouldPersistTaps="handled"
@@ -1182,7 +1183,7 @@ export function ChatScreen({
             )}
           </ScrollView>
         )}
-        {(editing || quoting) && <View style={chat.contextStrip} testID={editing ? 'chat-edit-context' : 'chat-quote-context'}>
+        {!recording && (editing || quoting) && <View style={chat.contextStrip} testID={editing ? 'chat-edit-context' : 'chat-quote-context'}>
           <View style={s.fill}>
             <Text style={chat.contextLabel}>{editing ? '修改消息' : '追问这条消息'}</Text>
             <Text numberOfLines={1} style={chat.contextExcerpt}>{(editing?.message ?? quoting)?.content}</Text>
@@ -1218,14 +1219,16 @@ export function ChatScreen({
             revealFocusedInput();
           }}
         >
-          {navigationActions}
-          <ChatReasoningSelector owner={state} value={reasoningEffort}
-            disabled={recording || captureBusy || fileAction.busy || Boolean(voice) || deleting}
-            onChange={value => {
-              if (mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state &&
-                currentShareOwner.current === shareOwner && (!state.scope || state.scope.isRetained()))
-                state.update(old => ({ ...old, reasoningEffort: value }));
-            }} />
+          <View style={recording && chat.recordingSecondaryHidden} testID="chat-composer-secondary">
+            {navigationActions}
+            <ChatReasoningSelector owner={state} value={reasoningEffort}
+              disabled={recording || captureBusy || fileAction.busy || Boolean(voice) || deleting}
+              onChange={value => {
+                if (mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state &&
+                  currentShareOwner.current === shareOwner && (!state.scope || state.scope.isRetained()))
+                  state.update(old => ({ ...old, reasoningEffort: value }));
+              }} />
+          </View>
           <ChatModeMotion mode={voiceMode ? 'voice' : 'text'} reducedMotion={reducedMotion}>
             <UnifiedInputBar voiceMode={voiceMode} value={draft} onChangeText={setDraft}
               onToggleMode={toggleInputMode} onCamera={() => chooseInputFile('camera')}
@@ -1234,6 +1237,7 @@ export function ChatScreen({
               toolsDisabled={recording || captureBusy || fileAction.busy || Boolean(voice) || sending || deleting}
               modeDisabled={recording || captureBusy || fileAction.busy || Boolean(voice) || deleting}
               holding={holdActive} cancelled={holdCancelled} recording={recording} voiceBusy={voiceBusy}
+              compactRecording={recording}
               onAccessibleRecord={activateHold} holdTestID="chat-hold-to-talk"
               sendLabel={editing ? '提交修改' : '发送消息'} inputRef={inputRef}
               inputStyle={{ minHeight: inputMinHeight, maxHeight: inputMaxHeight }}
@@ -1270,7 +1274,7 @@ export function ChatScreen({
         busy={deleting} error={deleteError} onDelete={confirmDelete}
         onClose={() => { if (!deletingRef.current) setDeleteTarget(null); }} />}
       {recording && <ChatVoiceOverlay seconds={seconds} cancelled={holdActive && holdCancelled} holding={holdActive}
-        bottom={composerHeight} availableHeight={availableHeight - composerHeight - 8}
+        composerHeight={composerHeight} availableHeight={availableHeight}
         fontScale={nativeFontScale ?? fontScale} reducedMotion={reducedMotion} />}
     </View>
   );
@@ -1507,7 +1511,8 @@ const chat = StyleSheet.create({
     backgroundColor: 'transparent',
     flexShrink: 0,
   },
-  composerViewport: { flexGrow: 0, flexShrink: 1, minHeight: 0 },
+  composerViewport: { flexGrow: 0, flexShrink: 1, minHeight: 0, zIndex: 3 },
+  recordingSecondaryHidden: { display: 'none' },
   composerSupport: {
     flexGrow: 0,
     flexShrink: 1,

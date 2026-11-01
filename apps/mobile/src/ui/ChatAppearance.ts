@@ -13,4 +13,9 @@ export const chatAppearance = {
   keyboard: colors.cream,
   cancellation: '#FAEDF2',
   cancellationText: '#9C365D',
+  voiceSurface: '#F8FAFF',
+  voiceTint: '#EEF3FF',
+  voiceHold: '#DCE8FF',
+  voiceHoldText: '#3157AD',
+  voiceCancelledHold: '#F4DCE5',
 } as const;

@@ -33,6 +33,7 @@ interface NativePort {
   prepareChatImage(uri: string, mimeType: string, name: string): Promise<LocalFile>;
   startRecording(): Promise<void>;
   stopRecording(): Promise<LocalFile | null>;
+  getRecordingLevel(): Promise<number>;
   copyText(text: string): Promise<void>;
   getSystemFontScale(): Promise<number | null>;
   requestNotifications(): Promise<boolean>;
@@ -80,6 +81,7 @@ export const platform = {
   ),
   hasDocumentPicker: Boolean(native?.pickDocument),
   hasRecorder: Boolean(native?.startRecording && native?.stopRecording),
+  hasRecordingLevel: typeof native?.getRecordingLevel === 'function',
   hasCamera: Boolean(native?.capturePhoto),
   async getSystemFontScale(): Promise<number | null> {
     if (!native?.getSystemFontScale) return null;
@@ -206,6 +208,14 @@ export const platform = {
       throw missing();
     }
     return native.stopRecording();
+  },
+  async recordingLevel(): Promise<number> {
+    if (!native?.getRecordingLevel) return 0;
+    try {
+      const level = await native.getRecordingLevel();
+      return typeof level === 'number' && Number.isFinite(level)
+        ? Math.max(0, Math.min(1, level)) : 0;
+    } catch { return 0; }
   },
   async requestNotifications(): Promise<boolean> {
     if (!native?.requestNotifications) {

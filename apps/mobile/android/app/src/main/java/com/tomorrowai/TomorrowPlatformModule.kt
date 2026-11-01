@@ -249,6 +249,14 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
     }
   }
 
+  @ReactMethod fun getRecordingLevel(promise: Promise) = onUi {
+    // Serialized with start/stop on the UI thread; never starts or extends capture.
+    val level = try {
+      if (recordingAutoStopped) 0.0 else (recorder?.maxAmplitude ?: 0).coerceIn(0, 32767) / 32767.0
+    } catch (_: Exception) { 0.0 }
+    promise.resolve(level)
+  }
+
   @ReactMethod fun stopRecording(promise: Promise) = onUi {
     val activeRecorder = recorder; val file = recordingFile
     if (activeRecorder == null || file == null) { promise.reject("E_RECORDING", "当前没有录音"); return@onUi }
