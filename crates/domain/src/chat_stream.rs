@@ -57,7 +57,7 @@ impl Repository {
         let fingerprint = auth::hash_token(fingerprint);
         let token = new_id();
         let mut tx = self.pool.begin().await?;
-        crate::chat_messages::valid_request_tx(&mut tx,user_id,&key).await?;
+        crate::chat_messages::valid_request_tx(&mut tx, user_id, &key).await?;
         let inserted = sqlx::query("INSERT INTO chat_requests(request_key,user_id,created_at)VALUES($1,$2,$3)ON CONFLICT(request_key)DO NOTHING")
             .bind(&key).bind(user_id).bind(now()).execute(&mut *tx).await?.rows_affected();
         if inserted == 1 {
@@ -153,18 +153,36 @@ impl Repository {
         message_created_at: &str,
         agent_run_id: Option<&str>,
     ) -> Result<(), DomainError> {
-        self.accept_chat_stream_replacing(producer,user_id,conversation,user_message,message_id,message_created_at,agent_run_id,None).await
+        self.accept_chat_stream_replacing(
+            producer,
+            user_id,
+            conversation,
+            user_message,
+            message_id,
+            message_created_at,
+            agent_run_id,
+            None,
+        )
+        .await
     }
 
     pub async fn accept_chat_stream_replacing(
-        &self, producer: &ChatStreamProducer, user_id: &str, conversation: &Conversation,
-        user_message: &Message, message_id: &str, message_created_at: &str,
-        agent_run_id: Option<&str>, replacement: Option<&crate::chat_messages::ChatReplacement>,
+        &self,
+        producer: &ChatStreamProducer,
+        user_id: &str,
+        conversation: &Conversation,
+        user_message: &Message,
+        message_id: &str,
+        message_created_at: &str,
+        agent_run_id: Option<&str>,
+        replacement: Option<&crate::chat_messages::ChatReplacement>,
     ) -> Result<(), DomainError> {
         let mut tx = self.pool.begin().await?;
-        crate::chat_messages::lock_conversation_tx(&mut tx,user_id,&conversation.id).await?;
-        crate::chat_messages::valid_request_tx(&mut tx,user_id,&producer.request_key).await?;
-        if let Some(replacement)=replacement {crate::chat_messages::validate_replacement_tx(&mut tx,user_id,replacement).await?;}
+        crate::chat_messages::lock_conversation_tx(&mut tx, user_id, &conversation.id).await?;
+        crate::chat_messages::valid_request_tx(&mut tx, user_id, &producer.request_key).await?;
+        if let Some(replacement) = replacement {
+            crate::chat_messages::validate_replacement_tx(&mut tx, user_id, replacement).await?;
+        }
         // Use the callback/retry lock order: run, then stream. Enabling ordinal
         // replay must be atomic with proving that a legacy run has no old effects.
         if let Some(run) = agent_run_id {
@@ -212,17 +230,29 @@ impl Repository {
         ] {
             // An edited stream exposes its tentative text to this subscriber, but
             // keeps the original durable question/reply until successful commit.
-            if replacement.is_some() {continue;}
+            if replacement.is_some() {
+                continue;
+            }
             let changed = sqlx::query("INSERT INTO resources(id,user_id,kind,body,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$5)ON CONFLICT(id)DO UPDATE SET body=$4,updated_at=$5 WHERE resources.user_id=$2 AND resources.kind=$3")
                 .bind(id).bind(user_id).bind(kind).bind(body.map_err(|_|DomainError::Internal("消息保存失败".into()))?).bind(now()).execute(&mut *tx).await?.rows_affected();
             if changed != 1 {
                 return Err(DomainError::Forbidden);
             }
         }
-        if let Some(replacement)=replacement {
+        if let Some(replacement) = replacement {
             sqlx::query("INSERT INTO chat_message_requests(request_key,user_id,user_message_id,revision)VALUES($1,$2,$3,$4)ON CONFLICT(request_key)DO NOTHING")
                 .bind(&producer.request_key).bind(user_id).bind(&user_message.id).bind(replacement.revision+1).execute(&mut *tx).await?;
-        }else{crate::chat_messages::track_request_tx(&mut tx,user_id,Some(&producer.request_key),user_message,message_id,0).await?;}
+        } else {
+            crate::chat_messages::track_request_tx(
+                &mut tx,
+                user_id,
+                Some(&producer.request_key),
+                user_message,
+                message_id,
+                0,
+            )
+            .await?;
+        }
         let accepted = json!({"conversation_id":conversation.id,"user_message":user_message,"message_id":message_id,"message_created_at":message_created_at,"agent_run_id":agent_run_id,
             "replacement":replacement,"removed_message_ids":replacement.map(|r|r.removed_message_ids()).unwrap_or_default()});
         sqlx::query("UPDATE chat_streams SET accepted=$1,agent_run_id=$2 WHERE request_key=$3")
@@ -290,7 +320,8 @@ impl Repository {
         user_id: &str,
         request_id: &str,
     ) -> Result<ChatStreamView, DomainError> {
-        self.ensure_chat_request_visible(user_id,request_id).await?;
+        self.ensure_chat_request_visible(user_id, request_id)
+            .await?;
         let key = crate::repository::chat_request_key(user_id, request_id)?;
         const SELECT:&str="SELECT s.sequence,s.status,s.partial,s.accepted,s.error,s.tool_status,s.attempt,s.previous_content,s.lease_until,c.response FROM chat_streams s JOIN chat_requests c ON c.request_key=s.request_key AND c.user_id=s.user_id WHERE s.request_key=$1 AND s.user_id=$2";
         let mut row = sqlx::query(SELECT)
@@ -345,7 +376,8 @@ impl Repository {
         after: i64,
         through: i64,
     ) -> Result<Vec<ChatStreamEvent>, DomainError> {
-        self.ensure_chat_request_visible(user_id,request_id).await?;
+        self.ensure_chat_request_visible(user_id, request_id)
+            .await?;
         let key = crate::repository::chat_request_key(user_id, request_id)?;
         let rows = sqlx::query("SELECT e.sequence,e.kind,e.body FROM chat_stream_events e JOIN chat_streams s ON s.request_key=e.request_key WHERE s.request_key=$1 AND s.user_id=$2 AND e.sequence>$3 AND e.sequence<=$4 ORDER BY e.sequence LIMIT 500")
             .bind(&key).bind(user_id).bind(after).bind(through).fetch_all(&self.pool).await?;
@@ -402,6 +434,60 @@ pub(crate) async fn append_event_tx(
     Ok(())
 }
 
+// Only bounded public web-operation metadata reaches the client. In particular,
+// do not forward raw arguments, tool results, or research conclusions/reasoning.
+fn public_activity(body: &Value) -> Value {
+    let mut value = json!({});
+    let research = &body["research"];
+    if body["tool"] == "web_search" {
+        if let Some(query) = research["query"].as_str() {
+            value["query"] = json!(query
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(128)
+                .collect::<String>());
+        }
+    } else if body["tool"] == "web_fetch" {
+        if let Some(raw) = research["url"].as_str().filter(|s| s.len() <= 4096) {
+            if let Ok(mut url) = reqwest::Url::parse(raw) {
+                if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() {
+                    let _ = url.set_username("");
+                    let _ = url.set_password(None);
+                    url.set_query(None);
+                    url.set_fragment(None);
+                    value["url"] = json!(url.to_string().chars().take(1000).collect::<String>());
+                }
+            }
+        }
+    }
+    value
+}
+
+#[cfg(test)]
+mod public_activity_tests {
+    use super::*;
+
+    #[test]
+    fn exposes_only_bounded_public_operation_fields() {
+        let body = json!({"tool":"web_fetch","research":{"url":"https://name:secret@example.com/notice?token=private#section","reason":"not public"},"args":{"password":"private"}});
+        assert_eq!(
+            public_activity(&body),
+            json!({"url":"https://example.com/notice"})
+        );
+        assert_eq!(
+            public_activity(&json!({"tool":"save_memory","research":{"query":"private"}})),
+            json!({})
+        );
+        assert_eq!(
+            public_activity(&json!({"tool":"web_fetch","research":{"url":"file:///private"}})),
+            json!({})
+        );
+        let query = "a".repeat(200);
+        let value = public_activity(&json!({"tool":"web_search","research":{"query":query}}));
+        assert_eq!(value["query"].as_str().unwrap().chars().count(), 128);
+    }
+}
+
 async fn append_visible_tx(
     tx: &mut Transaction<'_, Any>,
     key: &str,
@@ -454,7 +540,7 @@ async fn append_visible_tx(
             .ok_or_else(|| DomainError::Validation("文本轮次无效".into()))?;
         body = json!({"turn":turn});
     } else if matches!(kind, "tool_start" | "tool_end") {
-        body = json!({"tool":body["tool"],"tool_call_id":body["tool_call_id"],"is_error":body["is_error"],"status":kind});
+        body = json!({"tool":body["tool"],"tool_call_id":body["tool_call_id"],"is_error":body["is_error"],"status":kind,"activity":public_activity(&body)});
         sqlx::query("UPDATE chat_streams SET tool_status=$1 WHERE request_key=$2")
             .bind(body.to_string())
             .bind(key)

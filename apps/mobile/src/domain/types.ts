@@ -69,6 +69,7 @@ export type Message = {
   client_key?: string;
   delivery?: 'sending' | 'sent' | 'failed';
   stream_status?: string;
+  stream_activity?: readonly import('../screens/chatActivity').ChatActivity[];
   stream_error?: string;
   conversation_id: string;
   role: 'user' | 'assistant';

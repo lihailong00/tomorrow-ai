@@ -24,8 +24,8 @@ test('research progress reflects actual planning, source reading and review even
   const controller = createChatStreamController({ api, intent, isCurrent: () => true,
     onChange: progress => changes.push(progress.status), onComplete: jest.fn() });
   await controller.start(); controller.dispose();
-  for (const status of ['正在整理调查清单…', '正在查找相关资料…', '正在核对搜索结果…',
-    '正在比对资料中的日期和条件…', '正在核对来源与未确认事项…', '这一步未完成，正在继续…']) expect(changes).toContain(status);
+  for (const status of ['正在整理调查清单…', '正在查找相关资料…', '搜索完成，正在整理资料…',
+    '网页已读取，正在继续…', '正在核对来源与未确认事项…', '这一步未完成，正在继续…']) expect(changes).toContain(status);
 });
 
 test('reattached snapshot preserves the active tool label before any answer text arrives', async () => {
@@ -54,7 +54,7 @@ test('reattached snapshots retain completed research phases and failed-review st
   const controller = createChatStreamController({ api, intent, isCurrent: () => true,
     onChange: progress => changes.push(progress.status), onComplete: jest.fn() });
   await controller.start(); controller.dispose();
-  expect(changes).toContain('正在比对资料中的日期和条件…');
+  expect(changes).toContain('网页已读取，正在继续…');
   expect(changes).toContain('这一步未完成，正在继续…');
 });
 

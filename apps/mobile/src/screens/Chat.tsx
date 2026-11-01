@@ -18,6 +18,7 @@ import { useAction, useApp, useResource } from '../app/context';
 import type { RetainedRouteScope } from '../app/navigation';
 import type { Message, Upload, ReasoningEffort } from '../domain/types';
 import { ChatReasoningSelector } from '../ui/ChatReasoningSelector';
+import { ChatActivity } from '../ui/ChatActivity';
 import { LocalFile, platform } from '../platform/ports';
 import { recordingSession, stopRecorder, releaseRecorder } from '../platform/recordingSession';
 import { UnifiedInputBar, UnifiedAttachmentMenu } from '../ui/UnifiedInputBar';
@@ -809,6 +810,7 @@ export function ChatScreen({
             const error = progress.phase === 'failed' ? '回复中断，收到的内容已保留。' : undefined;
             if (!progress.response && message.content === progress.content &&
               message.stream_status === progress.status && message.stream_error === error &&
+              message.stream_activity === progress.activities &&
               (!progress.assistantId || message.id === progress.assistantId) &&
               (!progress.assistantCreatedAt || message.created_at === progress.assistantCreatedAt) &&
               (!progress.conversationId || message.conversation_id === progress.conversationId)) return message;
@@ -818,6 +820,7 @@ export function ChatScreen({
             created_at: progress.assistantCreatedAt ?? message.created_at,
             conversation_id: progress.conversationId ?? message.conversation_id,
             content: progress.content, stream_status: progress.status,
+            stream_activity: progress.activities,
             stream_error: error,
           };
           }
@@ -1334,10 +1337,7 @@ const ChatMessage = memo(function ChatMessage({
         {message.model_mode === 'local' && <Text style={chat.timestamp}>本地生成</Text>}
         {message.content ? <ResultText content={message.content} textStyle={chat.answerText} /> : null}
         {!message.stream_status && !message.stream_error && message.model_mode === 'llm' && <AutomaticMemoryNotice replyId={message.id} active={observeMemory && Date.now() - Date.parse(message.created_at) < 120000} />}
-        {message.stream_status ? <View style={chat.thinking}>
-          <ActivityIndicator color={appearance.accent} size="small" />
-          <Text style={s.small}>{message.stream_status}</Text>
-        </View> : null}
+        <ChatActivity key={message.client_key ?? message.id} items={message.stream_activity} status={message.stream_status} />
         {message.stream_error && <Text style={s.small}>{message.stream_error}</Text>}
         {!!message.content && <View style={chat.answerFooter}>
           <Text style={chat.timestamp}>{formatDate(message.created_at)}</Text>

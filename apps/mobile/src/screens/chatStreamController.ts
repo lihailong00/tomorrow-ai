@@ -2,12 +2,14 @@ import type { ApiClient } from '../api/client';
 import { errorMessage } from '../api/client';
 import { ChatTransportError, type SseEvent } from '../api/chatSse';
 import type { ChatIntent, ChatResponse, Message } from '../domain/types';
+import { updateActivity, type ChatActivity } from './chatActivity';
 
 export type ChatProgress = {
   sequence: number;
   phase: 'sending' | 'replying' | 'reconnecting' | 'failed' | 'complete';
   status: string;
   content: string;
+  activities?: readonly ChatActivity[];
   conversationId?: string;
   userMessage?: Message;
   assistantId?: string;
@@ -30,8 +32,8 @@ function toolLabel(tool: unknown) {
 
 function toolEndLabel(tool: unknown, isError: unknown) {
   if (isError === true) return '这一步未完成，正在继续…';
-  if (tool === 'web_search') return '正在核对搜索结果…';
-  if (tool === 'web_fetch') return '正在比对资料中的日期和条件…';
+  if (tool === 'web_search') return '搜索完成，正在整理资料…';
+  if (tool === 'web_fetch') return '网页已读取，正在继续…';
   if (tool === 'research_plan') return '正在查找相关资料…';
   return '正在回复…';
 }
@@ -60,6 +62,8 @@ export function createChatStreamController(options: Options) {
   const publish = (change: Partial<ChatProgress>) => {
     if (!current()) return;
     progress = { ...progress, ...change };
+    if (change.phase === 'failed') progress = { ...progress, activities: progress.activities?.map(item =>
+      item.state === 'running' ? { ...item, state: 'interrupted' as const } : item) };
     options.onChange(progress);
   };
   const complete = (response: ChatResponse) => {
@@ -69,6 +73,7 @@ export function createChatStreamController(options: Options) {
     }
     terminal = true;
     publish({ phase: 'complete', status: '', error: undefined, response,
+      activities: progress.activities?.map(item => item.state === 'running' ? { ...item, state: 'interrupted' as const } : item),
       content: response.message.content, conversationId: response.conversation_id,
       userMessage: response.user_message ?? progress.userMessage,
       removedMessageIds: response.removed_message_ids ?? progress.removedMessageIds,
@@ -87,6 +92,7 @@ export function createChatStreamController(options: Options) {
     if (event.event === 'snapshot') {
       if (event.id < progress.sequence) return;
       publish({ sequence: event.id,
+        activities: body.tool_status?.tool ? updateActivity(progress.activities, body.tool_status, event.id, body.tool_status.status === 'tool_end') : progress.activities,
         content: typeof body.content === 'string' ? body.content : progress.content,
         conversationId: body.conversation_id ?? progress.conversationId,
         userMessage: body.user_message ?? progress.userMessage,
@@ -125,13 +131,13 @@ export function createChatStreamController(options: Options) {
           phase: 'replying', status: '正在回复…', error: undefined });
         break;
       case 'tool_start':
-        publish({ phase: 'replying', status: toolLabel(body.tool) });
+        publish({ phase: 'replying', status: toolLabel(body.tool), activities: updateActivity(progress.activities, body, event.id, false) });
         break;
       case 'tool_end':
-        publish({ status: toolEndLabel(body.tool, body.is_error) });
+        publish({ status: toolEndLabel(body.tool, body.is_error), activities: updateActivity(progress.activities, body, event.id, true) });
         break;
       case 'retrying':
-        publish({ phase: 'replying', status: '正在重试回复…', error: undefined });
+        publish({ phase: 'replying', status: '正在重试回复…', error: undefined, activities: [] });
         break;
       case 'done': complete(body.response); break;
       case 'error':
@@ -150,7 +156,8 @@ export function createChatStreamController(options: Options) {
     active = true;
     terminal = false;
     const attempt = ++generation;
-    publish({ phase: 'sending', status: retry ? '正在重试回复…' : '发送中…', error: undefined });
+    publish({ phase: 'sending', status: retry ? '正在重试回复…' : '发送中…', error: undefined,
+      ...(retry ? { activities: [] } : {}) });
     let failures = 0;
     let explicitRetry = retry;
     try {
