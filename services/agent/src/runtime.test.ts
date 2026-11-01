@@ -5,11 +5,70 @@ import { once } from 'node:events';
 import type { StreamFn } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Message } from '@earendil-works/pi-ai';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
+import { streamSimple } from '@earendil-works/pi-ai/api/openai-completions';
 import { resolveModel } from './config.js';
 import { executeRun, RunError, safeToolResult, validateRun, type Bridge, type RunEvent, type RunInput } from './runtime.js';
 import { createDeepSeekWeb } from './web.js';
 
 const settings = resolveModel({ DEEPSEEK_API_KEY: 'model-key-never-in-transcript' });
+test('reasoning is validated and each model turn retains the requested level', async () => {
+  for (const effort of ['off', 'low', 'high', 'max'] as const) {
+    const fixture = bridge();
+    const observed: unknown[] = [];
+    const response = fakeStream([
+      [{ type: 'toolCall', id: 'reasoning-tool', name: 'save_memory', arguments: { content: '用户明确要求保存的测试记忆' } }],
+      [{ type: 'text', text: '已保存。' }],
+    ]);
+    const stream: StreamFn = (model, context, options) => {
+      observed.push(options?.reasoning);
+      return response(model, context, options);
+    };
+    await executeRun({ ...input(), reasoning_effort: effort }, settings, fixture.value, undefined, undefined, stream);
+    assert.deepEqual(observed, [effort === 'off' ? undefined : effort, effort === 'off' ? undefined : effort]);
+    assert.equal(fixture.effects.length, 1);
+    assert.equal(fixture.events.find(event => event.kind === 'started')?.body.reasoning_effort, effort);
+  }
+  for (const value of ['medium', 'auto', null, 42, {}, 'MAX']) {
+    assert.throws(() => validateRun({ ...input(), reasoning_effort: value }), (error: unknown) => error instanceof RunError && error.code === 'invalid_request');
+  }
+});
+
+test('unsupported providers reject explicit thinking before executing any tool', async () => {
+  const fixture = bridge();
+  const custom = resolveModel({ MODEL_NAME: 'fixture-model', MODEL_API_KEY: 'fixture-key' });
+  await assert.rejects(executeRun({ ...input(), reasoning_effort: 'max' }, custom, fixture.value),
+    (error: unknown) => error instanceof RunError && error.code === 'unsupported_reasoning');
+  assert.equal(fixture.effects.length, 0);
+});
+
+test('DeepSeek tool loops replay reasoning in memory without exposing it in visible events', async () => {
+  const fixture = bridge();
+  const requests: Record<string, unknown>[] = [];
+  const secret = 'synthetic private reasoning must never be shown';
+  const fakeFetch: typeof globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init!.body as string));
+    const first = requests.length === 1;
+    const delta = first ? { role: 'assistant', reasoning_content: secret,
+      tool_calls: [{ index: 0, id: 'call-fixture', type: 'function', function: { name: 'save_memory', arguments: JSON.stringify({ content: '用户指定保存的测试内容' }) } }] }
+      : { role: 'assistant', reasoning_content: secret, content: '保存完成。' };
+    return new Response(`data: ${JSON.stringify({ id: 'fixture', choices: [{ index: 0, delta, finish_reason: first ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`,
+      { headers: { 'Content-Type': 'text/event-stream' } });
+  };
+  const stream: StreamFn = (model, context, options) => streamSimple(model as typeof settings.model, context,
+    { ...options, apiKey: 'synthetic-key', fetch: fakeFetch, maxRetries: 0, maxTokens: 32768 });
+  const output = await executeRun({ ...input(), reasoning_effort: 'max' }, settings, fixture.value, undefined, undefined, stream);
+  assert.equal(output.content, '保存完成。');
+  assert.equal(requests.length, 2);
+  for (const payload of requests) {
+    assert.deepEqual(payload.thinking, { type: 'enabled' });
+    assert.equal(payload.reasoning_effort, 'max');
+  }
+  const assistant = (requests[1]!.messages as Record<string, unknown>[]).find(message => message.role === 'assistant');
+  assert.equal(assistant?.reasoning_content, secret);
+  assert.equal(JSON.stringify(fixture.events).includes(secret), false);
+  assert.equal(JSON.stringify(output).includes(secret), false);
+  assert.equal(fixture.effects.length, 1);
+});
 function input(): RunInput {
   return { run_id: '11111111-1111-4111-8111-111111111111', run_token: 'a'.repeat(64), scope: 'chat',
     messages: [{ role: 'user', content: '请记住我喜欢简洁的回答' }],

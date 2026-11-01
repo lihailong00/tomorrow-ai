@@ -279,7 +279,7 @@ test('a retained ASR continues once through history/back and appends to the curr
   await app.start('松开发送');
   const signal = (app.api.transcribe.mock.calls as unknown as [string, AbortSignal][])[0][1];
   const oldCancel = app.tree().root.findAll(n =>
-    n.props.accessibilityLabel === '取消语音转写' && typeof n.props.onPress === 'function')[0].props.onPress;
+    n.props.accessibilityLabel === '取消语音转写' && (typeof n.props.onPress === 'function' || typeof n.props.onAccessibilityTap === 'function'))[0].props.onPress;
   await app.history();
   expect(signal.aborted).toBe(false);
   await app.back();

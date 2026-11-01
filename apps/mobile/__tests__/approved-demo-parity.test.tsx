@@ -121,7 +121,7 @@ test('approved fixed-light palette is exact and chat hides only its own ambient 
     expect(setSystemTheme).not.toHaveBeenCalled();
     const field = tree.root.findByType(TextInput);
     await act(async () => field.props.onChangeText('Unsent approved draft'));
-    const composer = tree.root.findAll(n => n.props.testID === 'chat-composer-content')[0];
+    const composer = tree.root.findAll(n => n.props.testID === 'unified-input-bar')[0];
     expect(StyleSheet.flatten(composer.props.style)).toMatchObject({ backgroundColor: '#FFFFFF', borderColor: '#E2E6EF', borderRadius: 25 });
     const send = button(tree.root, '发送消息');
     expect(StyleSheet.flatten(send.props.style).backgroundColor).toBe('#5665BE');

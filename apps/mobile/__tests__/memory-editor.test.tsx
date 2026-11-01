@@ -6,14 +6,14 @@ import { MemoryEditor } from '../src/screens/Details';
 import { Button, ErrorNotice } from '../src/ui/components';
 
 jest.mock('../src/platform/ports', () => ({ platform: {} }));
-jest.mock('../src/ui/visuals', () => ({ Icon: () => null }));
+jest.mock('../src/ui/visuals', () => ({ Icon: () => null, AssistantOrb: () => null }));
 
 beforeAll(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 });
 
-it('limits memory titles to the server limit and preserves user input after a rejected save', async () => {
-  const saveMemory = jest.fn().mockRejectedValue(new Error('标题最多 120 字'));
+it('generates a bounded title from one input and preserves the complete draft after a rejected save', async () => {
+  const saveMemory = jest.fn().mockRejectedValue(new Error('网络中断'));
   const back = jest.fn();
   const invalidate = jest.fn();
   const context = {
@@ -31,27 +31,25 @@ it('limits memory titles to the server limit and preserves user input after a re
     );
   });
   const inputs = () => tree.root.findAllByType(TextInput);
-  expect(inputs()[0].props.maxLength).toBe(120);
-  // A rejected value can still arrive from a previous client or legacy data.
-  const title = '记'.repeat(121);
+  expect(inputs()).toHaveLength(1);
+  expect(inputs()[0].props.maxLength).toBe(10000);
+  const content = '🧠'.repeat(121) + 'Keep the original content';
   await act(async () => {
-    inputs()[0].props.onChangeText(title);
-    inputs()[1].props.onChangeText('Keep the original content');
+    inputs()[0].props.onChangeText(content);
   });
   await act(async () => {
     await tree.root
-      .findAllByType(Button)
-      .find(n => n.props.children === '保存记忆')!
+      .findAll(n => n.props.accessibilityLabel === '记住这件事' && n.props.onPress)[0]
       .props.onPress();
   });
   expect(saveMemory).toHaveBeenCalledWith(
-    expect.objectContaining({ title, content: 'Keep the original content' }),
+    expect.objectContaining({ content }),
     undefined,
   );
-  expect(inputs()[0].props.value).toBe(title);
-  expect(inputs()[1].props.value).toBe('Keep the original content');
+  expect([...saveMemory.mock.calls[0][0].title].length).toBeLessThanOrEqual(120);
+  expect(inputs()[0].props.value).toBe(content);
   expect(tree.root.findByType(ErrorNotice).props.message).toBe(
-    '标题最多 120 字',
+    '网络中断',
   );
   expect(back).not.toHaveBeenCalled();
   expect(invalidate).not.toHaveBeenCalled();

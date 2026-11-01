@@ -4,6 +4,7 @@ import type {
   CapabilityResponse,
   ChatResponse,
   ChatIntent,
+  ReasoningEffort,
   Connector,
   ConnectorItem,
   Conversation,
@@ -391,6 +392,7 @@ export class ApiClient {
     client_request_id: string,
     upload_ids: string[] = [],
     replace_message_id?: string,
+    reasoning_effort?: ReasoningEffort,
   ) =>
     this.request<ChatResponse>('/chat', 'POST', {
       message,
@@ -399,6 +401,7 @@ export class ApiClient {
       remember: false,
       upload_ids,
       ...(replace_message_id ? { replace_message_id } : {}),
+      ...(reasoning_effort ? { reasoning_effort } : {}),
     });
   async chatStream(
     intent: ChatIntent,

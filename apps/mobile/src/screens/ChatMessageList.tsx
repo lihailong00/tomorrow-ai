@@ -1,14 +1,21 @@
-import React, { memo, useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import {
   ListRenderItem,
+  Pressable,
   ScrollViewProps,
   StyleProp,
+  StyleSheet,
   useWindowDimensions,
   View,
   ViewStyle,
 } from 'react-native';
 import { FlashList, FlashListRef, ListRenderItem as FlashRenderItem } from '@shopify/flash-list';
 import type { Message } from '../domain/types';
+import { Text } from '../ui/Text';
+import { Icon } from '../ui/visuals';
+import { chatAppearance } from '../ui/ChatAppearance';
+import { ChatReadingRow, formatReadingCharacters, isReadingStream, unreadReadingCharacters,
+  type ReadingRegistry } from '../ui/ChatReadingMetrics';
 import {
   messageAnchorInset,
   messageInitialIndex,
@@ -36,6 +43,21 @@ const maintainVisibleContentPosition = { disabled: false };
 // keeping the oldest visible message next to the header without a spacer.
 const invertedMaintainVisibleContentPosition = { disabled: false, startRenderingFromBottom: true };
 
+type ReadingSnapshot = { offset: number; unread: number | null; streamKey: string | null };
+function createReadingState(offset: number) {
+  let snapshot: ReadingSnapshot = { offset, unread: null, streamKey: null };
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    update: (next: ReadingSnapshot) => {
+      if (next.offset === snapshot.offset && next.unread === snapshot.unread && next.streamKey === snapshot.streamKey) return;
+      snapshot = next;
+      listeners.forEach(listener => listener());
+    },
+  };
+}
+
 function rememberHeight(viewport: MessageViewport, item: Message, height: number) {
   const key = messageRowKey(item);
   const cached = viewport.heights.get(key);
@@ -46,6 +68,21 @@ function rememberHeight(viewport: MessageViewport, item: Message, height: number
     item.content.startsWith(cached.message.content)) return;
   viewport.heights.set(key, { message: item, height });
 }
+
+const ReadingMessage = memo(function ReadingMessage({ item, index, renderItem, geometry, registry, valid }: {
+  item: Message; index: number; renderItem: ListRenderItem<Message>;
+  geometry: string; registry: ReadingRegistry; valid: () => boolean;
+}) {
+  const key = messageRowKey(item);
+  const tracked = useRef({ key, enabled: false });
+  if (tracked.current.key !== key) tracked.current = { key, enabled: false };
+  if (isReadingStream(item)) tracked.current.enabled = true;
+  const content = renderItem({ item, index, separators });
+  // History rows never need native line measurement. Once a live reply is
+  // tracked, keep its native hierarchy unchanged when generation completes.
+  return tracked.current.enabled ? <ChatReadingRow message={item} geometry={geometry}
+    registry={registry} valid={valid}>{content}</ChatReadingRow> : content;
+});
 
 export const ChatMessageList = memo(function ChatMessageListView(props: Props) {
   const { width, fontScale } = useWindowDimensions();
@@ -90,6 +127,8 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
   const observed = useRef<number | null>(null);
   const observedAnchor = useRef<MessageAnchor | null>(null);
   const command = useRef<number | null>(null);
+  const readingState = useRef(createReadingState(viewport.y)).current;
+  const registry = useRef<ReadingRegistry>({ rows: new Map(), notify: () => {} }).current;
   const retainedDestination = target.current;
   if (retainedDestination && 'anchor' in retainedDestination && !messages.some(item =>
     messageRowKey(item) === retainedDestination.anchor.id)) {
@@ -97,8 +136,9 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     command.current = null;
     viewport.pendingAppendAnchor = null;
   }
-  const current = useRef({ messages, layoutKey, latestVersion });
-  current.current = { messages, layoutKey, latestVersion };
+  const streamIndex = messages.findIndex(isReadingStream);
+  const current = useRef({ messages, layoutKey, latestVersion, streamIndex });
+  current.current = { messages, layoutKey, latestVersion, streamIndex };
   if (viewport.layoutKey !== layoutKey) {
     if (viewport.layoutKey) list.current?.clearLayoutCacheOnUpdate();
     viewport.layoutKey = layoutKey;
@@ -112,6 +152,21 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
   const valid = useCallback(() => active.current && isCurrent() &&
     current.current.layoutKey === layoutKey &&
     current.current.latestVersion === latestVersion, [isCurrent, layoutKey, latestVersion]);
+  const refreshReading = useCallback(() => {
+    if (!valid()) return;
+    const engine = list.current;
+    const offset = observed.current ?? viewport.y;
+    const streamIndex = current.current.streamIndex;
+    const stream = current.current.messages[streamIndex];
+    const streamKey = stream ? messageRowKey(stream) : null;
+    const unread = observed.current !== null && engine && stream ? unreadReadingCharacters(stream,
+      registry.rows.get(messageRowKey(stream)), layoutKey, engine.getLayout(streamIndex),
+      engine.getFirstItemOffset(), offset) : null;
+    const previous = readingState.getSnapshot();
+    readingState.update({ offset, streamKey, unread: stream && unread === null && streamKey === previous.streamKey
+      ? previous.unread : unread });
+  }, [layoutKey, readingState, registry, valid, viewport]);
+  registry.notify = refreshReading;
 
   const measuredAnchor = useCallback((y: number, preferred?: string): MessageAnchor | null => {
     const engine = list.current;
@@ -146,7 +201,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
 
   const capture = useCallback((y: number, preferred?: string) => {
     viewport.y = y;
-    viewport.followTail = followTail.current = y <= 2;
+    viewport.followTail = followTail.current = y <= 2 && current.current.streamIndex < 0;
     const anchor = measuredAnchor(y, preferred);
     observedAnchor.current = anchor;
     if (anchor) {
@@ -155,7 +210,8 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
       const row = list.current?.getLayout(index);
       if (row?.isHeightMeasured) rememberHeight(viewport, current.current.messages[index], row.height);
     }
-  }, [measuredAnchor, viewport]);
+    refreshReading();
+  }, [measuredAnchor, refreshReading, viewport]);
 
   const destinationOffset = useCallback((destination: Destination) => {
     if ('latest' in destination) return 0;
@@ -187,8 +243,26 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
 
   const commitLayout = useCallback(() => {
     if (!valid()) return;
-    const anchor = target.current && 'anchor' in target.current
-      ? target.current.anchor : viewport.anchor;
+    // Initial/send positioning is a one-time intent. As soon as a streamed row
+    // is measured, retain its reading location even without an initial zero packet.
+    if (followTail.current && !interacting.current) {
+      const streamIndex = messages.findIndex(isReadingStream);
+      const stream = messages[streamIndex];
+      const frame = stream && list.current?.getLayout(streamIndex);
+      if (stream && frame?.isHeightMeasured) {
+        const anchor = viewport.anchor ?? observedAnchor.current ??
+          (target.current && 'latest' in target.current ? { id: messageRowKey(stream),
+            offset: -(list.current!.getFirstItemOffset() + frame.y) } : null);
+        if (anchor) {
+          followTail.current = viewport.followTail = false;
+          viewport.anchor = anchor;
+          target.current = { anchor: { ...anchor } };
+          command.current = null;
+        }
+      }
+    }
+    const anchor = target.current && 'latest' in target.current ? null
+      : target.current && 'anchor' in target.current ? target.current.anchor : viewport.anchor;
     const index = anchor ? messages.findIndex(item => messageRowKey(item) === anchor.id) : -1;
     const row = index >= 0 ? list.current?.getLayout(index) : undefined;
     const item = messages[index];
@@ -197,7 +271,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
       // Inverted row growth moves the visual start of old text. Adjust only a
       // genuine appended assistant fragment, never estimates or unrelated rows.
       if (!followTail.current && !interacting.current && cached &&
-        item.role === 'assistant' && row.height > cached.height &&
+        item.role === 'assistant' && row.height !== cached.height &&
         item.content.length > cached.message.content.length &&
         item.content.startsWith(cached.message.content)) {
         const adjusted = { id: anchor.id, offset: anchor.offset + row.height - cached.height };
@@ -212,7 +286,8 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     }
     if (followTail.current && !interacting.current) target.current = { latest: true };
     restore();
-  }, [messages, restore, valid, viewport]);
+    refreshReading();
+  }, [messages, refreshReading, restore, valid, viewport]);
 
   const scroll = useCallback((event: ScrollPacket) => {
     if (!valid()) return;
@@ -264,7 +339,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     interacting.current = false;
     if (observed.current !== null) {
       viewport.y = observed.current;
-      viewport.followTail = followTail.current = observed.current <= 2;
+      viewport.followTail = followTail.current = observed.current <= 2 && current.current.streamIndex < 0;
       if (observedAnchor.current) viewport.anchor = { ...observedAnchor.current };
     }
   }, [takeControl, valid, viewport]);
@@ -282,20 +357,37 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
       if (isCurrent() && !viewport.pendingAppendAnchor &&
         observed.current !== null && observedAnchor.current) {
         viewport.y = observed.current;
-        viewport.followTail = followTail.current = observed.current <= 2;
+        viewport.followTail = followTail.current = observed.current <= 2 && current.current.streamIndex < 0;
         viewport.anchor = { ...observedAnchor.current };
       }
       active.current = false;
     };
   }, [isCurrent, viewport]);
   useEffect(() => { restore(); }, [latestVersion, restore]);
+  useEffect(() => { refreshReading(); }, [messages, refreshReading]);
 
-  const renderMessage = useCallback<FlashRenderItem<Message>>(({ item, index }) =>
-    renderItem({ item, index, separators }), [renderItem]);
+  const renderMessage = useCallback<FlashRenderItem<Message>>(({ item, index, target }) => {
+    // Offscreen measurement/sticky copies must never replace the visible row's metrics.
+    if (target && target !== 'Cell') return renderItem({ item, index, separators });
+    return <ReadingMessage item={item} index={index} renderItem={renderItem}
+      geometry={layoutKey} registry={registry} valid={valid} />;
+  }, [renderItem, layoutKey, registry, valid]);
   const inverted = messages.length > 0;
   const firstItem = useMemo(() => <View>{inverted ? footer : header}</View>,
     [footer, header, inverted]);
-  return <FlashList<Message>
+  const streaming = streamIndex >= 0;
+  const jumpToLatest = () => {
+    if (!valid()) return;
+    interacting.current = false;
+    target.current = { latest: true };
+    viewport.pendingAppendAnchor = null;
+    command.current = null;
+    // Arrival is acknowledged by the next native packet. Later streamed text
+    // keeps that new reading location; this action never enables auto-follow.
+    restore();
+  };
+  return <View style={readingStyles.container}>
+    <FlashList<Message>
     ref={list}
     testID="chat-message-list"
     data={messages}
@@ -338,5 +430,38 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     onMomentumScrollBegin={takeControl}
     onMomentumScrollEnd={finishInteraction}
     scrollEventThrottle={16}
-  />;
+    />
+    <UnreadIndicator state={readingState} streaming={streaming} jump={jumpToLatest} />
+  </View>;
 }
+
+function UnreadIndicator({ state, streaming, jump }: {
+  state: ReturnType<typeof createReadingState>; streaming: boolean; jump: () => void;
+}) {
+  const reading = useSyncExternalStore(state.subscribe, state.getSnapshot, state.getSnapshot);
+  const showCount = streaming && reading.unread !== null && reading.unread > 0;
+  return reading.offset > 2 ? <Pressable testID="chat-unread-jump"
+      accessibilityRole="button"
+      accessibilityLabel={showCount ? `下方还有${reading.unread}字，跳到最新内容` : '回到最新内容'}
+      onPress={jump}
+      style={[readingStyles.jump, !showCount && readingStyles.circle]}>
+      <View style={readingStyles.arrow}><Icon name="arrowUp" size={17} color={chatAppearance.accent} /></View>
+      {showCount && <Text testID="chat-unread-count" style={readingStyles.count}>
+        {formatReadingCharacters(reading.unread!)}
+      </Text>}
+    </Pressable> : null;
+}
+
+const readingStyles = StyleSheet.create({
+  container: { flex: 1, minHeight: 0 },
+  jump: { position: 'absolute', right: 16, bottom: 14, minHeight: 44, minWidth: 44,
+    paddingHorizontal: 14, paddingVertical: 9, borderRadius: 24,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
+    backgroundColor: chatAppearance.surface, borderWidth: StyleSheet.hairlineWidth,
+    borderColor: chatAppearance.line, elevation: 3,
+    shadowColor: chatAppearance.ink, shadowOpacity: 0.08, shadowRadius: 12,
+    shadowOffset: { width: 0, height: 3 } },
+  circle: { width: 44, paddingHorizontal: 0 },
+  arrow: { transform: [{ rotate: '180deg' }] },
+  count: { color: chatAppearance.accent, fontSize: 13, lineHeight: 20, fontVariant: ['tabular-nums'] },
+});

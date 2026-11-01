@@ -134,6 +134,7 @@ export type Today = {
   runtime: RuntimeInfo;
 };
 export type CapabilityResponse = { items: Capability[]; runtime: RuntimeInfo };
+export type ReasoningEffort = 'off' | 'low' | 'high' | 'max';
 export type ChatIntent = {
   message: string;
   conversation_id: string | null;
@@ -141,6 +142,7 @@ export type ChatIntent = {
   remember: boolean;
   upload_ids: readonly string[];
   replace_message_id?: string;
+  reasoning_effort?: ReasoningEffort;
 };
 export type ChatResponse = {
   conversation_id: string;

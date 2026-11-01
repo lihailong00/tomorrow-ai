@@ -15,12 +15,14 @@ import android.os.Build
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.provider.MediaStore
 import android.net.Uri
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.FileProvider
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.PermissionAwareActivity
 import com.facebook.react.modules.core.PermissionListener
@@ -38,6 +40,8 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
   private val permissionPrefs = context.getSharedPreferences("tomorrow_permissions", Context.MODE_PRIVATE)
   private val attachmentDir get() = File(context.cacheDir, "attachments").apply { mkdirs() }
   private var pickerPromise: Promise? = null
+  private var cameraPromise: Promise? = null
+  private var cameraFile: File? = null
   private var recorder: MediaRecorder? = null
   private var recordingFile: File? = null
   private var recordingStartedAt = 0L
@@ -47,6 +51,26 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
   init {
     context.addActivityEventListener(object : BaseActivityEventListener() {
       override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == CAPTURE_PHOTO) {
+          val promise = cameraPromise ?: return
+          val file = cameraFile
+          cameraPromise = null; cameraFile = null
+          if (file != null) try {
+            context.revokeUriPermission(FileProvider.getUriForFile(context, context.packageName + ".attachments", file),
+              Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+          } catch (_: Exception) { }
+          if (resultCode != Activity.RESULT_OK || file == null || !file.isFile || file.length() == 0L) {
+            file?.delete(); promise.resolve(null); return
+          }
+          if (file.length() > MAX_FILE_BYTES) {
+            file.delete(); promise.reject("E_CAMERA", "照片过大，请降低拍照分辨率后重试"); return
+          }
+          promise.resolve(Arguments.createMap().apply {
+            putString("uri", Uri.fromFile(file).toString()); putString("name", file.name)
+            putString("mime_type", "image/jpeg"); putDouble("size", file.length().toDouble())
+          })
+          return
+        }
         if (requestCode != PICK_DOCUMENT) return
         val promise = pickerPromise ?: return
         pickerPromise = null
@@ -152,16 +176,56 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
     })
   }
 
-  @ReactMethod fun pickDocument(promise: Promise) = onUi {
+  @ReactMethod fun pickDocument(promise: Promise) = onUi { openDocument("*/*", promise) }
+  @ReactMethod fun pickImage(promise: Promise) = onUi { openDocument("image/*", promise) }
+  private fun openDocument(mimeType: String, promise: Promise) {
     val activity = context.currentActivity
-    if (activity == null) { promise.reject("E_ACTIVITY", "请在应用前台重试"); return@onUi }
-    if (pickerPromise != null) { promise.reject("E_BUSY", "文件选择器已打开"); return@onUi }
+    if (activity == null) { promise.reject("E_ACTIVITY", "请在应用前台重试"); return }
+    if (pickerPromise != null || cameraPromise != null) { promise.reject("E_BUSY", "请先完成当前图片或文件选择"); return }
     pickerPromise = promise
     try {
       activity.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-        addCategory(Intent.CATEGORY_OPENABLE); type = "*/*"
+        addCategory(Intent.CATEGORY_OPENABLE); type = mimeType
       }, PICK_DOCUMENT)
     } catch (error: Exception) { pickerPromise = null; promise.reject("E_DOCUMENT", error.message, error) }
+  }
+
+  @ReactMethod fun capturePhoto(promise: Promise) = onUi {
+    val activity = context.currentActivity
+    if (activity == null) { promise.reject("E_ACTIVITY", "请在应用前台重试"); return@onUi }
+    if (cameraPromise != null || pickerPromise != null) { promise.reject("E_BUSY", "请先完成当前图片或文件选择"); return@onUi }
+    val file = File(attachmentDir, "photo-${UUID.randomUUID()}.jpg")
+    try {
+      check(file.createNewFile()) { "无法创建照片" }
+      val uri = FileProvider.getUriForFile(context, context.packageName + ".attachments", file)
+      cameraPromise = promise; cameraFile = file
+      activity.startActivityForResult(Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+        putExtra(MediaStore.EXTRA_OUTPUT, uri)
+        clipData = ClipData.newUri(context.contentResolver, "photo", uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+      }, CAPTURE_PHOTO)
+    } catch (error: Exception) {
+      cameraPromise = null; cameraFile = null; file.delete()
+      promise.reject("E_CAMERA", "无法打开相机，可从“＋”选择图片", error)
+    }
+  }
+
+  @ReactMethod fun readTextFile(uri: String, promise: Promise) {
+    Thread {
+      try {
+        val parsed = Uri.parse(uri)
+        require(parsed.scheme == "file") { "仅可读取刚选择的本机文件" }
+        val file = File(parsed.path ?: "").canonicalFile
+        require(file.parentFile == attachmentDir.canonicalFile) { "仅可读取刚选择的本机文件" }
+        require(file.length() <= 120000) { "文字过长，请先选取需要记住的部分" }
+        val decoder = Charsets.UTF_8.newDecoder()
+          .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+          .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+        val text = decoder.decode(java.nio.ByteBuffer.wrap(file.readBytes())).toString().removePrefix("\uFEFF")
+        require(text.codePointCount(0, text.length) <= 10000) { "记忆最多 10,000 字，请先选取需要记住的部分" }
+        promise.resolve(text)
+      } catch (error: Exception) { promise.reject("E_TEXT", error.message ?: "请使用 UTF-8 文字文件", error) }
+    }.start()
   }
 
   @Suppress("DEPRECATION")
@@ -336,6 +400,7 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
     private const val KEY_ALIAS = "tomorrow.session.v1"
     private const val PICK_DOCUMENT = 1401
     private const val PERMISSION_REQUEST = 1402
+    private const val CAPTURE_PHOTO = 1403
     private const val CHANNEL_ID = "tomorrow_tasks"
     private const val MAX_FILE_BYTES = 25L * 1024L * 1024L
   }

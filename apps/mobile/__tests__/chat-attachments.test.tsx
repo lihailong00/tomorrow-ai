@@ -116,6 +116,7 @@ async function setup(
     },
     async press(label: string) {
       await act(async () => labelled(label).props.onPress());
+      if (label === '选择附件') await act(async () => labelled('选择文件').props.onPress());
     },
     async upload() {
       await act(async () =>

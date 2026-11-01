@@ -7,7 +7,7 @@ import { MemoryEditor, ScheduleEditor } from '../src/screens/Details';
 import { Button, ErrorNotice } from '../src/ui/components';
 
 jest.mock('../src/platform/ports', () => ({ platform: {} }));
-jest.mock('../src/ui/visuals', () => ({ Icon: () => null }));
+jest.mock('../src/ui/visuals', () => ({ Icon: () => null, AssistantOrb: () => null }));
 beforeAll(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -40,16 +40,21 @@ async function setup(kind: 'memory' | 'schedule') {
       );
     },
     async press() {
-      await act(async () =>
-        tree.root
+      await act(async () => kind === 'memory'
+        ? tree.root.findAll(n => n.props.accessibilityLabel === '记住这件事' && n.props.onPress)[0].props.onPress()
+        : tree.root
           .findAllByType(Button)
           .find(
             node =>
               node.props.children ===
-              (kind === 'memory' ? '保存记忆' : '保存并开始'),
+              '保存并开始',
           )!
           .props.onPress(),
       );
+      if (kind === 'memory') {
+        const done = tree.root.findAll(n => n.props.accessibilityLabel === '完成记忆保存' && n.props.onPress)[0];
+        if (done) await act(async () => done.props.onPress());
+      }
     },
     draft: () =>
       tree.root.findAllByType(TextInput).map(node => node.props.value),
@@ -67,8 +72,8 @@ test.each(['memory', 'schedule'] as const)(
     first.save
       .mockRejectedValueOnce(new Error('Unknown network result'))
       .mockResolvedValueOnce({ id: 'original' });
-    await first.input(0, 'Original title');
-    await first.input(1, 'Original content');
+    await first.input(0, kind === 'memory' ? 'Original content' : 'Original title');
+    if (kind !== 'memory') await first.input(1, 'Original content');
     await first.press();
     expect(first.back).not.toHaveBeenCalled();
     expect(first.error()).toBe('Unknown network result');
@@ -80,8 +85,8 @@ test.each(['memory', 'schedule'] as const)(
     await first.close();
     const second = await setup(kind);
     second.save.mockResolvedValue({ id: 'intentional-second' });
-    await second.input(0, 'Original title');
-    await second.input(1, 'Original content');
+    await second.input(0, kind === 'memory' ? 'Original content' : 'Original title');
+    if (kind !== 'memory') await second.input(1, 'Original content');
     await second.press();
     expect(second.save.mock.calls[0][0].client_request_id).not.toBe(
       initial.client_request_id,
@@ -104,16 +109,16 @@ test.each(['memory', 'schedule'] as const)(
           409,
         ),
       );
-    await form.input(0, 'Original title');
-    await form.input(1, 'Original content');
+    await form.input(0, kind === 'memory' ? 'Original content' : 'Original title');
+    if (kind !== 'memory') await form.input(1, 'Original content');
     await form.press();
-    await form.input(0, 'Changed title');
+    await form.input(0, kind === 'memory' ? 'Changed content' : 'Changed title');
     await form.press();
     expect(form.save.mock.calls[1][0].client_request_id).toBe(
       form.save.mock.calls[0][0].client_request_id,
     );
-    expect(form.draft()[0]).toBe('Changed title');
-    expect(form.draft()[1]).toBe('Original content');
+    expect(form.draft()[0]).toBe(kind === 'memory' ? 'Changed content' : 'Changed title');
+    if (kind !== 'memory') expect(form.draft()[1]).toBe('Original content');
     expect(form.error()).toContain('返回列表确认');
     expect(form.back).not.toHaveBeenCalled();
     await form.close();

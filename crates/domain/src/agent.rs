@@ -182,6 +182,13 @@ impl AgentClient {
         messages: &[Message],
         scope: &str,
     ) -> Result<String, DomainError> {
+        self.execute_with_reasoning(repo, ticket, messages, scope, crate::model::ReasoningEffort::Off).await
+    }
+
+    pub async fn execute_with_reasoning(
+        &self, repo: &Repository, ticket: &RunTicket, messages: &[Message], scope: &str,
+        effort: crate::model::ReasoningEffort,
+    ) -> Result<String, DomainError> {
         if let Some(content) = &ticket.cached {
             return Ok(content.clone());
         }
@@ -190,6 +197,7 @@ impl AgentClient {
         authorization.set_sensitive(true);
         let mut request=json!({"run_id":ticket.id,"run_token":ticket.token,"scope":scope,
             "messages":messages,"tools":tool_definitions(scope)});
+        if scope == "chat" { request["reasoning_effort"] = json!(effort); }
         if scope=="chat" && repo.agent_operation_slots_enabled(&ticket.id).await? {
             request["operation_slots"]=json!(true);
         }
@@ -204,11 +212,7 @@ impl AgentClient {
                 .map_err(|_| {
                     DomainError::External("Agent 服务不可用或执行超时；请查看执行记录后重试".into())
                 })?;
-            if !response.status().is_success() {
-                return Err(DomainError::External(
-                    "Agent 执行未完成，请查看执行记录；已保存的操作不会撤销".into(),
-                ));
-            }
+            let status = response.status();
             if response
                 .content_length()
                 .is_some_and(|n| n > MAX_RESPONSE as u64)
@@ -225,6 +229,14 @@ impl AgentClient {
                     return Err(DomainError::External("Agent 回复超过大小限制".into()));
                 }
                 bytes.extend_from_slice(&chunk);
+            }
+            if !status.is_success() {
+                if status.as_u16() == 400 && serde_json::from_slice::<Value>(&bytes).ok()
+                    .and_then(|value| value.pointer("/error/code").and_then(Value::as_str).map(str::to_owned))
+                    .as_deref() == Some("unsupported_reasoning") {
+                    return Err(DomainError::Validation("当前模型不支持所选思考档位，请关闭思考或在后台选择 DeepSeek。".into()));
+                }
+                return Err(DomainError::External("Agent 执行未完成，请查看执行记录；已保存的操作不会撤销".into()));
             }
             let output: AgentOutput = serde_json::from_slice(&bytes)
                 .map_err(|_| DomainError::External("Agent 回复格式无效".into()))?;

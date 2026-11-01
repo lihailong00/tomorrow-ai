@@ -27,6 +27,9 @@ interface NativePort {
   setSecureItem(key: string, value: string): Promise<void>;
   removeSecureItem(key: string): Promise<void>;
   pickDocument(): Promise<LocalFile | null>;
+  pickImage(): Promise<LocalFile | null>;
+  capturePhoto(): Promise<LocalFile | null>;
+  readTextFile(uri: string): Promise<string>;
   prepareChatImage(uri: string, mimeType: string, name: string): Promise<LocalFile>;
   startRecording(): Promise<void>;
   stopRecording(): Promise<LocalFile | null>;
@@ -77,6 +80,7 @@ export const platform = {
   ),
   hasDocumentPicker: Boolean(native?.pickDocument),
   hasRecorder: Boolean(native?.startRecording && native?.stopRecording),
+  hasCamera: Boolean(native?.capturePhoto),
   async getSystemFontScale(): Promise<number | null> {
     if (!native?.getSystemFontScale) return null;
     try {
@@ -171,6 +175,18 @@ export const platform = {
       throw missing();
     }
     return native.pickDocument();
+  },
+  async pickImage(): Promise<LocalFile | null> {
+    if (native?.pickImage) return native.pickImage();
+    return platform.pickDocument();
+  },
+  async capturePhoto(): Promise<LocalFile | null> {
+    if (!native?.capturePhoto) throw new Error('此设备尚未接入拍照，可从“＋”选择图片。');
+    return native.capturePhoto();
+  },
+  async readTextFile(file: LocalFile): Promise<string> {
+    if (!native?.readTextFile) throw missing();
+    return native.readTextFile(file.uri);
   },
   async prepareChatImage(file: LocalFile): Promise<LocalFile> {
     if (native?.prepareChatImage) return native.prepareChatImage(file.uri, file.mime_type, file.name);

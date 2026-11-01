@@ -7,11 +7,14 @@ import { DEFAULT_LIMITS, EVENT_LIMITS, type ExecutionLimits } from './limits.js'
 export { DEFAULT_LIMITS } from './limits.js';
 
 export type ToolDefinition = { name: string; description: string; parameters: Record<string, unknown> };
+export type ReasoningEffort = 'off' | 'low' | 'high' | 'max';
+export const REASONING_MAX_TOKENS: Record<ReasoningEffort, number> = { off: 4096, low: 8192, high: 16384, max: 32768 };
 export type RunInput = {
   run_id: string;
   run_token: string;
   scope: 'chat' | 'task';
   operation_slots?: boolean;
+  reasoning_effort?: ReasoningEffort;
   messages: { role: string; content: string; created_at?: string }[];
   tools: ToolDefinition[];
 };
@@ -53,6 +56,7 @@ export function validateRun(value: unknown): asserts value is RunInput {
       typeof body.run_token !== 'string' || !/^[a-f\d]{64}$/.test(body.run_token) ||
       !['chat', 'task'].includes(body.scope ?? '') || !Array.isArray(body.messages) ||
       (body.operation_slots !== undefined && typeof body.operation_slots !== 'boolean') ||
+      (body.reasoning_effort !== undefined && !['off', 'low', 'high', 'max'].includes(body.reasoning_effort)) ||
       body.messages.length < 1 || body.messages.length > 60 || !Array.isArray(body.tools) || body.tools.length > 64 ||
       body.messages.some(m => !m || !['system', 'user', 'assistant'].includes(m.role) ||
         typeof m.content !== 'string' || m.content.length > 350000) ||
@@ -172,6 +176,10 @@ export function safeToolResult(value: unknown, tool: string): string {
 export async function executeRun(input: RunInput, settings: ModelSettings, bridge: Bridge,
   signal?: AbortSignal, limits = DEFAULT_LIMITS, streamOverride?: StreamFn, webProvider?: WebProvider) {
   validateRun(input);
+  const reasoningEffort = input.reasoning_effort ?? 'off';
+  if (reasoningEffort !== 'off' && (!settings.model.reasoning || settings.model.compat?.thinkingFormat !== 'deepseek')) {
+    throw new RunError('unsupported_reasoning', '当前模型不支持所选思考档位，请关闭思考或在后台选择 DeepSeek。');
+  }
   if (input.tools.some(tool => ['web_search', 'web_fetch'].includes(tool.name))) {
     throw new RunError('invalid_request', '联网工具名称由 Agent 服务保留');
   }
@@ -308,11 +316,11 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
     }));
     if (web) tools.push(...web.tools);
     const runningAgent = agent = new Agent({
-      initialState: { model: settings.model, thinkingLevel: 'off', tools, messages: transcript(input, settings.model, web?.budget()) },
+      initialState: { model: settings.model, thinkingLevel: reasoningEffort, tools, messages: transcript(input, settings.model, web?.budget()) },
       toolExecution: 'sequential',
       streamFn: streamOverride ?? ((model, context, options) =>
         streamSimple(model as Model<'openai-completions'>, context,
-          { ...options, apiKey: settings.apiKey, maxTokens: 4096, maxRetryDelayMs: 1000 })),
+          { ...options, apiKey: settings.apiKey, maxTokens: REASONING_MAX_TOKENS[reasoningEffort], maxRetryDelayMs: 1000 })),
       beforeToolCall: async (_context, internalSignal) => {
         calls++;
         if (calls > limits.tools || controller.signal.aborted || internalSignal?.aborted || replayConflict) {
@@ -403,7 +411,7 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
       void readState().catch(() => { if (!controller.signal.aborted) cancel(); }).finally(() => { polling = false; });
     }, 2000);
     checkActive();
-    await emit('started', { harness: 'pi', model: settings.model.id, scope: input.scope });
+    await emit('started', { harness: 'pi', model: settings.model.id, scope: input.scope, reasoning_effort: reasoningEffort });
     await bounded(() => runningAgent.continue());
     if (replayConflict) throw new RunError('agent_replay_conflict', '重试参数与已执行操作不同，已停止以防重复操作');
     checkActive();

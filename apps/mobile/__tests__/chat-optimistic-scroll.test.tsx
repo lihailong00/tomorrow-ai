@@ -86,7 +86,7 @@ test('own send from 1004 deep history keeps the mounted recycler window over the
         retired.onScroll(packet(savedY)); retired.onContentSizeChange(360, 100);
         retired.onScrollBeginDrag(packet(savedY)); retired.onCommitLayoutEffect?.();
       });
-      expect(viewport.followTail).toBe(true);
+      expect(viewport.followTail).toBe(false);
       expect(viewport.anchor).toEqual(beforeStale);
       messages = messages.map(item => item === user ? { ...item, id: `server-user-${turn}`, delivery: 'sent' }
         : item === assistant ? { ...item, id: `server-assistant-${turn}`, content: 'Actual partial', stream_status: '正在处理操作…' } : item);

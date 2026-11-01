@@ -108,15 +108,14 @@ async function setup(api: object) {
     },
     value: (index: number) => field(index).props.value,
     labelled: (label: string) => tree.root.findAll(n =>
-      n.props.accessibilityLabel === label && typeof n.props.onPress === 'function')[0],
+      n.props.accessibilityLabel === label && (typeof n.props.onPress === 'function' || typeof n.props.onAccessibilityTap === 'function'))[0],
     text: () => tree.root.findAllByType(Text)
       .flatMap(node => [node.props.children].flat(Infinity)).join(''),
     press: async (label: string, wait = true) => {
       await act(async () => {
-        const operation = tree.root
-          .findAllByType(Button)
-          .find(n => n.props.children === label)!
-          .props.onPress();
+        const button = tree.root.findAllByType(Button).find(n => n.props.children === label)
+          ?? tree.root.findAll(n => n.props.accessibilityLabel === (label === '保存记忆' ? '记住这件事' : label) && n.props.onPress)[0];
+        const operation = button.props.onPress();
         if (wait) await operation;
       });
     },
@@ -144,28 +143,27 @@ test('a deferred memory save cannot close a new editor or overwrite its draft', 
     saveMemory: jest
       .fn()
       .mockReturnValueOnce(old.promise)
-      .mockResolvedValue(undefined),
+      .mockResolvedValue({ id: 'new-memory', content: 'Keep this unsaved content', title: '', kind: 'fact', version: 1 }),
   };
   const app = await setup(api);
   await app.navigate({ name: 'memory' });
-  await app.input(0, 'Old memory');
-  await app.input(1, 'Original request');
+  await app.input(0, 'Original request');
   await app.press('保存记忆', false);
   const oldBack = app.navigation().back;
   await app.back();
   await app.navigate({ name: 'memory' });
-  await app.input(0, 'New draft');
-  await app.input(1, 'Keep this unsaved content');
+  await app.input(0, 'Keep this unsaved content');
   await act(async () => {
     old.resolve();
   });
   // Also protects callers outside useAction that retained a route callback.
   await act(async () => oldBack());
   expect(app.route().name).toBe('memory');
-  expect(app.value(0)).toBe('New draft');
-  expect(app.value(1)).toBe('Keep this unsaved content');
+  expect(app.value(0)).toBe('Keep this unsaved content');
   expect(app.invalidate).not.toHaveBeenCalled();
   await app.press('保存记忆');
+  expect(app.route().name).toBe('memory');
+  await app.press('完成记忆保存');
   expect(app.route().name).toBe('main');
   expect(app.invalidate).toHaveBeenCalledTimes(1);
   expect(api.saveMemory).toHaveBeenCalledTimes(2);
@@ -247,7 +245,7 @@ test('an account or instance change invalidates an old request and its navigatio
     saveMemory: jest.fn().mockReturnValue(old.promise),
   });
   await app.navigate({ name: 'memory' });
-  await app.input(1, 'Old owner content');
+  await app.input(0, 'Old owner content');
   await app.press('保存记忆', false);
   const oldNavigate = app.navigation().navigate;
   await app.changeOwner({ saveMemory: jest.fn().mockResolvedValue(undefined) });
@@ -401,6 +399,7 @@ test('an unsent route preserves its draft and local attachment through history a
   await app.navigate({ name: 'chat' });
   await app.input(0, 'Keep this unsent text');
   await act(async () => app.labelled('选择附件').props.onPress());
+  await act(async () => app.labelled('选择文件').props.onPress());
   await app.navigate({ name: 'conversations' });
   await app.navigate({ name: 'chat', conversationId: 'different' });
   expect(app.value(0)).toBe('');
@@ -424,6 +423,7 @@ test('uploaded attachment state returns without another upload and is consumed b
   await app.navigate({ name: 'chat' });
   await app.input(0, 'Draft to send');
   await act(async () => app.labelled('选择附件').props.onPress());
+  await act(async () => app.labelled('选择文件').props.onPress());
   await app.press('上传附件　↑');
   await app.navigate({ name: 'conversations' });
   await app.back();
@@ -560,14 +560,15 @@ test('leaving a chat stops recording and a late picker cannot change its retaine
   await app.navigate({ name: 'chat' });
   (platform.stopRecording as jest.Mock).mockClear();
   await act(async () => app.labelled('切换语音输入').props.onPress());
-  await act(async () => app.labelled('开始录音').props.onPress());
+  await act(async () => app.labelled('按住说话').props.onAccessibilityTap());
   await app.navigate({ name: 'conversations' });
   expect(platform.stopRecording).toHaveBeenCalledTimes(1);
   await app.back();
   expect(app.text()).not.toContain('正在录音');
   const picked = deferred<any>();
   (platform.pickDocument as jest.Mock).mockReturnValueOnce(picked.promise);
-  await act(async () => { void app.labelled('选择附件').props.onPress(); });
+  await act(async () => { app.labelled('选择附件').props.onPress(); });
+  await act(async () => { void app.labelled('选择文件').props.onPress(); });
   await app.navigate({ name: 'conversations' });
   await app.back();
   await act(async () => picked.resolve({ uri: 'late', name: 'late.txt', mime_type: 'text/plain' }));

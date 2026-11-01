@@ -1,3 +1,4 @@
+import { linkDisplayText } from './markdownLinks';
 export type ColumnAlignment = 'left' | 'center' | 'right';
 export type MarkdownBlock =
   | { kind: 'line'; line: number; text: string; code: boolean }
@@ -51,6 +52,7 @@ function pipeRow(source: string): PipeRow {
 
 /** Keep the small existing text renderer's formatting, including literal code. */
 export function markdownInlineText(value: string): string {
+  value = linkDisplayText(value);
   let result = '';
   for (let i = 0; i < value.length; i++) {
     if (value[i] === '\\' && value[i + 1] === '`') {

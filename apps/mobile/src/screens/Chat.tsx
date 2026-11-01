@@ -16,8 +16,11 @@ import { Text } from '../ui/Text';
 import { errorMessage, newRequestId } from '../api/client';
 import { useAction, useApp, useResource } from '../app/context';
 import type { RetainedRouteScope } from '../app/navigation';
-import type { Message, Upload } from '../domain/types';
+import type { Message, Upload, ReasoningEffort } from '../domain/types';
+import { ChatReasoningSelector } from '../ui/ChatReasoningSelector';
 import { LocalFile, platform } from '../platform/ports';
+import { recordingSession, stopRecorder, releaseRecorder } from '../platform/recordingSession';
+import { UnifiedInputBar, UnifiedAttachmentMenu } from '../ui/UnifiedInputBar';
 import {
   Button,
   Card,
@@ -56,21 +59,9 @@ const afterMessageDate = (date: string) => {
   return new Date((Number.isFinite(milliseconds) ? milliseconds : Date.now()) + 1).toISOString();
 };
 const INPUT_LINE_ALLOWANCE = 23;
-// The microphone is process-wide, including permission requests from an old route.
-let activeRecorder: object | null = null;
-const recorderStops = new WeakMap<object, Promise<LocalFile | null>>();
-function stopRecorder(lease: object | null): Promise<LocalFile | null> {
-  if (!lease) return platform.stopRecording();
-  let pending = recorderStops.get(lease);
-  if (!pending) {
-    pending = platform.stopRecording().catch(failure => { recorderStops.delete(lease); throw failure; });
-    recorderStops.set(lease, pending);
-  }
-  return pending;
-}
-const releaseRecorder = (lease: object | null) => { if (lease && activeRecorder === lease) activeRecorder = null; };
 type ChatSnapshot = {
   id?: string;
+  reasoningEffort: ReasoningEffort;
   draft: string;
   attachment: Attachment | null;
   voice: VoiceInput | null;
@@ -93,6 +84,7 @@ export function createChatEntryState(
 ) {
   let snapshot: ChatSnapshot = {
     id: conversationId,
+    reasoningEffort: 'off',
     draft: prompt ?? '',
     attachment: null,
     voice: null,
@@ -163,7 +155,7 @@ export function ChatScreen({
     localState.current = { api, value: createChatEntryState(conversationId, prompt) };
   }
   const state = entryState ?? localState.current.value;
-  const { id, messages, messageVersion, draft, attachment, voice, voicePhase, voiceError, voiceBusy, sending, editing, quoting, sendError } =
+  const { id, reasoningEffort, messages, messageVersion, draft, attachment, voice, voicePhase, voiceError, voiceBusy, sending, editing, quoting, sendError } =
     useSyncExternalStore(state.subscribe, state.getSnapshot, state.getSnapshot);
   const setDraft = useCallback((next: React.SetStateAction<string>) => state.update(old => ({
     ...old,
@@ -180,6 +172,7 @@ export function ChatScreen({
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [voiceMode, setVoiceMode] = useState(false);
+  const [attachmentMenu, setAttachmentMenu] = useState(false);
   const [holdActive, setHoldActive] = useState(false);
   const [holdCancelled, setHoldCancelled] = useState(false);
   const [captureBusy, setCaptureBusy] = useState(false);
@@ -310,13 +303,13 @@ export function ChatScreen({
     voiceOwner.current.api === owner.api && voiceOwner.current.state === owner.state &&
     (!state.scope || state.scope.isRetained());
   const mutationBlocked = () => state.getSnapshot().sending || Boolean(state.getSnapshot().voice) ||
-    recordingRef.current || Boolean(activeRecorder) || fileActionRef.current.busy || deletingRef.current;
+    recordingRef.current || Boolean(recordingSession.active) || fileActionRef.current.busy || deletingRef.current;
   const liveSentMessage = (messageId: string) => state.getSnapshot().messages.find(message =>
     message.id === messageId && message.role === 'user' && (!message.delivery || message.delivery === 'sent'));
   const showMessageMenu = useCallback((message: Message, anchor: MessageAnchor) => {
     if (!mounted.current || currentShareOwner.current !== shareOwner ||
       voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
-      (state.scope && !state.scope.isRetained()) || recordingRef.current || activeRecorder) return;
+      (state.scope && !state.scope.isRetained()) || recordingRef.current || recordingSession.active) return;
     const latest = state.getSnapshot().messages.find(item => item.id === message.id && item.role === 'user' &&
       (!item.delivery || item.delivery === 'sent'));
     if (!latest) return;
@@ -631,11 +624,11 @@ export function ChatScreen({
     }
   };
   const beginHold = (pageY?: number) => {
-    if (activeRecorder || !holdOwner.active || recordingRef.current || (holdOwner.gesture && !holdOwner.gesture.ended) ||
+    if (recordingSession.active || !holdOwner.active || recordingRef.current || (holdOwner.gesture && !holdOwner.gesture.ended) ||
         currentShareOwner.current !== shareOwner || fileActionRef.current.busy || deletingRef.current ||
         (state.scope && !state.scope.isRetained()) ||
         state.getSnapshot().sending || state.getSnapshot().voice || awaitingInitialConversation()) return;
-    const lease = {}; activeRecorder = lease; recorderLease.current = lease;
+    const lease = {}; recordingSession.active = lease; recorderLease.current = lease;
     const gesture: HoldRecording = { held: true, cancelled: false, started: false, ended: false, lease, startY: pageY,
       sendIntent: makeVoiceSendIntent() };
     holdOwner.gesture = gesture;
@@ -696,6 +689,13 @@ export function ChatScreen({
     // Recording is deliberately bounded; native adapter has its own hard limit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording, seconds]);
+  const chooseInputFile = (kind: 'camera' | 'image' | 'file') => {
+    fileAction.run(async ({ isCurrent }) => {
+      const file = kind === 'camera' ? await platform.capturePhoto()
+        : kind === 'image' ? await platform.pickImage() : await platform.pickDocument();
+      if (file && isCurrent()) setAttachment({ file });
+    });
+  };
   const awaitingInitialConversation = () => !state.getSnapshot().id &&
     Array.from(state.streams.values()).some(stream => stream.intent.conversation_id === null &&
       stream.getSnapshot().phase === 'failed' && !stream.getSnapshot().conversationId);
@@ -709,7 +709,7 @@ export function ChatScreen({
       voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
       (state.scope && !state.scope.isRetained()) ||
       !entered || before.sending || deletingRef.current || awaitingInitialConversation() ||
-      recordingRef.current || activeRecorder || (!automatic && fileActionRef.current.busy) || before.voice || !ready ||
+      recordingRef.current || recordingSession.active || (!automatic && fileActionRef.current.busy) || before.voice || !ready ||
       (automatic && (before.draft !== automatic.draft || (selected?.file ?? null) !== automatic.file))) return;
     if (Array.from(text).length > 20000) {
       fileActionRef.current.setError('引用后的消息超过 20,000 字，请缩短追问或取消引用后再发送。');
@@ -842,6 +842,7 @@ export function ChatScreen({
     const operation: ChatStreamController = createChatStreamController({ api,
       intent: { message: text, conversation_id: before.id ?? null,
         client_request_id: requestId, upload_ids: uploadIds, remember: false,
+        reasoning_effort: before.reasoningEffort,
         ...(edit ? { replace_message_id: edit.message.id } : {}) },
       isCurrent: () => canApply() && state.streams.get(userKey) === operation,
       onChange: applyProgress,
@@ -876,7 +877,7 @@ export function ChatScreen({
   const send = () => {
     const before = state.getSnapshot();
     if (!before.attachment || isReadableAttachment(before.attachment)) return submitPrepared();
-    if (!isImageFile(before.attachment.file) || before.voice || before.sending || recordingRef.current || activeRecorder) return;
+    if (!isImageFile(before.attachment.file) || before.voice || before.sending || recordingRef.current || recordingSession.active) return;
     return fileAction.run(async ({ isCurrent }) => {
       const controller = new AbortController();
       attachmentAbort.current = controller;
@@ -1214,120 +1215,57 @@ export function ChatScreen({
             }}><Icon name="close" size={18} color={appearance.secondary} /></Pressable>
         </View>}
         <View
-          style={chat.composer}
+          style={{ flexShrink: 0 }}
           testID="chat-composer-content"
           onLayout={event => {
             composerTop.current = event.nativeEvent.layout.y;
             revealFocusedInput();
           }}
         >
-          <ChatModeMotion mode={voiceMode ? 'voice' : 'text'} reducedMotion={reducedMotion}>
-          <View style={chat.composerRow}>
           {navigationActions}
-          <Pressable accessibilityRole="button" accessibilityLabel={voiceMode ? '切换文字输入' : '切换语音输入'}
-            disabled={recording || captureBusy || fileAction.busy || Boolean(voice)}
-            style={chat.toolButton} onPress={toggleInputMode}>
-            <Icon name={voiceMode ? 'keyboard' : 'mic'} size={23} color={appearance.secondary} />
-          </Pressable>
-          <TextInput
-            ref={inputRef}
-            accessibilityElementsHidden={voiceMode}
-            importantForAccessibility={voiceMode ? 'no-hide-descendants' : 'auto'}
-            accessibilityLabel="给助手的消息"
-            multiline
-            scrollEnabled
-            maxLength={20000}
-            placeholder={
-              recording
-                ? '正在录音，结束后继续输入…'
-                : '发消息…'
-            }
-            placeholderTextColor={appearance.secondary}
-            value={draft}
-            onChangeText={setDraft}
-            onContentSizeChange={refreshInputFontScale}
-            onFocus={() => {
-              inputFocused.current = true;
-              refreshInputFontScale();
-              revealFocusedInput();
-            }}
-            onBlur={() => {
-              inputFocused.current = false;
-            }}
-            editable={!deleting}
-            style={[
-              chat.input,
-              { minHeight: inputMinHeight, maxHeight: inputMaxHeight },
-              voiceMode && chat.hiddenInput,
-            ]}
-          />
-          {voiceMode && <View testID="chat-hold-to-talk" accessible accessibilityRole="button"
-            accessibilityLabel={holdActive ? holdCancelled ? '松开取消' : '松开发送' : '按住说话'}
-            accessibilityHint={holdActive ? holdCancelled ? '再次激活取消这段录音。' : '再次激活结束录音并发送；也可以上滑取消。' : '按住说话，松开发送。屏幕阅读用户可激活开始，再次激活结束并发送。'}
-            accessibilityState={{ disabled: fileAction.busy || sending || Boolean(voice) || deleting || (captureBusy && !holdActive) }}
-            accessibilityActions={[{ name: 'activate', label: holdActive ? holdCancelled ? '取消这段录音' : '结束录音并发送' : '开始录音' }]}
-            onAccessibilityTap={activateHold}
-            onAccessibilityAction={event => { if (event.nativeEvent.actionName === 'activate') activateHold(); }}
-            style={[chat.holdButton, holdActive && chat.holdPressed, holdActive && holdCancelled && chat.recordingCancelled]}
-            onStartShouldSetResponder={() => !fileAction.busy && !sending && !voice && !deleting}
-            onResponderGrant={event => beginHold(event?.nativeEvent?.pageY)}
-            onResponderRelease={() => releaseHold()}
-            onResponderTerminationRequest={() => true}
-            onResponderTerminate={() => releaseHold(true)}
-            onResponderMove={event => {
-              const gesture = holdOwner.gesture;
-              if (!gesture?.held || gesture.startY === undefined) return;
-              gesture.cancelled = gesture.startY - event.nativeEvent.pageY > 44;
-              setHoldCancelled(gesture.cancelled);
-            }}
-            onTouchCancel={() => releaseHold(true)}>
-            <Text style={[chat.holdText, holdActive && holdCancelled && chat.cancelText]}>{holdActive ? holdCancelled ? '松开取消' : '松开发送' : '按住说话'}</Text>
-          </View>}
-          <View style={chat.composerActions}>
-            <View style={chat.inputTools}>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="选择附件"
-                style={[
-                  chat.toolButton,
-                  (fileAction.busy || recording || sending) &&
-                    s.disabled,
-                ]}
-                disabled={fileAction.busy || recording || captureBusy || sending || deleting}
-                onPress={() =>
-                  fileAction.run(async ({ isCurrent }) => {
-                    const file = await platform.pickDocument();
-                    if (file && isCurrent()) {
-                      setAttachment({ file });
-                    }
-                  })
-                }
-              >
-                <Icon name="plus" size={23} color={appearance.secondary} />
-              </Pressable>
-            </View>
-            {!voiceMode && <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={editing ? '提交修改' : '发送消息'}
-              disabled={sendDisabled}
-              onPress={send}
-              style={[chat.sendButton, sendDisabled && chat.sendDisabled]}
-            >
-              {sending ? (
-                <ActivityIndicator size="small" color="white" />
-              ) : (
-                <Icon
-                  name="arrowUp"
-                  size={23}
-                  color={sendDisabled ? appearance.secondary : appearance.onAccent}
-                />
-              )}
-            </Pressable>}
-          </View>
-          </View>
+          <ChatReasoningSelector owner={state} value={reasoningEffort}
+            disabled={recording || captureBusy || fileAction.busy || Boolean(voice) || deleting}
+            onChange={value => {
+              if (mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state &&
+                currentShareOwner.current === shareOwner && (!state.scope || state.scope.isRetained()))
+                state.update(old => ({ ...old, reasoningEffort: value }));
+            }} />
+          <ChatModeMotion mode={voiceMode ? 'voice' : 'text'} reducedMotion={reducedMotion}>
+            <UnifiedInputBar voiceMode={voiceMode} value={draft} onChangeText={setDraft}
+              onToggleMode={toggleInputMode} onCamera={() => chooseInputFile('camera')}
+              onAttach={() => setAttachmentMenu(true)} onSend={send}
+              sendDisabled={sendDisabled} sending={sending} hasPayload={Boolean(attachment)}
+              toolsDisabled={recording || captureBusy || fileAction.busy || Boolean(voice) || sending || deleting}
+              modeDisabled={recording || captureBusy || fileAction.busy || Boolean(voice) || deleting}
+              holding={holdActive} cancelled={holdCancelled} recording={recording} voiceBusy={voiceBusy}
+              onAccessibleRecord={activateHold} holdTestID="chat-hold-to-talk"
+              sendLabel={editing ? '提交修改' : '发送消息'} inputRef={inputRef}
+              inputStyle={{ minHeight: inputMinHeight, maxHeight: inputMaxHeight }}
+              inputProps={{ accessibilityLabel: '给助手的消息', scrollEnabled: true,
+                maxLength: 20000, placeholder: '发消息…', editable: !deleting,
+                onContentSizeChange: refreshInputFontScale,
+                onFocus: () => { inputFocused.current = true; refreshInputFontScale(); revealFocusedInput(); },
+                onBlur: () => { inputFocused.current = false; },
+              }}
+              holdHandlers={{
+                onStartShouldSetResponder: () => !fileAction.busy && !sending && !voice && !deleting,
+                onResponderGrant: event => beginHold(event?.nativeEvent?.pageY),
+                onResponderRelease: () => releaseHold(),
+                onResponderTerminationRequest: () => true,
+                onResponderTerminate: () => releaseHold(true),
+                onResponderMove: event => {
+                  const gesture = holdOwner.gesture;
+                  if (!gesture?.held || gesture.startY === undefined) return;
+                  gesture.cancelled = gesture.startY - event.nativeEvent.pageY > 44;
+                  setHoldCancelled(gesture.cancelled);
+                },
+                onTouchCancel: () => releaseHold(true),
+              }} />
           </ChatModeMotion>
         </View>
       </ScrollView>
+      <UnifiedAttachmentMenu visible={attachmentMenu} onClose={() => setAttachmentMenu(false)}
+        onImage={() => chooseInputFile('image')} onFile={() => chooseInputFile('file')} />
       {messageMenu?.owner === shareOwner && <ChatMessageActions anchor={messageMenu.anchor}
         timestamp={formatDate(messageMenu.message.created_at)} hasText={Boolean(messageMenu.message.content)}
         blocked={mutationBlocked()} onAction={performMessageAction} onClose={() => setMessageMenu(null)} />}

@@ -705,6 +705,8 @@ struct ChatInput {
     upload_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     replace_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "tomorrow_domain::model::ReasoningEffort::is_off")]
+    reasoning_effort: tomorrow_domain::model::ReasoningEffort,
 }
 #[derive(serde::Serialize, serde::Deserialize, ToSchema)]
 struct ChatResponse {
@@ -924,19 +926,19 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
     let reply = if let (Some(agent), Some(ticket)) = (&state.agent, &ticket) {
         ModelReply {
             content: agent
-                .execute(&state.repository, ticket, &context, "chat")
+                .execute_with_reasoning(&state.repository, ticket, &context, "chat", input.reasoning_effort)
                 .await?,
             mode: "llm".into(),
             provider: Some("pi".into()),
         }
     } else if let Some(stream) = stream {
-        state.provider.complete_stream(&context,|delta| {
+        state.provider.complete_stream_with_reasoning(&context,input.reasoning_effort,|delta| {
             let repository = state.repository.clone();
             let stream = stream.clone();
             async move {repository.append_chat_stream_delta(&stream,delta).await}
         }).await?
     } else {
-        state.provider.complete(&context).await?
+        state.provider.complete_with_reasoning(&context,input.reasoning_effort).await?
     };
     let message = Message {
         id: assistant_id,

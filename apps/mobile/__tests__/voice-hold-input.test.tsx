@@ -120,6 +120,9 @@ async function setup() {
         if (control.props.onAccessibilityAction) control.props.onAccessibilityAction({ nativeEvent: { actionName: 'activate' } });
         else await control.props.onPress();
       });
+      if (label === '选择附件') {
+        await act(async () => node('选择文件').props.onPress());
+      }
     },
     start: async (label: string) => {
       await act(async () => {
@@ -506,7 +509,7 @@ test('API owner replacement on the same Chat component resets capture UI and can
   const api = app.api; let tree!: ReactTestRenderer;
   const content = (client: typeof api) => <AppProvider value={{ api:client, invalidate:jest.fn(),formatDate:()=>'' } as unknown as AppContextValue}><ChatScreen /></AppProvider>;
   await act(async () => { tree=create(content(api)); });
-  const node = (label: string) => tree.root.findAll(n => n.props.accessibilityLabel === label && typeof n.props.onPress === 'function')[0];
+  const node = (label: string) => tree.root.findAll(n => n.props.accessibilityLabel === label && (typeof n.props.onPress === 'function' || typeof n.props.onAccessibilityTap === 'function'))[0];
   const touch = () => tree.root.findAll(n => n.props.testID === 'chat-hold-to-talk' && typeof n.props.onResponderGrant === 'function')[0];
   await act(async () => node('切换语音输入').props.onPress());
   await act(async () => touch().props.onAccessibilityAction({ nativeEvent: { actionName: 'activate' } }));

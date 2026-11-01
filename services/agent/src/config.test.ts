@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { streamSimple } from '@earendil-works/pi-ai/api/openai-completions';
 import { normalizeContext } from '@earendil-works/pi-ai/utils/transcript';
 import { authenticate, positiveInteger, resolveModel, rustServiceUrl, serviceUrl } from './config.js';
+import { REASONING_MAX_TOKENS, type ReasoningEffort } from './runtime.js';
 
-async function captureProviderRequest(env: NodeJS.ProcessEnv, content: string) {
+async function captureProviderRequest(env: NodeJS.ProcessEnv, content: string, effort: ReasoningEffort = 'off') {
   const { model, apiKey } = resolveModel(env);
   const requests: Record<string, unknown>[] = [];
   const fakeFetch: typeof globalThis.fetch = async (_input, init) => {
@@ -20,7 +21,8 @@ async function captureProviderRequest(env: NodeJS.ProcessEnv, content: string) {
   // Exercise the installed Pi request builder and HTTP transport, without network I/O.
   const result = await streamSimple(model,
     normalizeContext({ messages: [{ role: 'user', content, timestamp: 0 }] }),
-    { apiKey, maxTokens: 4096, maxRetries: 0, fetch: fakeFetch }).result();
+    { apiKey, reasoning: effort === 'off' ? undefined : effort,
+      maxTokens: REASONING_MAX_TOKENS[effort], maxRetries: 0, fetch: fakeFetch }).result();
   assert.equal(result.stopReason, 'stop', result.errorMessage);
   assert.equal(requests.length, 1);
   return requests[0]!;
@@ -54,7 +56,6 @@ test('unverified models, proxy endpoints and custom providers retain conservativ
     { DEEPSEEK_API_KEY: 'fixture-key', DEEPSEEK_BASE_URL: 'https://proxy.example.test/v1' },
     { DEEPSEEK_API_KEY: 'fixture-key', DEEPSEEK_BASE_URL: 'https://api.deepseek.com.evil.test' },
     { DEEPSEEK_API_KEY: 'fixture-key', DEEPSEEK_BASE_URL: 'https://api.deepseek.com/unverified' },
-    { MODEL_API_KEY: 'fixture-key', MODEL_NAME: 'deepseek-flash', MODEL_BASE_URL: 'https://api.deepseek.com' },
   ];
   for (const env of configurations) {
     const payload = await captureProviderRequest(env, 'Historical message.\n'.repeat(28000));
@@ -62,6 +63,21 @@ test('unverified models, proxy endpoints and custom providers retain conservativ
     // or its thinking toggle. The actual Pi request must retain that boundary.
     assert.equal(payload.thinking, undefined);
     assert.equal(payload.max_tokens, 1);
+  }
+});
+test('all four choices reach the actual Pi request builder for dedicated and generic official DeepSeek settings', async () => {
+  for (const model of ['deepseek-flash', 'deepseek-v4-pro']) {
+    for (const env of [
+      { DEEPSEEK_API_KEY: 'fixture-key', DEEPSEEK_MODEL: model },
+      { MODEL_API_KEY: 'fixture-key', MODEL_NAME: model, MODEL_BASE_URL: 'https://api.deepseek.com/v1' },
+    ]) {
+      for (const effort of ['off', 'low', 'high', 'max'] as const) {
+        const payload = await captureProviderRequest(env, '请分析这个方案', effort);
+        assert.deepEqual(payload.thinking, { type: effort === 'off' ? 'disabled' : 'enabled' });
+        assert.equal(payload.reasoning_effort, effort === 'off' ? undefined : effort);
+        assert.equal(payload.max_tokens, REASONING_MAX_TOKENS[effort]);
+      }
+    }
   }
 });
 test('a partial compatible provider never borrows the DeepSeek credential', () => {

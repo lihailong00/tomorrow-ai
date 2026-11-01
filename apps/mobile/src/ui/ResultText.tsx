@@ -1,8 +1,14 @@
 import React, { useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, useWindowDimensions, View, type StyleProp, type TextStyle } from 'react-native';
-import { Text } from './Text';
+import { Text as PlainText } from './Text';
+import { ReadingText as Text } from './ChatReadingMetrics';
 import { colors, styles as s } from './theme';
 import { markdownBlocks, markdownInlineText, type MarkdownBlock } from './markdownBlocks';
+
+import { LinkedText, LinkPreviewScope, DocumentLink } from './LinkPreview';
+import { markdownLinks } from './markdownLinks';
+
+function inline(value: string) { return markdownLinks(value).some(t => t.kind === 'link') ? <LinkedText value={value} /> : markdownInlineText(value); }
 
 type TableBlock = Extract<MarkdownBlock, { kind: 'table' }>;
 
@@ -35,10 +41,10 @@ function NativeMarkdownTable({ table, textStyle }: { table: TableBlock; textStyl
         const plain = markdownInlineText(value);
         const label = markdownInlineText(table.headers[column]) || `第 ${column + 1} 列`;
         return <View key={column} style={[tableStyles.cell, { width: widths[column] }, column > 0 && tableStyles.nextColumn]}>
-          <Text selectable accessibilityRole={header ? 'header' : 'text'}
+          <Text readingText={plain} selectable accessibilityRole={header ? 'header' : 'text'}
             accessibilityLabel={header ? label : `${label}：${plain || '空白'}`}
             style={[s.body, textStyle, tableStyles.cellText, header && tableStyles.headerText, { textAlign: table.alignments[column] }]}>
-            {plain}
+            {inline(value)}
           </Text>
         </View>;
       })}
@@ -48,7 +54,7 @@ function NativeMarkdownTable({ table, textStyle }: { table: TableBlock; textStyl
     const next = event.nativeEvent.layout.width;
     if (next > 0 && Math.abs(next - measuredWidth) > 1) setMeasuredWidth(next);
   }}>
-    {wide && <Text style={tableStyles.hint}>左右滑动查看表格</Text>}
+    {wide && <PlainText style={tableStyles.hint}>左右滑动查看表格</PlainText>}
     <ScrollView horizontal nestedScrollEnabled showsHorizontalScrollIndicator={wide}
       testID="markdown-table-scroll" style={tableStyles.scroller}>
       <View style={tableStyles.grid}>
@@ -62,23 +68,26 @@ function NativeMarkdownTable({ table, textStyle }: { table: TableBlock; textStyl
 /** Safe native rendering: model output never becomes executable HTML or a WebView. */
 export function ResultText({ content, textStyle }: { content: string; textStyle?: StyleProp<TextStyle> }) {
   const blocks = useMemo(() => markdownBlocks(content), [content]);
-  return <View style={{ gap: 7 }}>
+  return <LinkPreviewScope blocks={blocks}><View style={{ gap: 7 }}>
     {blocks.map(block => {
       if (block.kind === 'table') return <NativeMarkdownTable key={`table:${block.line}`} table={block} textStyle={textStyle} />;
       const { text: line, code } = block;
       if (!line.trim()) return <View key={`line:${block.line}`} style={{ height: 4 }} />;
+      const tokens = !code ? markdownLinks(line.trim()) : [];
+      if (tokens.length === 1 && tokens[0].kind === 'link' && tokens[0].source.pdf) return <DocumentLink key={`pdf:${block.line}`} source={tokens[0].source} />;
       const heading = !code && /^(#{1,4})\s+(.+)$/.exec(line);
-      return <Text selectable key={`line:${block.line}`} style={[
+      const value = (heading ? heading[2] : line).replace(/^[-*]\s/, '• ');
+      return <Text readingText={code ? line : markdownInlineText(value)} selectable key={`line:${block.line}`} style={[
         s.body,
         textStyle,
         heading && { fontSize: heading[1].length < 3 ? 18 : 15, fontWeight: '600', color: colors.ink, marginTop: 12 },
         code && { fontFamily: 'monospace', fontSize: 12, backgroundColor: colors.cream, padding: 8 },
         !code && /^[-*]\s/.test(line) && { paddingLeft: 7 },
       ]}>
-        {code ? line : markdownInlineText(heading ? heading[2] : line).replace(/^[-*]\s/, '• ')}
+        {code ? line : inline(value)}
       </Text>;
     })}
-  </View>;
+  </View></LinkPreviewScope>;
 }
 
 const tableStyles = StyleSheet.create({

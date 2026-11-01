@@ -14,8 +14,6 @@ import {
   frequencies,
   isActiveTask,
   Memory,
-  memoryKinds,
-  MemoryKind,
   Schedule,
   taskStatuses,
 } from '../domain/types';
@@ -34,6 +32,7 @@ import {
 import { ResultText } from '../ui/ResultText';
 import { colors, styles as s } from '../ui/theme';
 import { Icon } from '../ui/visuals';
+import { MemoryCaptureEditor } from '../features/memory/MemoryCaptureEditor';
 import { usePagedList } from './Main';
 
 export function TaskDetailScreen({ id }: { id: string }) {
@@ -410,127 +409,8 @@ export function NewTaskScreen() {
 }
 
 export function MemoryEditor({ memory }: { memory?: Memory }) {
-  const { api, back, invalidate, formatDate } = useApp();
-  const [title, setTitle] = useState(memory?.title ?? '');
-  const [content, setContent] = useState(memory?.content ?? '');
-  const [kind, setKind] = useState<MemoryKind>(memory?.kind ?? 'preference');
-  const creationRequestId = useRef(newRequestId()).current;
-  const action = useAction();
-  return (
-    <ScrollView
-      keyboardShouldPersistTaps="handled"
-      contentContainerStyle={s.content}
-    >
-      <Text style={s.title}>{memory ? '编辑记忆' : '添加记忆'}</Text>
-      <Text style={s.subtitle}>你的明确说明，会用于之后的回答与任务。</Text>
-      <Text style={s.label}>记忆类型</Text>
-      <View style={[s.row, { flexWrap: 'wrap', gap: 8 }]}>
-        {Object.entries(memoryKinds).map(([id, label]) => (
-          <Pressable
-            key={id}
-            onPress={() => setKind(id as MemoryKind)}
-            style={{
-              backgroundColor: kind === id ? '#EAF1FF' : colors.surface,
-              borderRadius: 20,
-              paddingHorizontal: 14,
-              paddingVertical: 9,
-            }}
-          >
-            <Text
-              style={[
-                s.small,
-                { color: kind === id ? '#5584E8' : colors.secondary },
-              ]}
-            >
-              {label}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-      <Field
-        label="给它一个名字（可选）"
-        value={title}
-        onChangeText={setTitle}
-        placeholder="例如：我的工作节奏"
-        maxLength={120}
-      />
-      <Field
-        label="希望助手记住什么"
-        multiline
-        value={content}
-        onChangeText={setContent}
-        maxLength={10000}
-        placeholder="比如：我上午更专注，希望把重要工作放在午饭前。"
-        style={{ minHeight: 175 }}
-      />
-      {memory && (
-        <Text style={[s.small, s.topGap]}>
-          来源：{memory.source} · 更新于 {formatDate(memory.updated_at)}
-          {'\n'}版本 {memory.version} · 修改发生冲突时，请返回刷新后再编辑。
-        </Text>
-      )}
-      <ErrorNotice message={action.error} />
-      <View style={{ marginTop: 24 }}>
-        <Button
-          loading={action.busy}
-          disabled={!content.trim()}
-          onPress={() =>
-            action.run(async ({ isCurrent }) => {
-              await api.saveMemory(
-                {
-                  title: title.trim() || undefined,
-                  content: content.trim(),
-                  kind,
-                  ...(!memory
-                    ? {
-                        source: '用户主动添加',
-                        client_request_id: creationRequestId,
-                      }
-                    : { version: memory.version }),
-                },
-                memory?.id,
-              );
-              if (!isCurrent()) return;
-              invalidate();
-              back();
-            })
-          }
-        >
-          {memory ? '保存修改' : '保存记忆'}
-        </Button>
-      </View>
-      {memory && (
-        <View style={s.topGap}>
-          <Button
-            variant="ghost"
-            loading={action.busy}
-            onPress={() =>
-              Alert.alert(
-                '删除这条记忆？',
-                '删除后不再用于新的回答。原始会话不会一起删除。',
-                [
-                  { text: '保留', style: 'cancel' },
-                  {
-                    text: '删除记忆',
-                    style: 'destructive',
-                    onPress: () =>
-                      action.run(async ({ isCurrent }) => {
-                        await api.deleteMemory(memory.id);
-                        if (!isCurrent()) return;
-                        invalidate();
-                        back();
-                      }),
-                  },
-                ],
-              )
-            }
-          >
-            删除这条记忆
-          </Button>
-        </View>
-      )}
-    </ScrollView>
-  );
+  const { back } = useApp();
+  return <MemoryCaptureEditor memory={memory} onSaved={back} onDeleted={back} />;
 }
 
 export function ScheduleEditor({ schedule }: { schedule?: Schedule }) {

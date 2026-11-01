@@ -14,6 +14,7 @@ import {
   View,
 } from 'react-native';
 import { newRequestId } from '../../api/client';
+import { MemoryCaptureEditor } from './MemoryCaptureEditor';
 import { useAction, useApp } from '../../app/context';
 import type { Memory } from '../../domain/types';
 import { ErrorNotice, Loading } from '../../ui/components';
@@ -24,7 +25,6 @@ import {
   memoryReviewPrompt,
   memoryTryPrompt,
   selectMemoryHighlights,
-  suggestedMemoryKind,
 } from './memoryModel';
 import { useMemoryCollection } from './useMemoryCollection';
 
@@ -128,80 +128,8 @@ function MemoryRow({
   );
 }
 
-function MemoryEntry({
-  memory,
-  onSaved,
-  onBusyChange,
-}: {
-  memory?: Memory;
-  onSaved: (memory: Memory) => void;
-  onBusyChange: (busy: boolean) => void;
-}) {
-  const { api } = useApp();
-  const [content, setContent] = useState(memory?.content ?? '');
-  const requestId = useRef(newRequestId()).current;
-  const action = useAction();
-  useEffect(() => {
-    onBusyChange(action.busy);
-    return () => onBusyChange(false);
-  }, [action.busy, onBusyChange]);
-  return (
-    <ScrollView
-      style={m.sheetScroll}
-      keyboardShouldPersistTaps="handled"
-      contentContainerStyle={m.editor}
-    >
-      <Text style={m.subtitle}>说人话就好，不用选分类。</Text>
-      <Text style={m.fieldLabel}>你希望我记住什么</Text>
-      <TextInput
-        accessibilityLabel="你希望我记住什么"
-        multiline
-        maxLength={10000}
-        placeholder="例如：我周三晚上要上课，别安排其他事。"
-        placeholderTextColor={appearance.muted}
-        value={content}
-        onChangeText={setContent}
-        editable={!action.busy}
-        style={m.input}
-        textAlignVertical="top"
-      />
-      <View style={m.effect}>
-        <Icon name="sparkles" size={17} color={appearance.accent} />
-        <Text style={m.effectText}>
-          相关回答和建议可以参考这件事，你随时可以回来改。
-        </Text>
-      </View>
-      <ErrorNotice message={action.error} />
-      {action.error?.includes('刷新') && (
-        <Text style={m.explanation}>
-          这条记忆可能在别处更新过。输入已保留；关闭后下拉刷新，再按新版本修改。
-        </Text>
-      )}
-      <MemoryAction
-        label={memory ? '保存修改' : '记住这件事'}
-        busy={action.busy}
-        disabled={!content.trim()}
-        onPress={() =>
-          action.run(async ({ isCurrent }) => {
-            const text = content.trim();
-            if (!text) return;
-            const saved = await api.saveMemory(
-              {
-                content: text,
-                title: [...text].slice(0, 40).join(''),
-                kind: memory?.kind ?? suggestedMemoryKind(text),
-                ...(memory
-                  ? { version: memory.version }
-                  : { source: '用户主动添加', client_request_id: requestId }),
-              },
-              memory?.id,
-            );
-            if (isCurrent()) onSaved(saved);
-          })
-        }
-      />
-    </ScrollView>
-  );
+function MemoryEntry(props: { memory?: Memory; onSaved: (memory: Memory) => void; onBusyChange: (busy: boolean) => void }) {
+  return <MemoryCaptureEditor {...props} embedded />;
 }
 
 export function MemoryHome() {
@@ -589,7 +517,6 @@ export function MemoryHome() {
                       : '记住了，不用再从头解释。',
                   );
                   setPane({ kind: 'detail', memory });
-                  invalidate();
                 }}
               />
             )}

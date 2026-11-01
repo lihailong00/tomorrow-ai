@@ -413,7 +413,8 @@ test('retired own-send geometry and scroll callbacks cannot overwrite a newer wi
       contentSize: { height: 924 }, layoutMeasurement: { width: 360, height: 640 } } });
     retired.onCommitLayoutEffect();
   });
-  expect(app.viewport.followTail).toBe(true);
+  // A measured live reply retains its reading location, including at native zero.
+  expect(app.viewport.followTail).toBe(false);
   expect(app.viewport.anchor).toEqual(latest);
 });
 

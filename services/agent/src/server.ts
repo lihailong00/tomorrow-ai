@@ -104,7 +104,7 @@ const server = createServer(async (request, response) => {
     const code = error instanceof RunError || error instanceof RuntimeSettingsError ? error.code : 'execution_failed';
     // Never log upstream SDK errors, request bodies, headers, or provider credentials.
     console.error(JSON.stringify({ event: 'run_failed', code }));
-    send(error instanceof RuntimeSettingsError ? 503 : code === 'invalid_request' || code === 'context_limit' || code === 'body_limit' ? 400 : 502,
+    send(error instanceof RuntimeSettingsError ? 503 : code === 'invalid_request' || code === 'context_limit' || code === 'body_limit' || code === 'unsupported_reasoning' ? 400 : 502,
       { error: { code, message: error instanceof RuntimeSettingsError ? error.message : 'Agent 执行未完成，请查看执行记录后重试' } });
   } finally { if (awaitingAdmission) pending--; else active--; }
 });

@@ -67,10 +67,13 @@ export function resolveModel(env: NodeJS.ProcessEnv): ModelSettings {
   }
   const baseUrl = modelServiceUrl(base);
   const endpoint = new URL(baseUrl);
-  // Verified model capabilities apply only to the official Flash endpoint.
+  // Verify the official endpoint even when it was selected via generic MODEL_*
+  // settings. Pro shares the reasoning protocol; its context remains conservative.
   // https://api-docs.deepseek.com/zh-cn/quick_start/pricing/
   // https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/
-  const officialFlash = !custom && id === 'deepseek-flash' &&
+  const officialFlash = id === 'deepseek-flash' &&
+    endpoint.origin === 'https://api.deepseek.com' && ['/', '/v1'].includes(endpoint.pathname);
+  const officialThinking = ['deepseek-flash', 'deepseek-v4-pro'].includes(id) &&
     endpoint.origin === 'https://api.deepseek.com' && ['/', '/v1'].includes(endpoint.pathname);
   return {
     apiKey,
@@ -78,7 +81,9 @@ export function resolveModel(env: NodeJS.ProcessEnv): ModelSettings {
       id, name: id, api: 'openai-completions', provider: custom ? 'tomorrow-compatible' : 'deepseek',
       // reasoning describes a capability: Pi's thinkingLevel='off' then emits
       // thinking.type='disabled', overriding DeepSeek's default enabled mode.
-      baseUrl, reasoning: officialFlash, input: ['text'], contextWindow: officialFlash ? 1000000 : 131072, maxTokens: 4096,
+      baseUrl, reasoning: officialThinking, input: ['text'], contextWindow: officialFlash ? 1000000 : 131072, maxTokens: officialThinking ? 32768 : 4096,
+      ...(officialThinking ? { compat: { thinkingFormat: 'deepseek' as const, supportsReasoningEffort: true,
+        requiresReasoningContentOnAssistantMessages: true }, thinkingLevelMap: { low: 'low', high: 'high', max: 'max' } } : {}),
       // Pricing is deliberately unknown; reports expose token usage, not a fictitious bill.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     },

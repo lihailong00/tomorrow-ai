@@ -11,10 +11,35 @@ const DEEPSEEK_MODEL: &str = "deepseek-flash";
 const RESPONSE_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 const SYSTEM_INSTRUCTION: &str = "你是妥啦手机助手。请用清晰、简洁的中文回答。只依据提供的对话和用户记忆作答；没有工具执行结果时，不得声称已经浏览网页、读取邮件、创建日程、发送消息或完成其他外部操作。不要虚构引用、事实、权限或操作结果。";
 
+/// Per-request choice. Keep the wire values identical to the mobile/Pi contract.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    #[default]
+    Off,
+    Low,
+    High,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub fn is_off(&self) -> bool { *self == Self::Off }
+
+    pub fn max_tokens(self) -> u32 {
+        match self { Self::Off => 4096, Self::Low => 8192, Self::High => 16384, Self::Max => 32768 }
+    }
+
+    fn provider_value(self) -> Option<&'static str> {
+        match self { Self::Off => None, Self::Low => Some("low"), Self::High => Some("high"), Self::Max => Some("max") }
+    }
+}
+
 #[cfg(test)]
 mod probe_tests;
 #[cfg(test)]
 mod stream_tests;
+#[cfg(test)]
+mod reasoning_tests;
 
 // Deliberately no Debug implementation: provider credentials must not enter logs.
 #[derive(Clone)]
@@ -267,11 +292,36 @@ impl LlmProvider {
     }
 
     pub async fn complete(&self, messages: &[Message]) -> Result<ModelReply, DomainError> {
+        self.complete_inner(messages, None).await
+    }
+
+    pub async fn complete_with_reasoning(&self, messages: &[Message], effort: ReasoningEffort) -> Result<ModelReply, DomainError> {
+        self.complete_inner(messages, Some(effort)).await
+    }
+
+    fn reasoning_fields(&self, effort: Option<ReasoningEffort>) -> Result<(Option<serde_json::Value>, Option<&'static str>, Option<u32>), DomainError> {
+        let Some(effort) = effort else { return Ok((None, None, None)); };
+        let endpoint = completion_endpoint(&self.base_url)?;
+        let supported = endpoint.host_str() == Some("api.deepseek.com") &&
+            matches!(endpoint.path(), "/chat/completions" | "/v1/chat/completions") &&
+            matches!(self.model.as_deref(), Some("deepseek-flash" | "deepseek-v4-pro"));
+        if !supported {
+            if !effort.is_off() { return Err(DomainError::Validation("当前模型不支持所选思考档位，请关闭思考或在后台选择 DeepSeek。".into())); }
+            return Ok((None, None, None));
+        }
+        Ok((Some(serde_json::json!({"type": if effort.is_off() { "disabled" } else { "enabled" }})),
+            effort.provider_value(), Some(effort.max_tokens())))
+    }
+
+    async fn complete_inner(&self, messages: &[Message], effort: Option<ReasoningEffort>) -> Result<ModelReply, DomainError> {
         if messages.is_empty() {
             return Err(DomainError::Validation("消息不能为空".into()));
         }
 
         if !self.remote_intent {
+            if effort.is_some_and(|value| !value.is_off()) {
+                return Err(DomainError::Validation("请先在后台配置支持思考的 DeepSeek 模型。".into()));
+            }
             return Ok(local_reply(messages));
         }
         let api_key = self.api_key.as_deref().ok_or_else(|| {
@@ -285,6 +335,7 @@ impl LlmProvider {
             .as_ref()
             .ok_or_else(|| DomainError::Internal("无法初始化模型服务连接".into()))?;
         let endpoint = completion_endpoint(&self.base_url)?;
+        let (thinking, reasoning_effort, max_tokens) = self.reasoning_fields(effort)?;
         let mut authorization = header::HeaderValue::from_str(&format!("Bearer {api_key}"))
             .map_err(|_| DomainError::External("模型服务凭证配置无效".into()))?;
         authorization.set_sensitive(true);
@@ -312,7 +363,9 @@ impl LlmProvider {
                 model,
                 messages: provider_messages,
                 stream: false,
+                thinking, reasoning_effort, max_tokens,
             })
+            .timeout(Duration::from_secs(if effort.is_some_and(|value| !value.is_off()) { crate::agent::AGENT_EXECUTION_TIMEOUT_SECONDS } else { 60 }))
             .send()
             .await
             .map_err(model_transport_error)?;
@@ -360,16 +413,29 @@ impl LlmProvider {
     pub async fn complete_stream<F, Fut>(
         &self,
         messages: &[Message],
-        mut on_delta: F,
+        on_delta: F,
     ) -> Result<ModelReply, DomainError>
     where
         F: FnMut(String) -> Fut,
         Fut: std::future::Future<Output = Result<(), DomainError>>,
     {
+        self.complete_stream_inner(messages, on_delta, None).await
+    }
+
+    pub async fn complete_stream_with_reasoning<F, Fut>(&self, messages: &[Message], effort: ReasoningEffort, on_delta: F) -> Result<ModelReply, DomainError>
+    where F: FnMut(String) -> Fut, Fut: std::future::Future<Output = Result<(), DomainError>> {
+        self.complete_stream_inner(messages, on_delta, Some(effort)).await
+    }
+
+    async fn complete_stream_inner<F, Fut>(&self, messages: &[Message], mut on_delta: F, effort: Option<ReasoningEffort>) -> Result<ModelReply, DomainError>
+    where F: FnMut(String) -> Fut, Fut: std::future::Future<Output = Result<(), DomainError>> {
         if messages.is_empty() {
             return Err(DomainError::Validation("消息不能为空".into()));
         }
         if !self.remote_intent {
+            if effort.is_some_and(|value| !value.is_off()) {
+                return Err(DomainError::Validation("请先在后台配置支持思考的 DeepSeek 模型。".into()));
+            }
             return Ok(local_reply(messages));
         }
         let api_key = self.api_key.as_deref().ok_or_else(|| {
@@ -383,6 +449,7 @@ impl LlmProvider {
             .as_ref()
             .ok_or_else(|| DomainError::Internal("无法初始化模型服务连接".into()))?;
         let endpoint = completion_endpoint(&self.base_url)?;
+        let (thinking, reasoning_effort, max_tokens) = self.reasoning_fields(effort)?;
         let mut authorization = header::HeaderValue::from_str(&format!("Bearer {api_key}"))
             .map_err(|_| DomainError::External("模型服务凭证配置无效".into()))?;
         authorization.set_sensitive(true);
@@ -407,7 +474,9 @@ impl LlmProvider {
                 model,
                 messages: provider_messages,
                 stream: true,
+                thinking, reasoning_effort, max_tokens,
             })
+            .timeout(Duration::from_secs(if effort.is_some_and(|value| !value.is_off()) { crate::agent::AGENT_EXECUTION_TIMEOUT_SECONDS } else { 60 }))
             .send()
             .await
             .map_err(model_transport_error)?;
@@ -564,6 +633,12 @@ struct CompletionRequest<'a> {
     model: &'a str,
     messages: Vec<ProviderMessage<'a>>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
 }
 
 #[derive(Serialize)]
