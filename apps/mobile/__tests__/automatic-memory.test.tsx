@@ -3,7 +3,6 @@ import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { AppState, Switch } from 'react-native';
 import { AppContextValue, AppProvider } from '../src/app/context';
 import {
-  AutomaticMemoryConsent,
   AutomaticMemoryNotice,
   AutomaticMemorySettings,
 } from '../src/features/memory/AutomaticMemory';
@@ -23,35 +22,31 @@ const value = (api: unknown) =>
     navigate: jest.fn(),
   } as unknown as AppContextValue);
 
-test('requires a one-time explicit opt-in before enabling conversation memory', async () => {
-  let enabled = false;
+test('memory settings reflect the server default without an opt-in prompt or client-side overwrite', async () => {
+  let enabled = true;
   const api = {
     request: jest
       .fn()
       .mockImplementation(async (_: string, method?: string, body?: any) => {
         if (method === 'PATCH') enabled = body.enabled;
-        return { enabled, configured: enabled };
+        return { enabled, configured: false };
       }),
   };
   await act(async () => {
     tree = create(
       <AppProvider value={value(api)}>
-        <AutomaticMemoryConsent />
+        <AutomaticMemorySettings />
       </AppProvider>,
     );
   });
   expect(api.request.mock.calls.filter(c => c[1] === 'PATCH')).toHaveLength(0);
-  const button = tree.root.findAll(
-    n =>
-      typeof n.props.onPress === 'function' &&
-      n.props.children?.props?.children === '允许自动记忆',
-  )[0];
-  expect(button).toBeTruthy();
-  await act(async () => button.props.onPress());
-  expect(api.request).toHaveBeenCalledWith('/memory/preferences', 'PATCH', {
-    enabled: true,
-  });
+  expect(tree.root.findByType(Switch).props.value).toBe(true);
   expect(JSON.stringify(tree.toJSON())).not.toContain('允许自动记忆');
+  await act(async () => tree.root.findByType(Switch).props.onValueChange(false));
+  expect(api.request).toHaveBeenCalledWith('/memory/preferences', 'PATCH', {
+    enabled: false,
+  });
+  expect(tree.root.findByType(Switch).props.value).toBe(false);
 });
 
 test('shows a saved receipt only after the server returns evidence and removes it on forget', async () => {

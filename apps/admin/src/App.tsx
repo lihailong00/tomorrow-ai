@@ -1727,9 +1727,6 @@ function DataFlow({ instance }: { instance?: Status["instance"] }) {
           语音 <strong>{destination("voice")}</strong>
         </span>
         <span>
-          手机图片识字 <strong>手机本机处理</strong>
-        </span>
-        <span>
           云端图片理解 <strong>{destination("images")}</strong>
         </span>
         <span>

@@ -5,69 +5,6 @@ import { Text } from '../../ui/Text';
 import { errorMessage } from '../../api/client';
 import type { Memory } from '../../domain/types';
 
-export function AutomaticMemoryConsent() {
-  const { api } = useApp();
-  const data = useResource(
-    () =>
-      api.request<{ enabled: boolean; configured: boolean }>(
-        '/memory/preferences',
-      ),
-    [api],
-  );
-  const [dismissed, setDismissed] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const owner = useRef(api);
-  owner.current = api;
-  useEffect(() => {
-    setDismissed(false);
-    setBusy(false);
-    setError('');
-  }, [api]);
-  if (!data.value || data.value.configured || dismissed) return null;
-  return (
-    <View style={styles.settings}>
-      <Text style={styles.title}>让妥啦慢慢了解你</Text>
-      <Text style={styles.small}>
-        允许从聊天中记住你的偏好、目标和近况，下次不用从头说。使用你当前配置的模型，可随时关闭或忘记。
-      </Text>
-      <View style={styles.row}>
-        <Pressable
-          accessibilityRole="button"
-          style={styles.undo}
-          disabled={busy}
-          onPress={async () => {
-            const current = api;
-            setBusy(true);
-            setError('');
-            try {
-              await api.request('/memory/preferences', 'PATCH', {
-                enabled: true,
-              });
-              if (owner.current === current) data.refresh();
-            } catch (e) {
-              if (owner.current === current) setError(errorMessage(e));
-            } finally {
-              if (owner.current === current) setBusy(false);
-            }
-          }}
-        >
-          <Text style={styles.link}>{busy ? '正在开启…' : '允许自动记忆'}</Text>
-        </Pressable>
-        <Pressable
-          style={styles.undo}
-          accessibilityRole="button"
-          disabled={busy}
-          onPress={() => setDismissed(true)}
-        >
-          <Text style={styles.small}>暂时不用</Text>
-        </Pressable>
-      </View>
-      {error ? <Text style={styles.error}>{error}</Text> : null}
-    </View>
-  );
-}
-
 export function AutomaticMemorySettings() {
   const { api } = useApp();
   const data = useResource(
@@ -106,7 +43,7 @@ export function AutomaticMemorySettings() {
         />
       </View>
       <Text style={styles.small}>
-        开启后，使用当前配置的模型整理你明确说过的偏好、目标和近况。关闭后停止自动新增，已有记忆仍可使用。
+        默认开启，使用当前配置的模型整理你明确说过的偏好、目标和近况。可在记忆页查看、纠正或忘记；关闭后停止自动新增。
       </Text>
       {error || data.error ? (
         <Pressable onPress={data.refresh} accessibilityRole="button">

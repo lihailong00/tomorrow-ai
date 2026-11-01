@@ -1,0 +1,15 @@
+# Repository instructions
+
+## Local development storage budget
+
+Read [docs/development-storage-policy.md](docs/development-storage-policy.md) before installing dependencies, building, running native tests, creating worktrees, or generating large artifacts.
+
+- All local development for this project shares one **10,000,000,000-byte (10 GB)** project storage budget across worktrees, drives, temporary paths, project dependencies, caches, Docker resources, test images and delivery artifacts. This is not a per-agent or per-directory allowance.
+- Measure before and after storage-intensive work and estimate temporary peaks. Warn at 9 GB. If a build is expected to exceed the 10 GB budget, reclaim confirmed unused outputs first or use an explicitly authorized remote environment; report any necessary exception before proceeding. The earlier relaxation of the 5 GB target is not a standing exemption from this updated budget.
+- The 2026-11-01 cleanup left approximately 8.61 GB across project worktrees and dedicated external build paths. Shared SDK/toolchain/Docker storage remains separately reported; this baseline alone does not prove that every project-attributable resource fits the budget. Preserve necessary data and avoid redundant outputs.
+- Do not evade the budget by moving outputs to another drive, `%TEMP%`, Docker or another worktree. Use an explicitly authorized remote build environment when local work cannot fit.
+- Share compatible dependency caches; use one designated writer for shared build outputs. Never copy emulator disks as test evidence. Keep only the latest APK and one verified rollback version as the retention target; do not delete existing versions merely because this policy was added.
+- Use `scripts/Build-Android.ps1` for APK packaging. It runs pre/post storage checks and safe housekeeping automatically; keep external project paths registered in the ignored `.tada-storage.local.json`. Inspect `artifacts/packaging-storage.json` for skipped cleanup, incomplete accounting or budget warnings. Never bypass these checks by invoking Gradle and publishing manually without equivalent verification.
+- Packaging is not finished until storage housekeeping is checked: verify the new APK and latest aliases first, retain the new latest plus one verified rollback, remove confirmed unused staging files, obsolete generated packages and rebuildable build outputs as needed, then remeasure and report the retained total. Failed packaging must preserve the last working latest and rollback. Skip active or unknown-owner files rather than guessing.
+- Cleanup must preserve source changes, databases, uploads, credentials, signing material, current/rollback releases and required evidence. Verify resolved absolute paths and ownership before deletion; never prune shared Docker resources indiscriminately.
+- Preinstalled shared SDKs and toolchains are reported separately. Do not claim that this project budget limits the entire computer or that a document provides an operating-system disk quota.

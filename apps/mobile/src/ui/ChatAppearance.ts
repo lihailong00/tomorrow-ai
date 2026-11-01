@@ -1,14 +1,16 @@
-/** Fixed-light palette from the user-approved chat Demo, isolated from other screens. */
+import { colors } from './theme';
+
+/** Chat shares the home palette; its canvas lets the same ambient background through. */
 export const chatAppearance = {
-  background: '#F7F8FC',
-  surface: '#FFFFFF',
-  ink: '#303849',
-  secondary: '#606B80',
-  line: '#E2E6EF',
-  accent: '#5665BE',
+  background: colors.background,
+  surface: colors.surface,
+  ink: colors.ink,
+  secondary: colors.secondary,
+  line: colors.line,
+  accent: colors.action,
   onAccent: '#FFFFFF',
-  tint: '#EDEFF9',
-  keyboard: '#ECEEF5',
+  tint: colors.blueLight,
+  keyboard: colors.cream,
   cancellation: '#FAEDF2',
   cancellationText: '#9C365D',
 } as const;

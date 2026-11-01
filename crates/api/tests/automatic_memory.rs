@@ -30,7 +30,7 @@ async fn call(router: &Router, token: &str, method: &str, path: &str, body: Valu
 }
 
 #[tokio::test]
-async fn real_chat_commit_extracts_once_recalls_and_forgets_without_external_api() {
+async fn default_chat_memory_extracts_once_recalls_and_forgets_without_opt_in_or_external_api() {
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let captured = requests.clone();
     let upstream=Router::new().route("/chat/completions",post(move|Json(body):Json<Value>|{let captured=captured.clone();async move{
@@ -67,19 +67,7 @@ async fn real_chat_commit_extracts_once_recalls_and_forgets_without_external_api
         call(&router, &token, "GET", "/v1/memory/preferences", json!({}))
             .await
             .1,
-        json!({"enabled":false,"configured":false})
-    );
-    assert_eq!(
-        call(
-            &router,
-            &token,
-            "PATCH",
-            "/v1/memory/preferences",
-            json!({"enabled":true})
-        )
-        .await
-        .0,
-        200
+        json!({"enabled":true,"configured":false})
     );
     let input = json!({"message":"我最近在买纳斯达克基金","client_request_id":"memory-once"});
     let (status, response) = call(&router, &token, "POST", "/v1/chat", input.clone()).await;

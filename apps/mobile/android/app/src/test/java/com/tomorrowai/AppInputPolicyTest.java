@@ -49,7 +49,7 @@ public class AppInputPolicyTest {
     assertNotEquals(original, AppInputStore.INSTANCE.notificationSnapshotId("com.tencent.mm", "chat", 1000L, "项目讨论", "改到下午四点"));
   }
 
-  @Test public void ocrAcceptsOnlyDirectPrivateCacheFiles() {
+  @Test public void sharedImagesAcceptOnlyDirectPrivateCacheFiles() {
     File root = new File(System.getProperty("java.io.tmpdir"), "tada-owned-images");
     assertTrue(AppInputStore.INSTANCE.isOwnedCacheFile(root, new File(root, "image-one").toURI().toString()));
     assertFalse(AppInputStore.INSTANCE.isOwnedCacheFile(root, new File(root, "../outside").toURI().toString()));
@@ -59,15 +59,4 @@ public class AppInputPolicyTest {
     assertFalse(AppInputStore.INSTANCE.isOwnedCacheFile(root, "https://example.com/image.jpg"));
   }
 
-  @Test public void ocrBoundsDimensionsBeforeAllocatingAPixelBitmap() {
-    assertEquals(1, AppSharedImageText.INSTANCE.sampleSize(1024, 768));
-    int sample = AppSharedImageText.INSTANCE.sampleSize(4097, 3000);
-    assertTrue((4097L + sample - 1) / sample <= 2048);
-    for (int[] invalid : new int[][]{{0, 100}, {100, -1}, {50000, 50000}}) {
-      try {
-        AppSharedImageText.INSTANCE.sampleSize(invalid[0], invalid[1]);
-        fail("Expected dimensions to be rejected before decoding");
-      } catch (IllegalArgumentException expected) { }
-    }
-  }
 }

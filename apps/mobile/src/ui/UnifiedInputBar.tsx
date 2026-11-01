@@ -97,7 +97,7 @@ export function UnifiedInputBar({
         onPress={onCamera}
         style={[c.tool, toolsDisabled && c.disabled]}
       >
-        <Icon name="camera" size={28} color={colors.ink} />
+        <Icon name="camera" size={25} color={colors.secondary} />
       </Pressable>
       <TextInput
         {...inputProps}
@@ -156,7 +156,7 @@ export function UnifiedInputBar({
           <Icon
             name={voiceMode ? 'keyboard' : 'mic'}
             size={18}
-            color={colors.ink}
+            color={colors.accent}
           />
         </View>
       </Pressable>
@@ -167,7 +167,7 @@ export function UnifiedInputBar({
         onPress={onAttach}
         style={[c.tool, toolsDisabled && c.disabled]}
       >
-        <Icon name="plusCircle" size={28} color={colors.ink} />
+        <Icon name="plus" size={25} color={colors.secondary} />
       </Pressable>
       {showSend && (
         <Pressable
@@ -254,17 +254,17 @@ const c = StyleSheet.create({
   bar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    backgroundColor: colors.surface,
+    backgroundColor: 'rgba(255,255,255,0.92)',
     borderWidth: 1,
-    borderColor: colors.line,
-    borderRadius: 25,
+    borderColor: '#FFFFFF',
+    borderRadius: 30,
     padding: 5,
     minHeight: 64,
-    shadowColor: colors.ink,
-    shadowOpacity: 0.06,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 1,
+    shadowColor: '#61739A',
+    shadowOpacity: 0.10,
+    shadowRadius: 15,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 2,
   },
   tool: {
     width: 44,
@@ -275,11 +275,10 @@ const c = StyleSheet.create({
     borderRadius: 21,
   },
   modeCircle: {
-    width: 31,
-    height: 31,
-    borderRadius: 16,
-    borderWidth: 1.6,
-    borderColor: colors.ink,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.tint,
     alignItems: 'center',
     justifyContent: 'center',
   },

@@ -102,7 +102,7 @@ function luminance(hex: string) {
   const c = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(x => x <= .04045 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4);
   return c[0] * .2126 + c[1] * .7152 + c[2] * .0722;
 }
-test('actual chat matches approved filled bubble and legible white content including failure and attachment metadata', async () => {
+test('actual chat uses the unified brand bubble and legible white content including failure and attachment metadata', async () => {
   const api = { capabilities: jest.fn().mockResolvedValue({ runtime: { model_mode: 'pi' } }), messages: jest.fn().mockResolvedValue({ items: [
     { id: 'brand-user', role: 'user', content: 'Brand message', conversation_id: 'saved', created_at: '', delivery: 'failed', stream_error: 'Retryable failure', attachments: [{ upload_id: 'file', name: 'example.txt' }] },
   ], next_offset: null }) };
@@ -110,7 +110,7 @@ test('actual chat matches approved filled bubble and legible white content inclu
   const row = tree.root.findAllByType(View).find(n => n.props.testID === 'chat-message-brand-user')!;
   expect(row).toBeDefined();
   const background = StyleSheet.flatten(row.props.style).backgroundColor;
-  expect(background).toBe('#5665BE');
+  expect(background).toBe('#416CCB');
   expect(StyleSheet.flatten(row.props.style)).toMatchObject({ maxWidth: '75%', borderRadius: 18, borderBottomRightRadius: 6 });
   expect(background).toBe(chatAppearance.accent);
   const text = row.findAllByType(Text);

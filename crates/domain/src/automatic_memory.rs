@@ -1,11 +1,11 @@
-//! Source-backed, opt-in conversation memory. Extraction runs outside chat generation.
+//! Source-backed conversation memory, enabled by default. Extraction runs outside chat generation.
 use crate::{DomainError, Memory, Message, ModelProvider, Repository, new_id, now, timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{Any, Row, Transaction};
 
 pub const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS memory_preferences(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,enabled BIGINT NOT NULL DEFAULT 0,epoch BIGINT NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS memory_preferences(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,enabled BIGINT NOT NULL DEFAULT 1,epoch BIGINT NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS memory_jobs(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,source TEXT NOT NULL,reply_id TEXT NOT NULL,epoch BIGINT NOT NULL,status TEXT NOT NULL DEFAULT 'queued',lease_until BIGINT NOT NULL DEFAULT 0,attempts BIGINT NOT NULL DEFAULT 0,created_at BIGINT NOT NULL);
 CREATE INDEX IF NOT EXISTS memory_jobs_ready ON memory_jobs(status,lease_until,created_at);
 CREATE TABLE IF NOT EXISTS memory_provenance(memory_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,topic TEXT NOT NULL,source_id TEXT NOT NULL,quote TEXT NOT NULL,expires_at BIGINT NOT NULL DEFAULT 0);
@@ -90,6 +90,10 @@ pub async fn enqueue(
     if message.content.chars().count() > 2000 {
         return Ok(());
     }
+    // Initialize the product default on the first eligible committed turn.
+    // Explicit off preferences and their generation fences are never overwritten.
+    sqlx::query("INSERT INTO memory_preferences(user_id,enabled,epoch)VALUES($1,1,0)ON CONFLICT(user_id)DO NOTHING")
+        .bind(user).execute(&mut **tx).await?;
     let pref = sqlx::query("SELECT enabled,epoch FROM memory_preferences WHERE user_id=$1")
         .bind(user)
         .fetch_optional(&mut **tx)
@@ -236,7 +240,7 @@ impl Repository {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(Preferences {
-            enabled: v == Some(1),
+            enabled: v.unwrap_or(1) == 1,
             configured: v.is_some(),
         })
     }
@@ -620,15 +624,69 @@ mod tests {
             .create_user("b@memory.test", "unused", "B", "Asia/Shanghai")
             .await
             .unwrap();
+        let initial = repo.memory_preferences(&a.id).await.unwrap();
+        assert!(initial.enabled);
+        assert!(!initial.configured);
+        repo.set_memory_preferences(&a.id, false).await.unwrap();
         assert!(!repo.memory_preferences(&a.id).await.unwrap().enabled);
-        repo.set_memory_preferences(&a.id, true).await.unwrap();
-        assert!(!repo.memory_preferences(&b.id).await.unwrap().enabled);
+        assert!(repo.memory_preferences(&b.id).await.unwrap().enabled);
         assert!(
             repo.memory_receipts(&b.id, "foreign")
                 .await
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn default_memory_enqueues_on_first_turn_but_preserves_explicit_off() {
+        let repo = Repository::connect("sqlite::memory:").await.unwrap();
+        let user = repo
+            .create_user("default@memory.test", "unused", "A", "Asia/Shanghai")
+            .await
+            .unwrap()
+            .id;
+        let mut message = Message {
+            id: new_id(),
+            conversation_id: repo
+                .create_conversation(&user, "default memory")
+                .await
+                .unwrap()
+                .id,
+            role: "user".into(),
+            content: "我最近在学习游泳".into(),
+            created_at: timestamp(now()),
+            model_mode: None,
+            attachments: vec![],
+        };
+        commit_source(&repo, &user, &message, "default-reply").await;
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM memory_jobs WHERE user_id=$1 AND status='queued' AND epoch=0",
+        )
+        .bind(&user)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(queued, 1);
+
+        repo.set_memory_preferences(&user, false).await.unwrap();
+        message.id = new_id();
+        commit_source(&repo, &user, &message, "disabled-reply").await;
+        assert!(!repo.memory_preferences(&user).await.unwrap().enabled);
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM memory_jobs WHERE user_id=$1 AND status='queued'",
+        )
+        .bind(&user)
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+        assert_eq!(queued, 0);
+        let source: String =
+            sqlx::query_scalar("SELECT source FROM memory_jobs WHERE id='default-reply'")
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert!(source.is_empty());
     }
 
     async fn seeded() -> (Repository, String, Message, i64) {

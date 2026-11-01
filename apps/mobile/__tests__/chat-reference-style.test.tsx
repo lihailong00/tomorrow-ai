@@ -1,5 +1,5 @@
 import React from 'react';
-import { StyleSheet, Text, TextInput, View } from 'react-native';
+import { Animated, StyleSheet, Text, TextInput, View } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { ChatScreen } from '../src/screens/Chat';
 import { AppProvider, type AppContextValue } from '../src/app/context';
@@ -12,23 +12,38 @@ jest.mock('../src/ui/visuals', () => ({ AssistantOrb: () => null, Icon: () => nu
 jest.mock('../src/screens/Main', () => ({ ModeNotice: () => null }));
 beforeAll(() => { (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; });
 const trees = new Set<ReactTestRenderer>();
-afterEach(async () => { await act(async () => trees.forEach(t => t.unmount())); trees.clear(); jest.clearAllMocks(); });
-async function setup() {
+beforeEach(() => {
+  // Draft ownership and contrast do not need a native animation view tag.
+  // Motion configuration is covered separately by the chat-motion tests.
+  jest.spyOn(Animated, 'timing').mockImplementation(() => ({ start: jest.fn(), stop: jest.fn(), reset: jest.fn() }));
+});
+afterEach(async () => { await act(async () => trees.forEach(t => t.unmount())); trees.clear(); jest.clearAllMocks(); jest.restoreAllMocks(); });
+async function setup(empty = false) {
   const api = { capabilities: jest.fn().mockResolvedValue({ runtime: { model_mode: 'pi' } }),
+    request: jest.fn().mockResolvedValue({ enabled: true, configured: false }),
     messages: jest.fn().mockResolvedValue({ items: [
       { id: 'reference-user', conversation_id: 'saved', role: 'user', content: 'MY VISIBLE QUESTION', created_at: '2026-10-31T00:00:00Z' },
       { id: 'reference-answer', conversation_id: 'saved', role: 'assistant', content: 'A VISIBLE ANSWER', created_at: '2026-10-31T00:00:01Z' },
     ], next_offset: null }) };
   let tree!: ReactTestRenderer;
-  await act(async () => { tree = create(<AppProvider value={{ api, formatDate: () => '', invalidate: jest.fn(), navigate: jest.fn() } as unknown as AppContextValue}><ChatScreen conversationId="saved" /></AppProvider>); });
+  await act(async () => { tree = create(<AppProvider value={{ api, formatDate: () => '', invalidate: jest.fn(), navigate: jest.fn() } as unknown as AppContextValue}><ChatScreen conversationId={empty ? undefined : 'saved'} /></AppProvider>); });
   trees.add(tree);
-  return { tree, input: () => tree.root.findByType(TextInput), button: (label: string) => tree.root.findAll(n => n.props.accessibilityLabel === label && typeof n.props.onPress === 'function')[0] };
+  return { api, tree, input: () => tree.root.findByType(TextInput), button: (label: string) => tree.root.findAll(n => n.props.accessibilityLabel === label && typeof n.props.onPress === 'function')[0] };
 }
 function luminance(hex: string) {
   const c = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
     .map(x => x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4);
   return c[0] * .2126 + c[1] * .7152 + c[2] * .0722;
 }
+test('a fresh chat opens directly without a memory consent prompt or preference writes', async () => {
+  const app = await setup(true);
+  const rendered = app.tree.root.findAllByType(Text).map(n => n.props.children).join(' ');
+  expect(rendered).toContain('今天想聊点什么？');
+  expect(rendered).not.toContain('允许自动记忆');
+  expect(rendered).not.toContain('暂时不用');
+  expect(rendered).not.toContain('让妥啦慢慢了解你');
+  expect(app.api.request).not.toHaveBeenCalled();
+});
 test('text and voice mode changes preserve one editable draft without starting the recorder', async () => {
   const app = await setup(); const original = app.input();
   await act(async () => original.props.onChangeText('Keep every line\nAnd this draft.'));

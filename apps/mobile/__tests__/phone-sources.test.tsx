@@ -5,6 +5,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppProvider, AppContextValue } from '../src/app/context';
 import { PhoneSourcesEntry } from '../src/features/phone-sources/PhoneSourcesEntry';
 import {
+  calendarRecordStatus,
+  canUsePhoneRecordForTodo,
   phoneImportText,
   recordDate,
 } from '../src/features/phone-sources/model';
@@ -24,6 +26,9 @@ jest.mock('../src/platform/phoneSources', () => ({
     request: jest.fn(),
     read: jest.fn(),
     fingerprint: jest.fn(),
+    page: jest.fn(),
+    record: jest.fn(),
+    stop: jest.fn().mockResolvedValue(undefined),
   },
 }));
 jest.mock('../src/platform/ports', () => ({
@@ -73,6 +78,9 @@ beforeEach(async () => {
     }),
   );
   (phoneSources.fingerprint as jest.Mock).mockResolvedValue(digest);
+  (phoneSources.record as jest.Mock).mockImplementation(
+    async (_source, _owner, id) => ({ ...record, id }),
+  );
 });
 async function setup(initial?: { seen: boolean; enabled: string[] }) {
   const request = jest.fn(async (path: string) =>
@@ -182,7 +190,12 @@ it('stops reading a deselected source and stops using contact names for SMS matc
   const refresh = (platform.onForeground as jest.Mock).mock.calls.at(-1)![0];
   await act(async () => refresh());
   expect(phoneSources.read).toHaveBeenCalledTimes(1);
-  expect(phoneSources.read).toHaveBeenCalledWith('sms', false);
+  expect(phoneSources.read).toHaveBeenCalledWith(
+    'sms',
+    false,
+    expect.any(String),
+    false,
+  );
   await view.unmount();
 });
 it('reads selected sources sequentially, preserves partial-photo access, and stays local', async () => {
@@ -191,7 +204,12 @@ it('reads selected sources sequentially, preserves partial-photo access, and sta
   expect(
     (phoneSources.request as jest.Mock).mock.calls.map(call => call[0]),
   ).toEqual(['contacts', 'calendar', 'sms', 'photos']);
-  expect(phoneSources.read).toHaveBeenCalledWith('sms', true);
+  expect(phoneSources.read).toHaveBeenCalledWith(
+    'sms',
+    true,
+    expect.any(String),
+    true,
+  );
   expect(view.request).not.toHaveBeenCalled();
   expect(JSON.stringify(view.tree.toJSON())).toContain(
     '仅访问系统允许的部分照片',
@@ -208,8 +226,18 @@ it('continues to other sources after SMS is denied and never turns that failure 
   );
   const view = await setup();
   await view.press('授权并在本机整理');
-  expect(phoneSources.read).not.toHaveBeenCalledWith('sms', expect.anything());
-  expect(phoneSources.read).toHaveBeenCalledWith('photos', false);
+  expect(phoneSources.read).not.toHaveBeenCalledWith(
+    'sms',
+    expect.anything(),
+    expect.any(String),
+    expect.any(Boolean),
+  );
+  expect(phoneSources.read).toHaveBeenCalledWith(
+    'photos',
+    false,
+    expect.any(String),
+    true,
+  );
   expect(JSON.stringify(view.tree.toJSON())).toContain('未获得短信权限');
   await view.unmount();
 });
@@ -217,7 +245,12 @@ it('refreshes only previously selected sources on foreground, without prompting 
   const view = await setup({ seen: true, enabled: ['calendar'] });
   expect(phoneSources.request).not.toHaveBeenCalled();
   expect(phoneSources.read).toHaveBeenCalledTimes(1);
-  expect(phoneSources.read).toHaveBeenCalledWith('calendar', false);
+  expect(phoneSources.read).toHaveBeenCalledWith(
+    'calendar',
+    false,
+    expect.any(String),
+    false,
+  );
   const refresh = (platform.onForeground as jest.Mock).mock.calls.at(-1)![0];
   await act(async () => refresh());
   expect(phoneSources.read).toHaveBeenCalledTimes(2);
@@ -308,4 +341,283 @@ it('rejects uploads of contacts/photos and oversized selections instead of silen
   expect(
     recordDate({ ...record, timestamp: Date.UTC(2026, 10, 1), allDay: true }),
   ).toBe('2026-11-01 全天');
+});
+
+it('shows the full count, pages beyond 200 contacts, and retains only the current preview', async () => {
+  (phoneSources.read as jest.Mock).mockImplementation(
+    async (source: PhoneSource) => ({
+      source,
+      readAt: Date.now(),
+      permission: status.permissions[source],
+      limited: false,
+      items: [{ ...record, id: 'contact-1', title: '第一页联系人' }],
+      cached: 100000,
+      processed: 100000,
+      total: 100000,
+      syncState: 'complete',
+      cursor: '0',
+      nextCursor: '250',
+    }),
+  );
+  (phoneSources.page as jest.Mock).mockImplementation(
+    async (source, _owner, cursor) => ({
+      source,
+      readAt: Date.now(),
+      permission: 'granted',
+      limited: false,
+      items: [{ ...record, id: 'contact-251', title: '第二页联系人' }],
+      cached: 100000,
+      processed: 100000,
+      total: 100000,
+      syncState: 'complete',
+      cursor,
+      nextCursor: '500',
+    }),
+  );
+  const view = await setup({ seen: true, enabled: ['contacts'] });
+  await view.select('连接与管理本机资料');
+  expect(JSON.stringify(view.tree.toJSON())).toContain(
+    '已在本机整理 100000 条资料',
+  );
+  await view.press('浏览全部资料（已保存 100000 条）');
+  await view.press('下一页');
+  expect(phoneSources.page).toHaveBeenCalledWith(
+    'contacts',
+    expect.any(String),
+    '250',
+    false,
+  );
+  const rendered = JSON.stringify(view.tree.toJSON());
+  expect(rendered).toContain('第二页联系人');
+  expect(rendered).not.toContain('第一页联系人');
+  expect(view.request).not.toHaveBeenCalled();
+  await view.press('上一页');
+  expect(phoneSources.page).toHaveBeenLastCalledWith(
+    'contacts',
+    expect.any(String),
+    '0',
+    false,
+  );
+  await view.select('连接联系人');
+  expect(phoneSources.stop).toHaveBeenCalledWith(
+    'contacts',
+    expect.any(String),
+  );
+  await view.unmount();
+});
+it('keeps explicit selections across pages, rather than importing the entire local cache', async () => {
+  (phoneSources.read as jest.Mock).mockImplementation(
+    async (source: PhoneSource) => ({
+      source,
+      readAt: Date.now(),
+      permission: 'granted',
+      limited: false,
+      items: [record],
+      cached: 100000,
+      total: 100000,
+      processed: 100000,
+      syncState: 'complete',
+      cursor: '0',
+      nextCursor: '50',
+    }),
+  );
+  (phoneSources.page as jest.Mock).mockImplementation(
+    async (source, _owner, cursor) => ({
+      source,
+      readAt: Date.now(),
+      permission: 'granted',
+      limited: false,
+      items: [{ ...record, id: 'second', title: '下一页的记录' }],
+      cached: 100000,
+      total: 100000,
+      processed: 100000,
+      syncState: 'complete',
+      cursor,
+      nextCursor: null,
+    }),
+  );
+  const view = await setup({ seen: true, enabled: ['calendar'] });
+  await view.select('连接与管理本机资料');
+  await view.select(record.title);
+  await view.press('浏览全部资料（已保存 100000 条）');
+  await view.press('下一页');
+  await view.press('将 1 条资料交给 AI 整理');
+  const imported = (view.request.mock.calls as unknown as unknown[][]).find(
+    call => call[0] === '/integrations/imports',
+  )![2] as any;
+  expect(imported.text).toContain(record.id);
+  expect(imported.text).not.toContain('下一页的记录');
+  await view.unmount();
+});
+it('keeps sensitive SMS out of cloud discovery without excluding it from local acquisition', () => {
+  expect(() =>
+    phoneImportText([
+      { source: 'sms', record: { ...record, eligibleForTodo: false } },
+    ]),
+  ).toThrow('仅保存在本机');
+});
+
+it('retains cancelled/deleted calendar history locally but excludes it from AI selections and the next-event summary', async () => {
+  (phoneSources.read as jest.Mock).mockResolvedValue({
+    source: 'calendar',
+    readAt: Date.now(),
+    permission: 'granted',
+    limited: false,
+    items: [
+      {
+        ...record,
+        id: 'cancelled',
+        title: '已取消的会议',
+        calendarStatus: 'cancelled',
+        eligibleForTodo: false,
+        timestamp: Date.now() + 60000,
+      },
+      {
+        ...record,
+        id: 'deleted',
+        title: '已删除的会议',
+        calendarStatus: 'deleted',
+        eligibleForTodo: false,
+        timestamp: Date.now() + 120000,
+      },
+      {
+        ...record,
+        id: 'active',
+        title: '仍需参加的会议',
+        calendarStatus: 'confirmed',
+        truncated: true,
+        timestamp: Date.now() + 180000,
+      },
+    ],
+  });
+  const view = await setup({ seen: true, enabled: ['calendar'] });
+  await view.select('连接与管理本机资料');
+  const rendered = JSON.stringify(view.tree.toJSON());
+  expect(rendered).toContain('已取消的会议');
+  expect(rendered).toContain('已删除的会议');
+  expect(rendered).toContain('已取消 · 仅保存在本机');
+  expect(rendered).toContain('接下来：仍需参加的会议');
+  for (const title of ['已取消的会议', '已删除的会议']) {
+    expect(
+      view.tree.root.findAll(
+        node =>
+          node.props.accessibilityLabel === title &&
+          node.props.accessibilityRole === 'checkbox',
+      ),
+    ).toHaveLength(0);
+  }
+  expect(view.request).not.toHaveBeenCalled();
+  await view.unmount();
+});
+
+it('rechecks a selected event before uploading if the local cache marks it cancelled after selection', async () => {
+  const view = await setup({ seen: true, enabled: ['calendar'] });
+  await view.select('连接与管理本机资料');
+  await view.select(record.title);
+  (phoneSources.record as jest.Mock).mockResolvedValue({
+    ...record,
+    calendarStatus: 'cancelled',
+    eligibleForTodo: false,
+  });
+  await view.press('将 1 条资料交给 AI 整理');
+  expect(phoneSources.record).toHaveBeenCalledWith(
+    'calendar',
+    expect.any(String),
+    record.id,
+  );
+  expect(view.request).not.toHaveBeenCalled();
+  expect(phoneSources.fingerprint).not.toHaveBeenCalled();
+  expect(JSON.stringify(view.tree.toJSON())).toContain(
+    '已取消、已删除或状态不明的日程',
+  );
+  await view.unmount();
+});
+
+it('rejects explicit inactive/raw calendar status while retaining compatibility with legacy missing-status events', () => {
+  for (const value of [
+    { calendarStatus: 'cancelled' as const },
+    { calendarStatus: 'deleted' as const },
+    { calendarStatus: 'unknown' as const },
+    { raw: { eventStatus: 2, deleted: 0 } },
+    { raw: { eventStatus: 1, deleted: 1 } },
+    { raw: { eventStatus: 99 } },
+  ]) {
+    const inactive = { ...record, ...value };
+    expect(canUsePhoneRecordForTodo('calendar', inactive)).toBe(false);
+    expect(() =>
+      phoneImportText([{ source: 'calendar', record: inactive }]),
+    ).toThrow('日程仅保存在本机');
+  }
+  for (const value of [
+    {},
+    { raw: { eventStatus: null, deleted: 0 } },
+    { calendarStatus: 'tentative' as const },
+    { calendarStatus: 'confirmed' as const },
+  ]) {
+    const active = { ...record, ...value };
+    expect(canUsePhoneRecordForTodo('calendar', active)).toBe(true);
+    expect(() =>
+      phoneImportText([{ source: 'calendar', record: active }]),
+    ).not.toThrow();
+  }
+  expect(
+    calendarRecordStatus({
+      ...record,
+      raw: { eventStatus: 1, deleted: 1 },
+      calendarStatus: 'confirmed',
+    }),
+  ).toBe('deleted');
+});
+
+it('updates every active source in one poll without starving sibling sources', async () => {
+  jest.useFakeTimers();
+  let view: Awaited<ReturnType<typeof setup>> | undefined;
+  try {
+    (phoneSources.read as jest.Mock).mockImplementation(
+      async (source: PhoneSource) => ({
+        source,
+        readAt: Date.now(),
+        permission: status.permissions[source],
+        limited: false,
+        items: [],
+        cached: 0,
+        total: 100000,
+        processed: 0,
+        syncState: 'queued',
+        cursor: '0',
+      }),
+    );
+    (phoneSources.page as jest.Mock).mockImplementation(
+      async (source: PhoneSource) => ({
+        source,
+        readAt: Date.now(),
+        permission: status.permissions[source],
+        limited: false,
+        items: [record],
+        cached: 100000,
+        total: 100000,
+        processed: 100000,
+        syncState: 'complete',
+        cursor: '0',
+        nextCursor: null,
+      }),
+    );
+    view = await setup({
+      seen: true,
+      enabled: ['contacts', 'calendar', 'sms', 'photos'],
+    });
+    await act(async () => {
+      jest.advanceTimersByTime(1200);
+    });
+    expect(
+      (phoneSources.page as jest.Mock).mock.calls.map(call => call[0]),
+    ).toEqual(['contacts', 'calendar', 'sms', 'photos']);
+    expect(JSON.stringify(view.tree.toJSON())).toContain(
+      '已在本机整理 400000 条资料',
+    );
+    expect(view.request).not.toHaveBeenCalled();
+  } finally {
+    if (view) await view.unmount();
+    jest.useRealTimers();
+  }
 });

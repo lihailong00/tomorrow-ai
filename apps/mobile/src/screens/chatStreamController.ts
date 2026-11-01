@@ -20,10 +20,20 @@ export type ChatProgress = {
 
 function toolLabel(tool: unknown) {
   const name = typeof tool === 'string' ? tool.toLowerCase() : '';
+  if (name === 'research_plan') return '正在整理调查清单…';
+  if (name === 'research_review') return '正在核对来源与未确认事项…';
   if (/create|save|update|delete|cancel|approve|write/.test(name)) return '正在处理操作…';
   if (/search|find/.test(name)) return '正在搜索…';
   if (/read|get|list|fetch|memory|upload/.test(name)) return '正在读取资料…';
   return '正在使用工具…';
+}
+
+function toolEndLabel(tool: unknown, isError: unknown) {
+  if (isError === true) return '这一步未完成，正在继续…';
+  if (tool === 'web_search') return '正在核对搜索结果…';
+  if (tool === 'web_fetch') return '正在比对资料中的日期和条件…';
+  if (tool === 'research_plan') return '正在查找相关资料…';
+  return '正在回复…';
 }
 
 type Options = {
@@ -85,7 +95,8 @@ export function createChatStreamController(options: Options) {
         removedMessageIds: Array.isArray(body.removed_message_ids) ? body.removed_message_ids : progress.removedMessageIds,
         phase: 'replying', error: undefined,
         status: ['running', 'tool_start'].includes(body.tool_status?.status)
-          ? toolLabel(body.tool_status.tool) : '正在回复…' });
+          ? toolLabel(body.tool_status.tool) : body.tool_status?.status === 'tool_end'
+            ? toolEndLabel(body.tool_status.tool, body.tool_status.is_error) : '正在回复…' });
       if (body.response) { complete(body.response); return; }
       if (body.status === 'interrupted' || body.status === 'failed') {
         terminal = true;
@@ -117,7 +128,7 @@ export function createChatStreamController(options: Options) {
         publish({ phase: 'replying', status: toolLabel(body.tool) });
         break;
       case 'tool_end':
-        publish({ status: body.is_error ? '这一步未完成，正在继续…' : '正在回复…' });
+        publish({ status: toolEndLabel(body.tool, body.is_error) });
         break;
       case 'retrying':
         publish({ phase: 'replying', status: '正在重试回复…', error: undefined });

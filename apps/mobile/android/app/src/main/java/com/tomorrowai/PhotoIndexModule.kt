@@ -184,7 +184,10 @@ internal class PhotoIndexDb(context:Context):SQLiteOpenHelper(context,"photo_ind
   override fun onUpgrade(db:SQLiteDatabase,old:Int,new:Int) = Unit
   data class Asset(val mediaId:Long,val assetId:String,val signature:String,val payload:String,val epoch:Long,val retryAt:Long)
   fun get(scope:String,id:Long):Asset? = readableDatabase.rawQuery("SELECT media_id,asset_id,signature,payload,epoch,retry_at FROM assets WHERE scope=? AND media_id=?",arrayOf(scope,id.toString())).use { if(it.moveToFirst()) Asset(it.getLong(0),it.getString(1),it.getString(2),it.getString(3),it.getLong(4),it.getLong(5)) else null }
-  fun all(scope:String):List<Asset> = readableDatabase.rawQuery("SELECT media_id,asset_id,signature,payload,epoch,retry_at FROM assets WHERE scope=?",arrayOf(scope)).use { c->buildList { while(c.moveToNext()) add(Asset(c.getLong(0),c.getString(1),c.getString(2),c.getString(3),c.getLong(4),c.getLong(5))) } }
+  // Deletion reconciliation only needs identities, not every photo's full payload.
+  fun identitiesAfter(scope:String,after:Long):List<Pair<Long,String>> = readableDatabase.rawQuery(
+    "SELECT media_id,asset_id FROM assets WHERE scope=? AND media_id>? ORDER BY media_id LIMIT 250",
+    arrayOf(scope,after.toString())).use { c->buildList { while(c.moveToNext()) add(c.getLong(0) to c.getString(1)) } }
   fun put(scope:String,asset:Asset) { writableDatabase.execSQL("INSERT OR REPLACE INTO assets(scope,media_id,asset_id,signature,payload,epoch,retry_at)VALUES(?,?,?,?,?,?,?)",arrayOf<Any>(scope,asset.mediaId,asset.assetId,asset.signature,asset.payload,asset.epoch,asset.retryAt)) }
   fun remove(scope:String,id:Long) { writableDatabase.delete("assets","scope=? AND media_id=?",arrayOf(scope,id.toString())) }
 }
@@ -362,12 +365,18 @@ class PhotoIndexWorker(context:Context,params:WorkerParameters):Worker(context,p
         }
         // An absent image is deletion evidence only with full access. Partial grants may hide it.
         if(fullAtStart && PhotoIndexStore.fullAccess(applicationContext)) {
-          for(old in db.all(scope)) {
-            if(old.mediaId in seen) continue
-            if(processed>=15) {more=true;break}
-            if(!active(store,config)) throw ConsentEnded()
-            request(store,config,"DELETE","/assets/${old.assetId}",JSONObject().put("epoch",epoch))
-            db.remove(scope,old.mediaId);processed++
+          var after=-1L
+          deletionPages@ while(true) {
+            val identities=db.identitiesAfter(scope,after)
+            if(identities.isEmpty()) break
+            for((mediaId,assetId) in identities) {
+              after=mediaId
+              if(mediaId in seen) continue
+              if(processed>=15) {more=true;break@deletionPages}
+              if(!active(store,config)) throw ConsentEnded()
+              request(store,config,"DELETE","/assets/$assetId",JSONObject().put("epoch",epoch))
+              db.remove(scope,mediaId);processed++
+            }
           }
         }
       }

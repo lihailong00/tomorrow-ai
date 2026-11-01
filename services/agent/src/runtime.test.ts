@@ -4,13 +4,18 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import type { StreamFn } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Message } from '@earendil-works/pi-ai';
+import { getCurrentTools } from '@earendil-works/pi-ai';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream';
 import { streamSimple } from '@earendil-works/pi-ai/api/openai-completions';
 import { resolveModel } from './config.js';
-import { executeRun, RunError, safeToolResult, validateRun, type Bridge, type RunEvent, type RunInput } from './runtime.js';
+import { executeRun as executeRunBase, RunError, safeToolResult, validateRun, type Bridge, type RunEvent, type RunInput } from './runtime.js';
 import { createDeepSeekWeb } from './web.js';
 
 const settings = resolveModel({ DEEPSEEK_API_KEY: 'model-key-never-in-transcript' });
+// The existing research-loop fixtures explicitly exercise the experimental
+// policy. Production callers omit this option and retain the stable web path.
+const executeRun: typeof executeRunBase = (...args) => executeRunBase(args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+  { researchReview: !!args[6], ...args[7] });
 test('reasoning is validated and each model turn retains the requested level', async () => {
   for (const effort of ['off', 'low', 'high', 'max'] as const) {
     const fixture = bridge();
@@ -126,6 +131,38 @@ function bridge(fail = false) {
 }
 const call: AssistantMessage['content'] = [{ type: 'toolCall', id: 'call-1', name: 'save_memory', arguments: { content: '喜欢简洁回答' } }];
 const final: AssistantMessage['content'] = [{ type: 'text', text: '已保存你的回答偏好。' }];
+
+test('stable default web runs search and reads without the experimental review gate or hidden answer text', async () => {
+  const fixture = bridge();
+  const contexts: string[] = [];
+  let requests = 0;
+  const web = createDeepSeekWeb({ apiKey: 'synthetic-default-web', searches: 2, fetches: 2 }, async url => {
+    requests++;
+    return Response.json(String(url).endsWith('/search') ? { results: [{ url: 'https://www.rust-lang.org/notice', title: '官方测试公告' }] }
+      : { content: '官方测试公告：合成测试版本已发布。' });
+  });
+  const source = deltaStream([
+    [{ type: 'text', text: '正在查询。' }, { type: 'toolCall', id: 'default-search', name: 'web_search', arguments: { query: '官方最新软件公告' } }],
+    [{ type: 'toolCall', id: 'default-read', name: 'web_fetch', arguments: { url: 'https://www.rust-lang.org/notice' } }],
+    [{ type: 'text', text: '已核对测试公告。[来源](https://www.rust-lang.org/notice)' }],
+  ]);
+  const observed: StreamFn = (model, context, options) => { contexts.push(JSON.stringify(context)); return source(model, context, options); };
+  const previous = process.env.AGENT_RESEARCH_REVIEW_ENABLED;
+  delete process.env.AGENT_RESEARCH_REVIEW_ENABLED;
+  try {
+    const result = await executeRunBase({ ...input(), tools: [], messages: [{ role: 'user', content: '联网查询官方最新软件公告' }] },
+      settings, fixture.value, undefined, undefined, observed, web);
+    assert.equal(requests, 2);
+    assert.equal(result.usage.model_requests, 3);
+    assert.equal(result.content, '正在查询。\n\n已核对测试公告。[来源](https://www.rust-lang.org/notice)');
+    assert.ok(fixture.events.find(event => event.kind === 'text_delta' && event.body.delta === '正在查询。'));
+    assert.deepEqual(fixture.events.filter(event => event.kind === 'tool_start').map(event => event.body.tool), ['web_search', 'web_fetch']);
+    assert.equal(contexts.some(context => context.includes('research_plan') || context.includes('research_review')), false);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_RESEARCH_REVIEW_ENABLED;
+    else process.env.AGENT_RESEARCH_REVIEW_ENABLED = previous;
+  }
+});
 
 test('personal MCP bridge can discover tools at runtime and preserves user confirmation boundary', async () => {
   const request = input();
@@ -301,18 +338,24 @@ test('the deadline includes initial state reads, even when a custom bridge ignor
   assert.equal(fixture.events.length, 0); assert.equal(fixture.effects.length, 0);
 });
 
-test('the deadline cancels started and finished journal requests without returning late success', { timeout: 2500 }, async () => {
+test('the deadline cancels started and finished journal requests without returning late success', { timeout: 2500 }, async context => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
   for (const kind of ['started', 'finished']) {
     const fixture = bridge(); let journalSignal: AbortSignal | undefined;
+    let entered!: () => void;
+    const journalEntered = new Promise<void>(resolve => { entered = resolve; });
     fixture.value.event = async (event, signal) => {
       fixture.events.push(event);
-      if (event.kind === kind) { journalSignal = signal; await new Promise(() => {}); }
+      if (event.kind === kind) { journalSignal = signal; entered(); await new Promise(() => {}); }
     };
-    const started = performance.now();
-    await assert.rejects(executeRun(input(), settings, fixture.value, undefined,
-      { turns: 5, tools: 5, timeoutMs: 35 }, fakeStream([final])),
+    const rejected = assert.rejects(executeRun(input(), settings, fixture.value, undefined,
+      { turns: 5, tools: 5, timeoutMs: 2000 }, fakeStream([final])),
     error => error instanceof RunError && error.code === 'timeout');
-    assert.ok(performance.now() - started < 600);
+    // Advance the deadline after the target request starts, rather than relying
+    // on a 35ms scheduling race on a busy development machine.
+    await journalEntered;
+    context.mock.timers.tick(2000);
+    await rejected;
     assert.equal(journalSignal?.aborted, true);
   }
 });
@@ -360,18 +403,21 @@ test('the real Pi loop searches, reads an official page and sees source URLs wit
   const source = 'https://www.chinaamc.com/notice';
   const result = await executeRun({ ...input(), messages: [{ role: 'user', content: '查询纳斯达克基金的申购限额，附公告来源' }] },
     settings, fixture.value, undefined, undefined, fakeStream([
+      [{ type: 'toolCall', id: 'plan-1', name: 'research_plan', arguments: { questions: ['测试份额的限额是多少？'] } }],
       [{ type: 'toolCall', id: 'search-1', name: 'web_search', arguments: { query: '纳斯达克基金 申购公告' } }],
       [{ type: 'toolCall', id: 'fetch-1', name: 'web_fetch', arguments: { url: source } }],
+      [{ type: 'toolCall', id: 'review-1', name: 'research_review', arguments: { checks: [{ question: '测试份额的限额是多少？',
+        status: 'supported', conclusion: '测试份额限额100元', evidence: [{ source_id: 's1', quote: '指定份额当日限额为 100 元。' }] }], conflicts: [] } }],
       [{ type: 'text', text: `测试份额当日限额 100 元。[基金公司公告](${source})` }],
     ], context => { contexts.push(JSON.stringify(context)); }), web);
   assert.equal(requests.length, 2); assert.equal(fixture.effects.length, 0);
   assert.ok(contexts[0]?.includes('已提供 web_search 和 web_fetch'));
-  assert.ok(contexts[1]?.includes('toolResult')); assert.ok(contexts[1]?.includes(source));
-  assert.ok(contexts[2]?.includes('当日限额为 100 元'));
+  assert.ok(contexts[1]?.includes('toolResult')); assert.ok(contexts[2]?.includes(source));
+  assert.ok(contexts[3]?.includes('当日限额为 100 元'));
   assert.ok(result.content.includes(source));
   assert.equal(result.usage.web_search_requests, 1); assert.equal(result.usage.web_fetch_requests, 1);
-  assert.equal(result.usage.tool_calls, 2); assert.equal(result.usage.model_requests, 3);
-  assert.deepEqual(fixture.events.filter(e => e.kind === 'tool_start').map(e => e.body.tool), ['web_search', 'web_fetch']);
+  assert.equal(result.usage.tool_calls, 4); assert.equal(result.usage.model_requests, 5);
+  assert.deepEqual(fixture.events.filter(e => e.kind === 'tool_start').map(e => e.body.tool), ['research_plan', 'web_search', 'web_fetch', 'research_review']);
   assert.equal(fixture.events.at(-1)?.body.web_fetch_requests, 1);
   assert.equal(contexts.join('').includes(searchKey), false);
   assert.equal(JSON.stringify(fixture.events).includes(searchKey), false);
@@ -385,13 +431,176 @@ test('without search configuration Pi is told truthfully that no web tools are a
   assert.equal(contexts[0]?.includes('已提供 web_search'), false);
 });
 
+test('research rejects a premature final draft, continues investigation, and streams only the reviewed answer', async () => {
+  const fixture = bridge(); const contexts: string[] = [];
+  const quote = '2026年10月21日起，代销渠道限额5元，A类与C类不合并计算。';
+  const web = createDeepSeekWeb({ apiKey: 'synthetic-key', searches: 2, fetches: 2 }, async url => Response.json(
+    String(url).endsWith('/search') ? { results: [{ url: 'https://issuer.cn/new', summary: quote }] } : { content: quote }));
+  const result = await executeRun({ ...input(), messages: [{ role: 'user', content: '帮我查基金目前的申购限额' }] },
+    settings, fixture.value, undefined, undefined, deltaStream([
+      [{ type: 'text', text: '危险草稿：全部已核实，每日10元且A/C合并。' }],
+      [{ type: 'toolCall', id: 'plan', name: 'research_plan', arguments: { questions: ['限额与合并规则'] } }],
+      [{ type: 'toolCall', id: 'search', name: 'web_search', arguments: { query: '最新基金限额' } }],
+      [{ type: 'toolCall', id: 'fetch', name: 'web_fetch', arguments: { url: 'https://issuer.cn/new' } }],
+      [{ type: 'toolCall', id: 'review', name: 'research_review', arguments: { checks: [{ question: '限额与合并规则',
+        status: 'supported', conclusion: '代销5元，A/C不合并', evidence: [{ source_id: 's1', quote }] }], conflicts: [] } }],
+      [{ type: 'text', text: '依据所读取公告，代销5元，A/C不合并。' }],
+    ]), web);
+  assert.equal(result.content, '依据所读取公告，代销5元，A/C不合并。');
+  const deltas = fixture.events.filter(event => event.kind === 'text_delta');
+  assert.equal(deltas.map(event => event.body.delta).join(''), result.content);
+  assert.equal(JSON.stringify(fixture.events).includes('危险草稿'), false);
+  assert.deepEqual(fixture.events.filter(event => event.kind === 'text_start').map(event => event.body.turn), [1]);
+  assert.equal(result.usage.model_requests, 6);
+  assert.ok(fixture.events.find(event => event.kind === 'tool_start' && event.body.tool === 'web_search')?.body.research);
+  assert.ok(fixture.events.find(event => event.kind === 'tool_end' && event.body.tool === 'research_review')?.body.research);
+});
+
+test('research cannot loop indefinitely or publish an unreviewed answer after ignoring two correction requests', async () => {
+  const fixture = bridge(); let turns = 0;
+  const web = createDeepSeekWeb({ apiKey: 'synthetic-key', searches: 2, fetches: 2 }, async () => Response.json({ results: [] }));
+  const fake = deltaStream([[{ type: 'text', text: '没有调用工具却宣称全部核实的草稿' }]]);
+  const stream: StreamFn = (model, context, options) => { turns++; return fake(model, context, options); };
+  await assert.rejects(executeRun({ ...input(), messages: [{ role: 'user', content: '帮我查询最新基金限额' }] }, settings,
+    fixture.value, undefined, undefined, stream, web), (error: unknown) => error instanceof RunError && error.code === 'research_incomplete');
+  assert.equal(turns, 3);
+  assert.equal(fixture.events.some(event => event.kind === 'text_delta'), false);
+  assert.equal(fixture.events.some(event => event.kind === 'finished'), false);
+});
+
+test('discovery pauses after a search batch and returns after a read, without hiding business tools', async () => {
+  const fixture = bridge(); const catalogues: string[][] = [];
+  const quote = '这是一份用于验证工具动态暴露的合成公告正文。';
+  const web = createDeepSeekWeb({ apiKey: 'synthetic', searches: 4, fetches: 2 }, async url => Response.json(
+    String(url).endsWith('/search') ? { results: [{ url: 'https://issuer.cn/new', summary: quote }] } : { content: quote }));
+  const result = await executeRun(input(), settings, fixture.value, undefined, undefined, fakeStream([
+    [{ type: 'toolCall', id: 'plan', name: 'research_plan', arguments: { questions: ['核对合成公告'] } }],
+    [1, 2, 3].map(index => ({ type: 'toolCall' as const, id: `search-${index}`, name: 'web_search', arguments: { query: `候选${index}` } })),
+    [{ type: 'toolCall', id: 'read', name: 'web_fetch', arguments: { url: 'https://issuer.cn/new' } }],
+    [{ type: 'toolCall', id: 'review', name: 'research_review', arguments: { checks: [{ question_id: 'q1', question: '核对合成公告',
+      status: 'supported', conclusion: '已实际读取合成公告', evidence: [{ source_id: 's1', passage_id: 'p1' }] }], conflicts: [] } }],
+    [{ type: 'text', text: '已核对合成公告。' }],
+  ], value => catalogues.push(getCurrentTools((value as { messages: Message[] }).messages).map(tool => tool.name))), web);
+  assert.equal(result.content, '已核对合成公告。');
+  assert.ok(catalogues[1]!.includes('web_search'));
+  assert.equal(catalogues[2]!.includes('web_search'), false);
+  assert.ok(catalogues[2]!.includes('web_fetch'));
+  assert.ok(catalogues[2]!.includes('save_memory'));
+  assert.ok(catalogues[3]!.includes('web_search'));
+  assert.equal(fixture.effects.length, 0);
+});
+
+test('a malformed replacement review cannot reuse an earlier approval to publish a new draft', async () => {
+  const fixture = bridge();
+  const quote = '这是一段已实际读取的合成测试公告原文。';
+  const web = createDeepSeekWeb({ apiKey: 'synthetic', searches: 2, fetches: 2 }, async () => Response.json({ content: quote }));
+  await assert.rejects(executeRun({ ...input(), messages: [{ role: 'user', content: '查询最新产品公告' }] }, settings,
+    fixture.value, undefined, undefined, deltaStream([
+      [{ type: 'toolCall', id: 'plan', name: 'research_plan', arguments: { questions: ['测试公告内容'] } }],
+      [{ type: 'toolCall', id: 'read', name: 'web_fetch', arguments: { url: 'https://issuer.cn/new' } }],
+      [{ type: 'toolCall', id: 'review', name: 'research_review', arguments: { checks: [{ question_id: 'q1', question: '测试公告内容',
+        status: 'supported', conclusion: '实际读取了测试正文', evidence: [{ source_id: 's1', passage_id: 'p1' }] }], conflicts: [] } }],
+      [{ type: 'toolCall', id: 'invalid-review', name: 'research_review', arguments: {} }],
+      [{ type: 'text', text: '不应展示这份没有通过新检查的草稿。' }],
+    ]), web), (error: unknown) => error instanceof RunError && error.code === 'research_incomplete');
+  assert.equal(fixture.events.some(event => event.kind === 'text_delta'), false);
+  assert.equal(fixture.events.some(event => event.kind === 'finished'), false);
+});
+
+test('Pi overlaps an all-web batch while business tools retain sequential execution', async () => {
+  const fixture = bridge(); let concurrent = 0, peak = 0;
+  const web = createDeepSeekWeb({ apiKey: 'synthetic-key', searches: 3, fetches: 2 }, async url => {
+    concurrent++; peak = Math.max(peak, concurrent);
+    await new Promise(resolve => setTimeout(resolve, 15)); concurrent--;
+    return Response.json(String(url).endsWith('/search') ? { results: [] } : { content: 'Synthetic evidence text for a local test.' });
+  });
+  const result = await executeRun(input(), settings, fixture.value, undefined, undefined, fakeStream([
+    [{ type: 'toolCall', id: 'plan', name: 'research_plan', arguments: { questions: ['本地测试资料'] } }],
+    [{ type: 'toolCall', id: 'search-a', name: 'web_search', arguments: { query: '公告a' } },
+      { type: 'toolCall', id: 'search-b', name: 'web_search', arguments: { query: '公告b' } }],
+    [{ type: 'toolCall', id: 'review', name: 'research_review', arguments: { checks: [{ question: '本地测试资料', status: 'uncertain',
+      conclusion: '搜索为空，无法确认。', evidence: [] }], conflicts: [] } }],
+    final,
+  ]), web);
+  assert.equal(peak, 2); assert.equal(result.usage.web_search_requests, 2);
+  assert.equal(fixture.effects.length, 0);
+  peak = 0;
+  await executeRun(input(), settings, fixture.value, undefined, undefined, fakeStream([
+    [...call, { type: 'toolCall', id: 'mixed-a', name: 'web_search', arguments: { query: '公告a' } },
+      { type: 'toolCall', id: 'mixed-b', name: 'web_search', arguments: { query: '公告b' } }],
+    [{ type: 'toolCall', id: 'plan-mixed', name: 'research_plan', arguments: { questions: ['本地测试资料'] } }],
+    [{ type: 'toolCall', id: 'review-mixed', name: 'research_review', arguments: { checks: [{ question: '本地测试资料', status: 'uncertain',
+      conclusion: '搜索为空，无法确认。', evidence: [] }], conflicts: [] } }],
+    final,
+  ]), web);
+  assert.equal(peak, 1); assert.equal(fixture.effects.length, 1);
+});
+
+test('a reviewed research answer reaches the user before its upstream stream finishes', { timeout: 5000 }, async () => {
+  const fixture = bridge();
+  const quote = 'Synthetic source text actually fetched for this test.';
+  const web = createDeepSeekWeb({ apiKey: 'synthetic-key', searches: 2, fetches: 2 }, async () => Response.json({ content: quote }));
+  const initial = fakeStream([
+    [{ type: 'toolCall', id: 'plan', name: 'research_plan', arguments: { questions: ['核对测试原文'] } }],
+    [{ type: 'toolCall', id: 'fetch', name: 'web_fetch', arguments: { url: 'https://issuer.cn/notice' } }],
+    [{ type: 'toolCall', id: 'review', name: 'research_review', arguments: { checks: [{ question: '核对测试原文', status: 'supported',
+      conclusion: '已读到测试原文', evidence: [{ source_id: 's1', quote }] }], conflicts: [] } }],
+  ]);
+  let turns = 0, upstreamFinished = false, visibleBeforeEnd = false;
+  let release!: () => void;
+  const visible = new Promise<void>(resolve => { release = resolve; });
+  const record = fixture.value.event;
+  fixture.value.event = async event => {
+    await record(event);
+    if (event.kind === 'text_delta') { visibleBeforeEnd ||= !upstreamFinished; release(); }
+  };
+  const stream: StreamFn = (model, context, options) => {
+    if (++turns <= 3) return initial(model, context, options);
+    const result = createAssistantMessageEventStream();
+    const message: AssistantMessage = { role: 'assistant', api: model.api, provider: model.provider, model: model.id,
+      timestamp: Date.now(), stopReason: 'stop', content: [{ type: 'text', text: '真实片段继续出现。' }],
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+    queueMicrotask(async () => {
+      result.push({ type: 'start', partial: message });
+      result.push({ type: 'text_delta', contentIndex: 0, delta: '真实片段', partial: message });
+      await visible;
+      result.push({ type: 'text_delta', contentIndex: 0, delta: '继续出现。', partial: message });
+      upstreamFinished = true;
+      result.push({ type: 'done', reason: 'stop', message });
+    });
+    return result;
+  };
+  const result = await executeRun({ ...input(), messages: [{ role: 'user', content: '帮我查询最新基金公告' }] }, settings,
+    fixture.value, undefined, { tools: 10, turns: 10, timeoutMs: 3000 }, stream, web);
+  assert.equal(result.content, '真实片段继续出现。'); assert.equal(visibleBeforeEnd, true);
+});
+
+test('long research uses dense visible turn IDs compatible with the existing Rust chat stream', async () => {
+  const fixture = bridge();
+  const replies: AssistantMessage['content'][] = [[{ type: 'toolCall', id: 'plan', name: 'research_plan', arguments: { questions: ['核对公告正文'] } }]];
+  for (let i = 0; i < 23; i++) replies.push([{ type: 'toolCall', id: `search-${i}`, name: 'web_search', arguments: { query: `公告 ${i}` } }]);
+  replies.push([{ type: 'toolCall', id: 'read', name: 'web_fetch', arguments: { url: 'https://issuer.cn/notice' } }]);
+  replies.push([{ type: 'toolCall', id: 'review', name: 'research_review', arguments: { checks: [{ question: '核对公告正文',
+    status: 'supported', conclusion: '读取了测试正文', evidence: [{ source_id: 's1', quote: 'This is synthetic local test data.' }] }], conflicts: [] } }]);
+  replies.push([{ type: 'text', text: '调查后的回答' }]);
+  const web = createDeepSeekWeb({ apiKey: 'synthetic-key', searches: 30, fetches: 2 }, async url => Response.json(
+    String(url).endsWith('/search') ? { results: [] } : { content: 'This is synthetic local test data.' }));
+  const result = await executeRun(input(), settings, fixture.value, undefined, undefined, deltaStream(replies), web);
+  assert.equal(result.content, '调查后的回答');
+  assert.equal(result.usage.model_requests, 27);
+  assert.deepEqual(fixture.events.filter(event => event.kind === 'text_start').map(event => event.body.turn), [1]);
+  assert.ok(fixture.events.filter(event => event.kind === 'text_delta').every(event => event.body.turn === 1));
+});
+
 test('the real Pi loop completes 100 searches plus 100 reads beyond the old tool, turn and task-event caps', { timeout: 15000 }, async () => {
   const fixture = bridge(); let searches = 0, fetches = 0;
-  const replies: AssistantMessage['content'][] = [];
+  const replies: AssistantMessage['content'][] = [[{ type: 'toolCall', id: 'plan', name: 'research_plan', arguments: { questions: ['读取测试资料'] } }]];
   for (let i = 1; i <= 100; i++) {
     replies.push([{ type: 'toolCall', id: `research-search-${i}`, name: 'web_search', arguments: { query: `synthetic notice ${i}` } }]);
     replies.push([{ type: 'toolCall', id: `research-fetch-${i}`, name: 'web_fetch', arguments: { url: `https://www.chinaamc.com/fixture-${i}` } }]);
   }
+  replies.push([{ type: 'toolCall', id: 'review', name: 'research_review', arguments: { checks: [{ question: '读取测试资料',
+    status: 'supported', conclusion: '已经读取合成资料', evidence: [{ source_id: 's100', quote: 'This is synthetic local test data.' }] }], conflicts: [] } }]);
   replies.push([{ type: 'text', text: 'Completed the 100 synthetic searches and 100 synthetic page reads.' }]);
   const web = createDeepSeekWeb({ apiKey: 'never-paid-fixture-key', searches: 100, fetches: 100 }, async url => {
     if (String(url).endsWith('/search')) { searches++; return Response.json({ results: [] }); }
@@ -413,11 +622,11 @@ test('the real Pi loop completes 100 searches plus 100 reads beyond the old tool
     }), web);
   assert.equal(searches, 100); assert.equal(fetches, 100);
   assert.equal(result.usage.web_search_requests, 100); assert.equal(result.usage.web_fetch_requests, 100);
-  assert.equal(result.usage.tool_calls, 200); assert.equal(result.usage.model_requests, 201);
-  assert.equal(observedRequests, 201);
+  assert.equal(result.usage.tool_calls, 202); assert.equal(result.usage.model_requests, 203);
+  assert.equal(observedRequests, 203);
   assert.equal(fixture.effects.length, 0);
-  assert.equal(fixture.events.filter(event => event.kind === 'tool_start').length, 200);
-  assert.equal(fixture.events.filter(event => event.kind === 'tool_end').length, 200);
+  assert.equal(fixture.events.filter(event => event.kind === 'tool_start').length, 202);
+  assert.equal(fixture.events.filter(event => event.kind === 'tool_end').length, 202);
   assert.ok(fixture.events.length > 500); assert.ok(fixture.events.length <= 2000);
   assert.equal(fixture.events.at(-1)?.kind, 'finished');
   assert.equal(fixture.events.at(-1)?.body.web_search_requests, 100);

@@ -52,20 +52,19 @@ test('empty or not-yet-persisted chat has no extraction entry', async () => {
   expect(app.button()).toBeUndefined();
 });
 
-test('discovery opens the current persisted conversation without starting extraction or losing draft', async () => {
+test('persisted conversation has no discovery entry and preserves the draft', async () => {
   const app = await setup('persisted-conversation');
   await app.update(old => ({ ...old, messages: [app.message], draft: '还没有发出的想法' }));
-  expect(app.button()).toBeDefined();
-  await act(async () => { app.button().props.onPress(); });
-  expect(app.navigate).toHaveBeenCalledWith({ name: 'todoSources', conversationId: 'persisted-conversation' });
+  expect(app.button()).toBeUndefined();
+  expect(app.navigate).not.toHaveBeenCalled();
   expect(app.entry.getSnapshot().draft).toBe('还没有发出的想法');
   expect(app.api.messages).toHaveBeenCalledTimes(1);
 });
 
-test('streaming disables discovery and enables it after the reply finishes', async () => {
+test('discovery entry stays absent during streaming and after the reply finishes', async () => {
   const app = await setup('persisted-conversation');
   await app.update(old => ({ ...old, messages: [app.message], sending: true }));
-  expect(app.button().props.disabled).toBe(true);
+  expect(app.button()).toBeUndefined();
   await app.update(old => ({ ...old, sending: false }));
-  expect(app.button().props.disabled).toBe(false);
+  expect(app.button()).toBeUndefined();
 });

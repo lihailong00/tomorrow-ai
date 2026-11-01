@@ -9,6 +9,7 @@ import {
   canReadPhoneSource,
   phoneSources,
   phoneSourceIds,
+  PhoneRecord,
   PhoneSnapshot,
   PhoneSource,
   PhoneStatus,
@@ -19,7 +20,15 @@ import { colors, styles as s } from '../../ui/theme';
 import { PhotoIndexSettings } from '../photo-index/PhotoIndexSettings';
 import { integrationsApi } from '../integrations/api';
 import { discoverPhoneTodos } from './discovery';
-import { phoneImportText, recordDate, recordKey, sourceDetails } from './model';
+import {
+  calendarStatusLabel,
+  canUsePhoneRecordForTodo,
+  phoneImportText,
+  recordDate,
+  recordKey,
+  sourceDetails,
+  SelectedPhoneRecord,
+} from './model';
 import { PhoneWeatherCard } from './PhoneWeatherCard';
 
 type SavedSetup = { seen: boolean; enabled: PhoneSource[] };
@@ -69,7 +78,11 @@ function PhoneSourcesForOwner({
   const [failures, setFailures] = useState<
     Partial<Record<PhoneSource, string>>
   >({});
-  const [chosen, setChosen] = useState<string[]>([]);
+  const [chosen, setChosen] = useState<SelectedPhoneRecord[]>([]);
+  const [pageHistory, setPageHistory] = useState<
+    Partial<Record<PhoneSource, string[]>>
+  >({});
+  const [detail, setDetail] = useState<PhoneRecord>();
   const [expanded, setExpanded] = useState<PhoneSource>();
   const [photoSettings, setPhotoSettings] = useState(false);
   const [busy, setBusy] = useState('');
@@ -139,9 +152,7 @@ function PhoneSourcesForOwner({
           delete next[source];
           return next;
         });
-        setChosen(previous =>
-          previous.filter(key => !key.startsWith(source + ':')),
-        );
+        setChosen(previous => previous.filter(item => item.source !== source));
         try {
           const permission = ask
             ? await phoneSources.request(source)
@@ -161,11 +172,14 @@ function PhoneSourcesForOwner({
           current = await phoneSources.status();
           if (!owner.active) return;
           setStatus(current);
+          setPageHistory(previous => ({ ...previous, [source]: [] }));
           const result = await phoneSources.read(
             source,
             source === 'sms' &&
               sources.includes('contacts') &&
               canReadPhoneSource(current.permissions.contacts),
+            storageKey,
+            ask,
           );
           if (!owner.active) return;
           setSnapshots(previous => ({ ...previous, [source]: result }));
@@ -226,14 +240,15 @@ function PhoneSourcesForOwner({
       enabling ? [...previous, source] : previous.filter(id => id !== source),
     );
     if (!enabling) {
+      void phoneSources.stop(source, storageKey).catch(failure => {
+        if (owner.active) setError(errorMessage(failure));
+      });
       setSnapshots(previous => {
         const next = { ...previous };
         delete next[source];
         return next;
       });
-      setChosen(previous =>
-        previous.filter(key => !key.startsWith(source + ':')),
-      );
+      setChosen(previous => previous.filter(item => item.source !== source));
       if (savedRef.current.enabled.includes(source))
         void persist({
           ...savedRef.current,
@@ -243,15 +258,88 @@ function PhoneSourcesForOwner({
         });
     }
   };
-  const records = (['calendar', 'sms'] as PhoneSource[])
-    .flatMap(source =>
-      (snapshots[source]?.items ?? []).map(record => ({ source, record })),
-    )
-    .filter(
-      item =>
-        selected.includes(item.source) &&
-        chosen.includes(recordKey(item.source, item.record)),
+  const records = chosen.filter(item => selected.includes(item.source));
+  const movePage = async (
+    source: PhoneSource,
+    cursor: string,
+    back = false,
+  ) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy('正在读取本机资料…');
+    try {
+      const result = await phoneSources.page(
+        source,
+        storageKey,
+        cursor,
+        source === 'sms' && savedRef.current.enabled.includes('contacts'),
+      );
+      if (!owner.active) return;
+      setPageHistory(previous => ({
+        ...previous,
+        [source]: back
+          ? (previous[source] ?? []).slice(0, -1)
+          : [...(previous[source] ?? []), snapshots[source]?.cursor ?? '0'],
+      }));
+      setSnapshots(previous => ({ ...previous, [source]: result }));
+    } catch (failure) {
+      if (owner.active) setError(errorMessage(failure));
+    } finally {
+      busyRef.current = false;
+      if (owner.active) setBusy('');
+    }
+  };
+  const showRecord = async (source: PhoneSource, record: PhoneRecord) => {
+    try {
+      const full = await phoneSources.record(source, storageKey, record.id);
+      if (owner.active) setDetail(full);
+    } catch (failure) {
+      if (owner.active) setError(errorMessage(failure));
+    }
+  };
+  // Poll only a bounded preview page. Native WorkManager continues the full import
+  // independently of this screen, including after JS or the app process restarts.
+  useEffect(() => {
+    const pending = phoneSourceIds.filter(
+      source =>
+        saved.enabled.includes(source) &&
+        snapshots[source]?.syncState &&
+        snapshots[source]?.syncState !== 'complete',
     );
+    if (!pending.length) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const updates: Partial<Record<PhoneSource, PhoneSnapshot>> = {};
+      const errors: Partial<Record<PhoneSource, string>> = {};
+      for (const source of pending) {
+        if (
+          cancelled ||
+          !owner.active ||
+          busyRef.current ||
+          !savedRef.current.enabled.includes(source)
+        )
+          return;
+        try {
+          updates[source] = await phoneSources.page(
+            source,
+            storageKey,
+            snapshots[source]?.cursor ?? '0',
+            source === 'sms' && savedRef.current.enabled.includes('contacts'),
+          );
+        } catch (failure) {
+          errors[source] = errorMessage(failure);
+        }
+      }
+      if (cancelled || !owner.active) return;
+      // One render for all sources; updating inside the loop would cancel sibling polls.
+      setSnapshots(previous => ({ ...previous, ...updates }));
+      setFailures(previous => ({ ...previous, ...errors }));
+    }, 1200);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [snapshots, saved.enabled, storageKey, owner, busy]);
   const discover = async () => {
     if (busyRef.current) return;
     busyRef.current = true;
@@ -259,7 +347,18 @@ function PhoneSourcesForOwner({
     setError('');
     setNotice('');
     try {
-      const text = phoneImportText(records);
+      // Re-read selected calendars from the current local cache: a background
+      // refresh may have cancelled an event after its preview was selected.
+      const currentRecords: SelectedPhoneRecord[] = [];
+      for (const item of records) {
+        const record =
+          item.source === 'calendar'
+            ? await phoneSources.record(item.source, storageKey, item.record.id)
+            : item.record;
+        if (!owner.active) return;
+        currentRecords.push({ source: item.source, record });
+      }
+      const text = phoneImportText(currentRecords);
       const fingerprint = await phoneSources.fingerprint(text);
       if (!owner.active) return;
       // Persist only the idempotency receipt, never SMS/calendar/contacts content.
@@ -303,10 +402,17 @@ function PhoneSourcesForOwner({
     }
   };
   const total = phoneSourceIds.reduce(
-    (count, id) => count + (snapshots[id]?.items.length ?? 0),
+    (count, id) =>
+      count + (snapshots[id]?.cached ?? snapshots[id]?.items.length ?? 0),
     0,
   );
-  const nextEvent = snapshots.calendar?.items[0];
+  const nextEvent = snapshots.calendar?.items
+    .filter(
+      item =>
+        canUsePhoneRecordForTodo('calendar', { ...item, truncated: false }) &&
+        (item.timestamp ?? 0) >= Date.now(),
+    )
+    .sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))[0];
   return (
     <>
       <Pressable
@@ -328,6 +434,38 @@ function PhoneSourcesForOwner({
         </View>
         <Text style={ui.link}>管理 ›</Text>
       </Pressable>
+      {detail ? (
+        <Modal
+          visible
+          animationType="slide"
+          onRequestClose={() => setDetail(undefined)}
+        >
+          <SafeAreaView style={ui.screen} edges={['top', 'bottom']}>
+            <View style={ui.header}>
+              <Text style={ui.headerTitle}>完整资料</Text>
+              <Button variant="ghost" onPress={() => setDetail(undefined)}>
+                关闭
+              </Button>
+            </View>
+            <ScrollView contentContainerStyle={s.content}>
+              <Text selectable style={s.cardTitle}>
+                {detail?.title}
+              </Text>
+              <Text selectable style={[s.small, s.topGap]}>
+                {detail ? recordDate(detail) : ''}
+              </Text>
+              <Text selectable style={s.subtitle}>
+                {detail?.text}
+              </Text>
+              {detail?.data ? (
+                <Text style={s.small}>
+                  本机同时保存全部 {detail.data.length} 项联系人字段。
+                </Text>
+              ) : null}
+            </ScrollView>
+          </SafeAreaView>
+        </Modal>
+      ) : null}
       <Modal
         visible={visible}
         animationType="slide"
@@ -444,20 +582,29 @@ function PhoneSourcesForOwner({
                         {snapshot.permission === 'limited'
                           ? '仅访问系统允许的部分照片。'
                           : ''}
-                        {snapshot.items.length
-                          ? `本次读取 ${snapshot.items.length} 条${
-                              snapshot.limited ? '，已达到本次上限' : ''
+                        {snapshot.syncState
+                          ? `已保存 ${snapshot.processed ?? 0} / ${
+                              snapshot.total ?? 0
+                            } 条 · ${
+                              snapshot.syncState === 'complete'
+                                ? '全量整理完成'
+                                : snapshot.syncState === 'error'
+                                ? '已暂停，保留进度'
+                                : '正在继续整理'
                             }。`
-                          : '已获授权，本次范围内没有可读取的记录。'}{' '}
+                          : `本机已保存 ${snapshot.items.length} 条资料。`}{' '}
                         {new Date(snapshot.readAt).toLocaleTimeString('zh-CN')}{' '}
                         更新
                       </Text>
                       {showing?.map(record => {
-                        const selectable =
-                          (source === 'sms' || source === 'calendar') &&
-                          !record.truncated;
-                        const checked = chosen.includes(
-                          recordKey(source, record),
+                        const selectable = canUsePhoneRecordForTodo(
+                          source,
+                          record,
+                        );
+                        const checked = chosen.some(
+                          item =>
+                            recordKey(item.source, item.record) ===
+                            recordKey(source, record),
                         );
                         return (
                           <Pressable
@@ -478,9 +625,11 @@ function PhoneSourcesForOwner({
                               setChosen(previous =>
                                 checked
                                   ? previous.filter(
-                                      key => key !== recordKey(source, record),
+                                      item =>
+                                        recordKey(item.source, item.record) !==
+                                        recordKey(source, record),
                                     )
-                                  : [...previous, recordKey(source, record)],
+                                  : [...previous, { source, record }],
                               );
                             }}
                             style={ui.record}
@@ -497,7 +646,13 @@ function PhoneSourcesForOwner({
                                   {recordDate(record)}
                                 </Text>
                               ) : null}
-                              {source !== 'contacts' && (
+                              {source === 'calendar' &&
+                              calendarStatusLabel(record) ? (
+                                <Text style={s.small}>
+                                  {calendarStatusLabel(record)}
+                                </Text>
+                              ) : null}
+                              {Boolean(record.text) && (
                                 <Text
                                   style={s.small}
                                   numberOfLines={
@@ -507,18 +662,79 @@ function PhoneSourcesForOwner({
                                   {record.text}
                                 </Text>
                               )}
+                              <Button
+                                variant="ghost"
+                                disabled={Boolean(busy)}
+                                onPress={() => {
+                                  void showRecord(source, record);
+                                }}
+                              >
+                                查看完整资料
+                              </Button>
                               {record.truncated && (
                                 <Text
                                   style={[s.small, { color: colors.amber }]}
                                 >
-                                  原文较长，当前仅预览部分；请从原应用分享完整内容后整理。
+                                  原文已完整保存在本机，当前分页仅显示摘要。
                                 </Text>
                               )}
                             </View>
                           </Pressable>
                         );
                       })}
-                      {snapshot.items.length > 3 && (
+                      {snapshot.syncError ? (
+                        <Text style={[s.small, { color: colors.danger }]}>
+                          {snapshot.syncError}
+                        </Text>
+                      ) : null}
+                      {snapshot.syncState === 'error' && (
+                        <Button
+                          variant="ghost"
+                          disabled={Boolean(busy)}
+                          onPress={() => {
+                            void readSources([source], false);
+                          }}
+                        >
+                          继续整理
+                        </Button>
+                      )}
+                      {expanded === source && (
+                        <View style={ui.row}>
+                          <Button
+                            variant="ghost"
+                            disabled={
+                              Boolean(busy) || !pageHistory[source]?.length
+                            }
+                            onPress={() => {
+                              const history = pageHistory[source] ?? [];
+                              void movePage(
+                                source,
+                                history[history.length - 1] ?? '0',
+                                true,
+                              );
+                            }}
+                          >
+                            上一页
+                          </Button>
+                          <Text style={s.small}>
+                            第 {(pageHistory[source]?.length ?? 0) + 1} 页 ·
+                            每页预览 50 条
+                          </Text>
+                          <Button
+                            variant="ghost"
+                            disabled={Boolean(busy) || !snapshot.nextCursor}
+                            onPress={() => {
+                              if (snapshot.nextCursor)
+                                void movePage(source, snapshot.nextCursor);
+                            }}
+                          >
+                            下一页
+                          </Button>
+                        </View>
+                      )}
+                      {snapshot.items.length > 3 ||
+                      snapshot.nextCursor ||
+                      pageHistory[source]?.length ? (
                         <Button
                           variant="ghost"
                           onPress={() =>
@@ -529,9 +745,11 @@ function PhoneSourcesForOwner({
                         >
                           {expanded === source
                             ? '收起'
-                            : `查看本次 ${snapshot.items.length} 条资料`}
+                            : `浏览全部资料（已保存 ${
+                                snapshot.cached ?? snapshot.items.length
+                              } 条）`}
                         </Button>
-                      )}
+                      ) : null}
                     </>
                   ) : (
                     <Text style={[s.small, { marginTop: 10 }]}>
@@ -574,7 +792,7 @@ function PhoneSourcesForOwner({
             )}
             <Text style={[s.small, s.topGap]}>
               之后回到 App
-              时，只刷新你已连接且仍获授权的来源。取消勾选可停止读取；系统权限可在手机设置中撤回。
+              时继续整理已连接的来源，并定期更新。记录加密保存在手机本地；取消勾选会停止该来源并清除本机缓存，退出账号会清除全部本机资料缓存。系统权限可在手机设置中撤回。
             </Text>
             {photoSettings && <PhotoIndexSettings />}
             <PhoneWeatherCard />

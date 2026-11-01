@@ -76,7 +76,7 @@ Android 首发的个人 AI 助手首版。客户端使用 React Native / TypeScr
 | 自动计划 | 每天、工作日、每周或一次；按 IANA 时区调度，可暂停、恢复、编辑和删除 |
 | 记忆 | 偏好、人物、项目、目标、事实的增删改查；版本冲突提示，删除后不再用于新任务 |
 | 文件与语音 | 系统文件选择、短录音、真实上传、资料列表与删除；配置 ASR 后真实转写 |
-| 文件上下文 | 文本、DOCX、XLSX 及已转写音频可用于对话；分享图片可本机识字后确认导入。PDF、PPT 暂仅保存 |
+| 文件上下文 | 文本、DOCX、XLSX 及已转写音频可用于对话；图片理解使用后台配置的模型，客户端不内置 OCR。PDF、PPT 暂仅保存 |
 | Google 连接 | Calendar、Gmail、Drive 三个只读连接器，需服务端 OAuth 配置与用户本人授权 |
 | 成果与通知 | 成果正文、系统分享、站内通知已读；App 在前台可提示新完成任务 |
 
@@ -132,6 +132,8 @@ PostgreSQL 使用 SQLx、参数化查询和用户作用域；pgvector 扩展已�
 
 ## 构建与验证
 
+本地开发遵守[开发磁盘预算](docs/development-storage-policy.md)：所有工作区共用 10 GB 项目预算，9 GB 预警；每次打包前检查用量、完成后清理无用缓存和旧产物并复测，保留最新版及一个验收过的回退版本，不通过转移目录规避统计。
+
 ```powershell
 cargo test --workspace --locked
 cargo check -p tomorrow-worker --features temporal --locked
@@ -144,45 +146,34 @@ cargo check -p tomorrow-worker --features temporal --locked
 
 ### APK 存放与清理约定
 
-所有交付 APK 统一保存在 `artifacts/apk/`，不再放在 `artifacts/` 根目录或散落到其他项目目录。每次使用 `./scripts/Build-Android.ps1` 构建时，保留 `tada-v<版本号>-<北京时间 yyyyMMdd-HHmmss-fff>.apk`，同时更新固定入口 `tada-latest.apk`。旧入口 `tomorrow-ai-latest.apk` 同步指向同一最新版，兼容已有下载路径。版本号读取 `apps/mobile/package.json`。
+所有交付 APK 统一保存在 `artifacts/apk/`。`./scripts/Build-Android.ps1` 默认执行空间检查、构建、发布和收尾清理，无需另行运行删除命令：
 
-先停止所有并发构建和发布，再在项目根目录清理历史版本。以下命令保留两个固定入口、`latest.json` 及其中 `source_filename` 指向的当前来源 APK；元数据缺失、无法解析、来源文件名非法或保留文件不存在时立即停止，不猜测替代来源：
+默认仅打 ARM64 手机包，根目录 `tada-latest.apk` 始终用于手机。模拟器使用 `./scripts/Build-Android.ps1 -Target Emulator`，x86_64 包发布到 `artifacts/apk/emulator/`，其 latest、回退包和元数据独立保存。发布前会验证实际架构并拒绝内置 OCR 残留；客户端不再携带本机 OCR 库与模型。
+
+- 所有 Git 工作区与登记的外部构建路径合并计量，9 GB 预警，10 GB 为尽量控制的项目目标；不足预计构建所需的磁盘空闲空间时停止构建。预计构建增量默认 2 GB，可用 `-EstimatedBuildBytes` 调整；它不是实测峰值。
+- 成功发布后保留带版本号的当前 APK、固定入口 `tada-latest.apk`、兼容入口 `tomorrow-ai-latest.apk` 和一个 `tada-rollback.apk`。`latest.json` 记录真实版本与 SHA256。第一次发布尚无回退包；以后发布不同内容时将原 latest 保存为回退，相同内容重发保留已有回退。
+- 校验 latest 与回退包后才清理本输出目录内能确认的旧生成包。近期可能正在等待发布、版本相同或更高、被占用、自定义、其他应用或无法验证的文件会保留并报告，因此可能临时超过两个版本。失败时恢复先前的 latest、回退与元数据。
+- 构建结束（包括失败）清理本工作区的 Android 可重建缓存；接近预算时也尝试清理本工作区带 Rust 缓存标记的 `target`。不清理其他工作区、公共依赖、Docker、数据库、上传、签名文件或必要验收资料。有活动构建、源码、私有数据或链接的目录会跳过。
+
+构建和清理均使用同一 Git 仓库的跨工作区互斥锁，Gradle 使用 `--no-daemon`，避免本脚本之间同时构建和清理。直接调用 Gradle/Cargo 的开发窗口也应遵守该约定；检测到相关活动进程时自动清理会保守跳过。
+
+每次收尾覆盖写入小型报告 `artifacts/packaging-storage.json`，包含前后用量、预计增量、实际清理结果及无法清理的原因。若仍超过 10 GB 或统计不完整，明确告警，不为凑限额删除必要资料，也不宣称硬配额。共享 SDK、工具链、全局依赖缓存和 Docker 另外核算。
+
+外部 `-NativeBuildDirectory`、`CARGO_TARGET_DIR`、`GRADLE_USER_HOME` 会登记到主工作区的 `.tada-storage.local.json`，后续仍计入用量；该本机文件已忽略，不提交个人路径。其他项目专用目录可加入其中的 `additional_measure_paths`（绝对路径数组）。登记只用于统计，不授权清理；外部原生缓存仅在脚本为新建/空目录写入匹配的归属标记后才可自动清理。详细边界见[开发磁盘预算](docs/development-storage-policy.md)。
+
+只检查空间而不构建、不清理：
 
 ```powershell
-& {
-  $ErrorActionPreference = 'Stop'
-  $apkDir = Get-Item -LiteralPath ./artifacts/apk -Force
-  $metaFile = Get-Item -LiteralPath (Join-Path $apkDir.FullName 'latest.json') -Force
-  if (-not $apkDir.PSIsContainer -or $metaFile.PSIsContainer -or
-      ($apkDir.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-      ($metaFile.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw '发布目录或元数据不是普通目录/文件。' }
-  $raw = Get-Content -LiteralPath $metaFile.FullName -Raw -Encoding UTF8
-  if (-not $raw.TrimStart().StartsWith('{')) { throw 'latest.json 必须是 JSON 对象。' }
-  $meta = $raw | ConvertFrom-Json -ErrorAction Stop
-  $source = $meta.source_filename
-  if ($meta -isnot [pscustomobject] -or $source -isnot [string] -or
-      [string]::IsNullOrWhiteSpace($source) -or $source -cne $source.Trim() -or
-      $source -ne [IO.Path]::GetFileName($source) -or
-      $source.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
-      [IO.Path]::GetExtension($source) -ine '.apk' -or
-      $source -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw 'source_filename 必须是本目录内的合法 APK 文件名。' }
-  $keep = @('tada-latest.apk', 'tomorrow-ai-latest.apk', $source)
-  foreach ($name in $keep) {
-    $file = Get-Item -LiteralPath (Join-Path $apkDir.FullName $name) -Force
-    if ($file.PSIsContainer -or $file.DirectoryName -ne $apkDir.FullName -or
-        ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw '保留文件必须是发布目录的直接子文件。' }
-  }
-  $old = @(Get-ChildItem -LiteralPath $apkDir.FullName -File -Filter 'tada-v*.apk' -Force |
-    Where-Object Name -notin $keep)
-  foreach ($file in $old) {
-    if ($file.DirectoryName -ne $apkDir.FullName -or
-        ($file.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw '历史 APK 路径异常，已停止清理。' }
-  }
-  foreach ($file in $old) { Remove-Item -LiteralPath $file.FullName -Force }
-}
+. ./scripts/Project-Storage.ps1
+Get-TadaStorageUsage -RepoPath (Get-Location).Path | Select-Object TotalBytes, Status, ErrorCount, SkippedLinkCount
 ```
 
-该目录还包含发布元数据和锁文件；上述命令只删除本目录单层的历史 `tada-v*.apk`，保留其他内容，不整体清空目录。Gradle 自己的 `apps/mobile/android/app/build/outputs/apk/` 是构建内部输出，交付与查找安装包以 `artifacts/apk/` 为准。
+隔离的小文件回归（不构建 APK、不访问服务器、不操作现有安装包）：
+
+```powershell
+./scripts/Test-PackagingStorage.ps1
+./scripts/Test-AndroidPackageTargets.ps1
+```
 
 `Test-Pi.ps1` 需要默认 Pi 模式服务在线，会进行真实付费模型调用，使用独立账号，逐项核验工具事件与实际资源。报告为 `artifacts/pi-live-verification.json`，包含虚构测试题、真实回答、Token 用量和脱敏执行记录，不包含会话令牌或模型密钥。测试结束删除测试计划和附件并注销测试会话。
 

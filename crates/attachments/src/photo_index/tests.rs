@@ -594,3 +594,26 @@ async fn malformed_or_zero_embeddings_are_never_persisted() {
         f.cleanup().await;
     }
 }
+
+#[tokio::test]
+async fn photo_storage_and_browsing_continue_beyond_fifty_thousand_records() {
+    let f = Fixture::new().await;
+    let epoch = f.enable().await;
+    // Seed metadata directly: the regression is storage admission, not 50,000
+    // repeated HTTP round trips or 50,000 paid model calls.
+    let metadata = json!({"taken_at":null,"modified_at":1,"width":100,"height":100,"size":1000,"mime_type":"image/jpeg"}).to_string();
+    sqlx::query("WITH RECURSIVE sequence(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM sequence WHERE n<50000) INSERT INTO photo_index_assets(user_id,device_id,asset_id,revision,metadata,updated_at) SELECT $1,$2,printf('00000000-0000-4000-8000-%012x',n),'seed',$3,'2026-01-01T00:00:00Z' FROM sequence")
+        .bind(&f.user).bind(&f.device).bind(metadata).execute(&f.state.pool).await.unwrap();
+    assert_eq!(f.sync(&f.asset, "第 50001 张照片", epoch).await.status(), StatusCode::OK);
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM photo_index_assets WHERE user_id=$1 AND device_id=$2")
+        .bind(&f.user).bind(&f.device).fetch_one(&f.state.pool).await.unwrap();
+    assert_eq!(stored, 50_001);
+    for offset in [50_000, 50_001, 100_000, i64::MAX] {
+        let response = f.call("GET", &format!("{}/assets?mode=keyword&offset={offset}", f.base()), json!(null)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let result = body(response).await;
+        assert!(result["items"].as_array().unwrap().len() <= 20);
+    }
+    assert_eq!(f.call("GET", &format!("{}/assets?offset=-1", f.base()), json!(null)).await.status(), StatusCode::BAD_REQUEST);
+    f.cleanup().await;
+}

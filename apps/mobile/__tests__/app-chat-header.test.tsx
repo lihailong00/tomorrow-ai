@@ -14,6 +14,7 @@ import {
 } from 'react-test-renderer';
 import App from '../App';
 import { ChatScreen } from '../src/screens/Chat';
+import { AmbientBackground } from '../src/ui/visuals';
 
 jest.mock('react-native-safe-area-context', () => ({
   SafeAreaProvider: ({ children }: { children: React.ReactNode }) => children,
@@ -239,7 +240,10 @@ test('a short keyboard viewport moves navigation into the composer and restores 
     'none';
   try {
     await layout(600);
+    expect(tree.root.findAllByType(AmbientBackground)).toHaveLength(1);
     await act(async () => button(tree.root, '打开测试对话').props.onPress());
+    expect(tree.root.findAllByType(AmbientBackground)).toHaveLength(1);
+    expect(StyleSheet.flatten(node('application-header').props.style).backgroundColor).toBe('transparent');
     await act(async () =>
       tree.root.findByType(TextInput).props.onChangeText('Keep my live draft.'),
     );

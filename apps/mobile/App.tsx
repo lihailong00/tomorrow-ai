@@ -46,6 +46,7 @@ import { GrowthSettingsScreen } from './src/features/growth/GrowthSettings';
 import { HealthScreen } from './src/features/health/HealthScreen';
 import { AiHistoryScreen } from './src/features/ai-history/AiHistoryScreen';
 import { appInputs } from './src/platform/appInputs';
+import { phoneSources } from './src/platform/phoneSources';
 import { PhoneSourcesEntry } from './src/features/phone-sources/PhoneSourcesEntry';
 import { photoIndex } from './src/platform/photoIndex';
 import {
@@ -174,6 +175,7 @@ function Application() {
       // With no authenticated owner, an old native inbox must not be inherited
       // by the next account after a failed cleanup or a process restart.
       if (!restored) {
+        await phoneSources.suspend();
         await photoIndex.suspend();
         await clearInputs();
         await platform.removeSession();
@@ -195,6 +197,7 @@ function Application() {
   }, [clearInputs]);
 
   const unauthorized = useCallback(() => {
+    void phoneSources.suspend().catch(() => {});
     void photoIndex.suspend().catch(() => {});
     void clearInputs();
     activeToken.current = undefined;
@@ -277,6 +280,7 @@ function Application() {
       // Cancel old uploads immediately, then revoke local background consent.
       api.dispose();
       activeConnection.current = '';
+      await phoneSources.suspend();
       await photoIndex.suspend();
       await clearInputs();
       activeToken.current = undefined;
@@ -320,6 +324,7 @@ function Application() {
     resetRoutes([{ name: 'main' }]);
   };
   const signOut = async () => {
+    await phoneSources.suspend();
     await photoIndex.suspend();
     await clearInputs();
     try {
@@ -514,7 +519,7 @@ function Application() {
     >
       <GrowthProvider>
       <View style={[s.screen, chatSurface && shell.chatCanvas, capabilitiesSurface && {backgroundColor:capabilityAppearance.background}]}>
-        {!chatSurface && !capabilitiesSurface && <AmbientBackground />}
+        {!capabilitiesSurface && <AmbientBackground />}
         <SafeAreaView
           style={shell.safeArea}
           edges={['top', 'bottom']}
@@ -523,23 +528,24 @@ function Application() {
         >
           <StatusBar
             barStyle="dark-content"
-            backgroundColor={chatSurface ? chatAppearance.surface : capabilitiesSurface ? capabilityAppearance.background : colors.background}
+            backgroundColor={capabilitiesSurface ? capabilityAppearance.background : colors.background}
           />
           {route.name !== 'health' && route.name !== 'integrations' && <View
             testID="application-header"
             style={[s.header, chatSurface && shell.chatHeader, compactChatHeader && shell.hiddenHeader]}
           >
             {chatPage ? <>
-              <View style={shell.chatHeaderActions}>
+              <View style={shell.chatBrand}>
                 <Pressable accessibilityRole="button" accessibilityLabel="返回" onPress={back} style={shell.chatHeaderButton}>
                   <Icon name="back" size={22} color={chatAppearance.ink} />
                 </Pressable>
+                <AssistantOrb size={32} />
+                <Text style={[s.wordmark, shell.brand]}>妥啦</Text>
+              </View>
+              <View style={shell.chatHeaderActions}>
                 <Pressable accessibilityRole="button" accessibilityLabel="开启新对话" onPress={() => navigate({ name: 'chat' })} style={shell.chatHeaderButton}>
                   <Icon name="compose" size={21} color={chatAppearance.ink} />
                 </Pressable>
-              </View>
-              <Text style={shell.chatTitle}>妥啦</Text>
-              <View style={[shell.chatHeaderActions, { justifyContent: 'flex-end' }]}>
                 <Pressable accessibilityRole="button" accessibilityLabel="历史对话" onPress={() => navigate({ name: 'conversations' })} style={shell.chatHeaderButton}>
                   <Icon name="history" size={22} color={chatAppearance.ink} />
                 </Pressable>
@@ -659,9 +665,10 @@ const shell = StyleSheet.create({
   brand: { marginLeft: 5 },
   chatTitle: { flex: 1, textAlign: 'center', color: chatAppearance.ink, fontSize: 17, fontWeight: '500' },
   chatCanvas: { backgroundColor: chatAppearance.background },
-  chatHeader: { minHeight: 60, paddingHorizontal: 8, paddingVertical: 4, marginBottom: 0, backgroundColor: chatAppearance.surface },
-  chatHeaderActions: { width: 88, flexDirection: 'row', alignItems: 'center' },
-  chatHeaderButton: { width: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  chatHeader: { minHeight: 60, paddingHorizontal: 20, paddingVertical: 4, marginBottom: 0, backgroundColor: 'transparent' },
+  chatBrand: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 5 },
+  chatHeaderActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  chatHeaderButton: { width: 44, minHeight: 44, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.7)', alignItems: 'center', justifyContent: 'center' },
   selectedTab: {
     backgroundColor: 'rgba(234,241,255,0.85)',
   },

@@ -50,9 +50,78 @@ test('fetch reads Markdown through DeepSeek, preserves its source and bounds lar
   const result = await session.tools[1]!.execute('fetch', { url: 'https://www.chinaamc.com/notice#section' });
   const content = result.content[0]; assert.equal(content?.type, 'text');
   if (content?.type !== 'text') throw new Error('missing text');
-  const output = JSON.parse(content.text) as { url: string; content: string; truncated: boolean };
-  assert.equal(output.url, 'https://www.chinaamc.com/notice'); assert.equal(output.content.length, 20000);
+  const output = JSON.parse(content.text) as { url: string; content: string; characters: number; truncated: boolean };
+  assert.equal(output.url, 'https://www.chinaamc.com/notice'); assert.equal(output.characters, 8000);
+  assert.match(output.content, /\[p1\]/);
+  assert.equal(session.sources()[0]!.passages.map(passage => passage.text).join(''), session.sources()[0]!.excerpts[0]);
   assert.equal(output.truncated, true); assert.equal(session.usage.web_fetch_requests, 1);
+});
+
+test('long pages can be continued and searched from cached text without another paid request', async () => {
+  let attempts = 0;
+  const content = '前言'.repeat(11000) + '2026年10月21日起：代销限额5元；A类与C类不合并计算。' + '尾部'.repeat(1000);
+  const session = createDeepSeekWeb(settings, async () => { attempts++; return json({ title: '长公告', content }); }).session(active);
+  const read = async (args: Record<string, unknown>) => {
+    const result = await session.tools[1]!.execute('read', { url: 'https://issuer.cn/notice', ...args });
+    const part = result.content[0]; if (part?.type !== 'text') throw new Error('missing text');
+    return JSON.parse(part.text);
+  };
+  const first = await read({});
+  assert.equal(first.next_offset, 8000); assert.equal(first.truncated, true);
+  assert.equal(first.content.includes('不合并'), false);
+  const second = await read({ offset: first.next_offset, length: 20000 });
+  assert.match(second.content, /不合并/); assert.equal(second.next_offset, null); assert.equal(second.cached, true);
+  const found = await read({ find: 'A类与C类', length: 500 });
+  assert.equal(found.match_found, true); assert.match(found.content, /不合并/);
+  const missing = await read({ find: '不存在的关键词' });
+  assert.equal(missing.match_found, false); assert.equal(missing.content, '');
+  await assert.rejects(read({ offset: content.length + 1 }), /正文偏移/);
+  assert.equal(attempts, 1); assert.equal(session.usage.web_fetch_requests, 1);
+  assert.equal(session.sources().length, 1);
+  assert.ok(session.sources()[0]!.excerpts.some(excerpt => excerpt.includes('不合并')));
+});
+
+test('cached reads still require current run authority and evidence/page memory remains bounded', async () => {
+  let allowed = true;
+  const session = createDeepSeekWeb({ ...settings, fetches: 100 }, async () => json({ content: '正文'.repeat(60000) })).session(async () => {
+    if (!allowed) throw new Error('revoked');
+  });
+  for (let index = 0; index < 30; index++) await session.tools[1]!.execute('read', { url: `https://issuer.cn/${index}`, length: 20000 });
+  assert.ok(session.sources().reduce((sum, source) => sum + source.excerpts.reduce((size, value) => size + value.length, 0), 0) <= 400000);
+  assert.equal(session.sources()[0]!.passages.length, 0);
+  assert.ok(session.sources().reduce((sum, source) => sum + source.passages.reduce((size, value) => size + value.text.length, 0), 0) <= 400000);
+  allowed = false;
+  await assert.rejects(session.tools[1]!.execute('cached', { url: 'https://issuer.cn/29', offset: 20000 }), /revoked/);
+});
+
+test('independent web requests overlap with a maximum of three upstream calls per run', async () => {
+  let concurrent = 0, peak = 0;
+  const session = createDeepSeekWeb({ ...settings, searches: 20 }, async () => {
+    concurrent++; peak = Math.max(peak, concurrent);
+    await new Promise(resolve => setTimeout(resolve, 15));
+    concurrent--; return json({ results: [] });
+  }).session(active);
+  await Promise.all(Array.from({ length: 9 }, (_, index) => session.tools[0]!.execute(`search-${index}`, { query: `公告 ${index}` })));
+  assert.equal(peak, 3); assert.equal(concurrent, 0); assert.equal(session.usage.web_search_requests, 9);
+});
+
+test('cancelling a queued web request prevents dispatch and does not consume its paid-call budget', async () => {
+  let attempts = 0;
+  const releases: (() => void)[] = [];
+  const session = createDeepSeekWeb({ ...settings, searches: 20 }, async () => {
+    attempts++;
+    await new Promise<void>(resolve => releases.push(resolve));
+    return json({ results: [] });
+  }).session(active);
+  const running = Array.from({ length: 3 }, (_, index) => session.tools[0]!.execute(`search-${index}`, { query: `公告 ${index}` }));
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const controller = new AbortController();
+  const queued = session.tools[0]!.execute('queued', { query: '取消的搜索' }, controller.signal);
+  controller.abort();
+  await assert.rejects(queued, /取消|abort/i);
+  releases.forEach(release => release());
+  await Promise.all(running);
+  assert.equal(attempts, 3); assert.equal(session.usage.web_search_requests, 3);
 });
 
 test('invalid queries and private, credentialed or non-web URLs never cause an outbound request', async () => {

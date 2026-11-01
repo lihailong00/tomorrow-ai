@@ -207,11 +207,22 @@ test('loads the next page using the same encoded query and mode, deduplicates, a
 
 test('rejects a repeated or out-of-range continuation instead of looping', async () => {
   const app = await setup(searchable);
-  for (const next_offset of [0, -20, 50001, 1.5]) {
+  for (const next_offset of [0, -20, Number.MAX_SAFE_INTEGER + 1, 1.5]) {
     app.request.mockResolvedValueOnce({ items: [asset('one')], next_offset });
     await act(async () => app.button('查看图片索引').props.onPress());
     expect(app.button('加载更多图片索引')).toBeUndefined();
   }
+  await app.unmount();
+});
+
+test('continues browsing beyond 50000 indexed photos without a total-count ceiling', async () => {
+  const app = await setup(searchable);
+  app.request.mockResolvedValueOnce({ items: [asset('50000')], next_offset: 50001 });
+  await act(async () => app.button('查看图片索引').props.onPress());
+  app.request.mockResolvedValueOnce({ items: [asset('50002')], next_offset: null });
+  await act(async () => app.button('加载更多图片索引').props.onPress());
+  expect(app.request).toHaveBeenLastCalledWith(expect.stringContaining('offset=50001'));
+  expect(app.text()).toContain('照片-50002');
   await app.unmount();
 });
 

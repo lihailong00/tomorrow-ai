@@ -1,11 +1,17 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [string]$NodePath,
   [string]$JavaHome,
   [string]$AndroidHome,
   [string]$ProxyUrl,
   [string]$NativeBuildDirectory,
-  [string]$Architectures = 'arm64-v8a,x86_64',
+  [ValidateSet('Phone','Emulator')][string]$Target,
+  [string]$Architectures,
+  [ValidateSet('Debug','Release')][string]$BuildType = 'Debug',
+  [switch]$Compact,
+  [switch]$Candidate,
+  [switch]$RunNativeTests,
+  [ValidateRange(0,100000000000)][long]$EstimatedBuildBytes = 2000000000,
   [switch]$DetailedLogs,
   [switch]$SkipInstall
 )
@@ -15,9 +21,26 @@ $repoPath = Split-Path -Parent $PSScriptRoot
 $mobilePath = Join-Path $repoPath 'apps/mobile'
 $previousLocation = Get-Location
 $previousEnvironment = @{}
-foreach ($name in @('Path','JAVA_HOME','ANDROID_HOME','ANDROID_SDK_ROOT')) {
+foreach ($name in @('Path','JAVA_HOME','ANDROID_HOME','ANDROID_SDK_ROOT','CARGO_TARGET_DIR','GRADLE_USER_HOME')) {
   $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
+. (Join-Path $PSScriptRoot 'Project-Storage.ps1')
+. (Join-Path $PSScriptRoot 'Android-PackageTargets.ps1')
+$packageTarget = Get-TadaAndroidPackageTarget -Target $Target -Architectures $Architectures
+$buildPlan = Get-TadaAndroidBuildPlan -PackageTarget $packageTarget -BuildType $BuildType -Compact:$Compact -Candidate:$Candidate
+$Architectures = $packageTarget.Architecture
+if ($NativeBuildDirectory) { $NativeBuildDirectory = Get-TadaFullPath $NativeBuildDirectory }
+$packagingLease = $null
+$storageBefore = $null
+$storageReady = $null
+$preCleanup = $null
+$buildSucceeded = $false
+$publication = $null
+$packageContents = $null
+$apkPath = $null
+$mappingPath = $null
+$nativeTestSummary = $null
+$storagePaths = @($NativeBuildDirectory, $env:CARGO_TARGET_DIR, $env:GRADLE_USER_HOME) | Where-Object { $_ } | ForEach-Object { Get-TadaFullPath $_ }
 
 function First-ExistingFile([string[]]$Candidates) {
   foreach ($candidate in $Candidates) {
@@ -27,6 +50,29 @@ function First-ExistingFile([string[]]$Candidates) {
 }
 
 try {
+  # One writer across linked worktrees; acquire before installs or cache cleanup.
+  $packagingLease = Enter-TadaPackagingLease -RepoPath $repoPath
+  foreach ($name in @('CARGO_TARGET_DIR','GRADLE_USER_HOME')) {
+    $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+    if ($value) { [Environment]::SetEnvironmentVariable($name, (Get-TadaFullPath $value), 'Process') }
+  }
+  Register-TadaStoragePaths -RepoPath $repoPath -AdditionalPaths $storagePaths -Lease $packagingLease
+  $storageBefore = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
+  Write-TadaStorageStatus -Usage $storageBefore -Phase 'before build' -EstimatedBuildBytes $EstimatedBuildBytes
+  if (($storageBefore.TotalBytes + $EstimatedBuildBytes) -ge $storageBefore.WarningBytes) {
+    $preCleanup = Invoke-TadaBuildCacheCleanup -RepoPath $repoPath -Lease $packagingLease -Phase Preflight -NativeBuildDirectory $NativeBuildDirectory -IncludeRustTarget
+    Write-TadaCleanupStatus $preCleanup
+  }
+  if ($NativeBuildDirectory) { Initialize-TadaNativeBuildDirectory -RepoPath $repoPath -NativeBuildDirectory $NativeBuildDirectory }
+  $storageReady = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
+  Write-TadaStorageStatus -Usage $storageReady -Phase 'ready' -EstimatedBuildBytes $EstimatedBuildBytes
+  # This is a planning estimate, not a claim to monitor or enforce peak usage.
+  foreach ($driveRoot in (@($repoPath) + $storagePaths | ForEach-Object { [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($_)) } | Select-Object -Unique)) {
+    $buildDrive = [IO.DriveInfo]::new($driveRoot)
+    if ($EstimatedBuildBytes -gt 0 -and $buildDrive.AvailableFreeSpace -lt $EstimatedBuildBytes) {
+      throw ('Insufficient free space for the estimated Android build on ' + $driveRoot + '; current latest and rollback were preserved.')
+    }
+  }
   if (-not $NodePath) {
     $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
     $NodePath = First-ExistingFile @(
@@ -111,7 +157,8 @@ try {
 
   $sdkProperty = 'sdk.dir=' + $AndroidHome.Replace('\','/') + [Environment]::NewLine
   [System.IO.File]::WriteAllText((Join-Path $mobilePath 'android/local.properties'), $sdkProperty, [System.Text.UTF8Encoding]::new($false))
-  $gradleArgs = @(':app:assembleDebug','-PofflineBundle=true',('-PreactNativeArchitectures=' + $Architectures),'--console=plain','--max-workers=4')
+  $gradleArgs = @($buildPlan.GradleTask,'-PofflineBundle=true',('-PreactNativeArchitectures=' + $Architectures),('-PtadaCompactApk=' + $Compact.IsPresent.ToString().ToLowerInvariant()),'-Pkotlin.compiler.execution.strategy=in-process','--console=plain','--max-workers=4','--no-daemon')
+  if ($RunNativeTests) { $gradleArgs = @($buildPlan.NativeTestTask) + $gradleArgs }
   if ($NativeBuildDirectory) {
     $nativePath = [IO.Path]::GetFullPath($NativeBuildDirectory).Replace('\','/')
     $gradleArgs += "-PtadaNativeBuildDir=$nativePath"
@@ -139,7 +186,8 @@ try {
     if ($ProxyUrl) { $env:JAVA_OPTS = $oldJavaOpts }
   }
 
-  $artifactPath = Join-Path $repoPath 'artifacts/apk'
+  $artifactPath = Join-Path $repoPath $buildPlan.ArtifactDirectory
+  Assert-TadaPlainPath $artifactPath
   New-Item -ItemType Directory -Path $artifactPath -Force | Out-Null
   $packageVersion = [string](Get-Content -LiteralPath (Join-Path $mobilePath 'package.json') -Raw | ConvertFrom-Json).version
   if ($packageVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$') {
@@ -147,15 +195,81 @@ try {
   }
   $buildStamp = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString('yyyyMMdd-HHmmss-fff')
   $apkPath = Join-Path $artifactPath "tada-v$packageVersion-$buildStamp.apk"
-  Copy-Item -LiteralPath (Join-Path $mobilePath 'android/app/build/outputs/apk/debug/app-debug.apk') -Destination $apkPath -Force
-  $publication = & (Join-Path $PSScriptRoot 'Publish-AndroidApk.ps1') -ApkPath $apkPath -OutputDirectory $artifactPath -AndroidHome $AndroidHome
-  Write-Output ('测试安装包已生成：' + $apkPath)
-  if ($publication.Published) {
+  $builtApkPath = Join-Path $mobilePath $buildPlan.BuiltApk
+  Assert-TadaPlainPath $builtApkPath
+  Assert-TadaPlainPath $apkPath
+  $packageContents = Assert-TadaAndroidPackageContents -ApkPath $builtApkPath -Architecture $packageTarget.Architecture -RequireReleaseInterop:($BuildType -eq 'Release')
+  Copy-Item -LiteralPath $builtApkPath -Destination $apkPath -Force
+  if ($BuildType -eq 'Release') {
+    # Preserve crash deobfuscation data before automatic cache housekeeping.
+    $mappingSource = Join-Path $mobilePath 'android/app/build/outputs/mapping/release/mapping.txt'
+    Assert-TadaPlainPath $mappingSource
+    $mappingPath = $apkPath + '.mapping.txt.gz'
+    Assert-TadaPlainPath $mappingPath
+    $mappingInput = [IO.File]::OpenRead($mappingSource)
+    try {
+      $mappingOutput = [IO.File]::Create($mappingPath)
+      try {
+        $mappingGzip = [IO.Compression.GZipStream]::new($mappingOutput, [IO.Compression.CompressionMode]::Compress, $true)
+        try { $mappingInput.CopyTo($mappingGzip) } finally { $mappingGzip.Dispose() }
+      } finally { $mappingOutput.Dispose() }
+    } finally { $mappingInput.Dispose() }
+  }
+  if ($RunNativeTests) {
+    $nativeResultsPath = Join-Path $mobilePath ('android/app/build/test-results/test' + $BuildType + 'UnitTest')
+    $nativeSuites = @(Get-ChildItem -LiteralPath $nativeResultsPath -Filter 'TEST-*.xml' -File | ForEach-Object {
+      [xml]$testResult = Get-Content -LiteralPath $_.FullName -Raw
+      [pscustomobject]@{ name=$testResult.testsuite.name; tests=[int]$testResult.testsuite.tests; failures=[int]$testResult.testsuite.failures; errors=[int]$testResult.testsuite.errors; skipped=[int]$testResult.testsuite.skipped }
+    })
+    $nativeTestSummary = [pscustomobject]@{ suites=$nativeSuites; tests=($nativeSuites | Measure-Object tests -Sum).Sum; failures=($nativeSuites | Measure-Object failures -Sum).Sum; errors=($nativeSuites | Measure-Object errors -Sum).Sum }
+  }
+  if (-not $Candidate) {
+    $publication = & (Join-Path $PSScriptRoot 'Publish-AndroidApk.ps1') -ApkPath $apkPath -OutputDirectory $artifactPath -AndroidHome $AndroidHome
+  }
+  $buildSucceeded = $true
+  Write-Output ('测试安装包已生成（' + $packageTarget.Name + ' / ' + $packageTarget.Architecture + '）：' + $apkPath)
+  if ($Candidate) {
+    Write-Output ('候选包已保留，latest 未替换：' + $apkPath)
+  } elseif ($publication.Published) {
     Write-Output ('最新版固定入口：' + $publication.LatestApkPath)
   } else {
     Write-Output ('此安装包的 versionCode ' + $publication.VersionCode + ' 低于已发布的 ' + $publication.LatestVersionCode + '，已保留带日期的安装包，未替换最新版。')
   }
 } finally {
+  if ($packagingLease) {
+    try {
+      $phase = if ($buildSucceeded) { 'Success' } else { 'Failure' }
+      $postCleanup = Invoke-TadaBuildCacheCleanup -RepoPath $repoPath -Lease $packagingLease -Phase $phase -NativeBuildDirectory $NativeBuildDirectory
+      Write-TadaCleanupStatus $postCleanup
+      $storageAfter = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
+      if ($storageAfter.TotalBytes -ge $storageAfter.WarningBytes) {
+        $rustCleanup = Invoke-TadaBuildCacheCleanup -RepoPath $repoPath -Lease $packagingLease -Phase $phase -IncludeRustTarget
+        Write-TadaCleanupStatus $rustCleanup
+        $storageAfter = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
+      } else { $rustCleanup = $null }
+      Write-TadaStorageStatus -Usage $storageAfter -Phase 'after housekeeping'
+      $report = [ordered]@{
+        schema_version=1; finished_at=[DateTimeOffset]::UtcNow.ToString('o'); build_succeeded=$buildSucceeded
+        package_target=$packageTarget.Name; build_type=$BuildType; compact=[bool]$Compact; candidate=[bool]$Candidate; apk_path=$apkPath; mapping_path=$mappingPath; native_tests=$nativeTestSummary; package_contents=$packageContents
+        budget_bytes=10000000000; warning_bytes=9000000000; estimated_build_bytes=$EstimatedBuildBytes
+        actual_peak_bytes=$null; peak_note='Pre/post measurements only; temporary build peak is not continuously monitored.'
+        before=$storageBefore; ready=$storageReady; after=$storageAfter
+        pre_cleanup=$preCleanup; post_cleanup=$postCleanup; rust_cleanup=$rustCleanup; publication=$publication
+      }
+      $reportDirectory = Join-Path $repoPath 'artifacts'
+      Assert-TadaPlainPath $reportDirectory
+      New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
+      $reportPath = Join-Path $reportDirectory $buildPlan.StorageReport
+      Assert-TadaPlainPath $reportPath
+      [IO.File]::WriteAllText($reportPath, (($report | ConvertTo-Json -Depth 12) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+      Write-Host ('Storage report: ' + $reportPath)
+      if ($storageAfter.TotalBytes -gt $storageAfter.BudgetBytes) { Write-Warning 'Safe cleanup finished, but the project still exceeds 10 GB. Required data and unrelated work were preserved.' }
+    } catch { Write-Warning ('Storage housekeeping/report could not finish: ' + $_.Exception.Message) }
+    finally { $packagingLease.Stream.Dispose() }
+  }
   Set-Location -LiteralPath $previousLocation
-  foreach ($name in $previousEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process') }
+  foreach ($name in $previousEnvironment.Keys) {
+    if ($null -eq $previousEnvironment[$name]) { Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue }
+    else { [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process') }
+  }
 }

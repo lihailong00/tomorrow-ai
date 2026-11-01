@@ -29,13 +29,13 @@ import {
   Loading,
 } from '../ui/components';
 import { ResultText } from '../ui/ResultText';
-import { AutomaticMemoryConsent, AutomaticMemoryNotice } from '../features/memory/AutomaticMemory';
+import { AutomaticMemoryNotice } from '../features/memory/AutomaticMemory';
 import { ChatModeMotion, useChatReducedMotion } from '../ui/ChatMotion';
 import { ChatVoiceOverlay } from '../ui/ChatVoiceOverlay';
 import { ChatDeleteConfirmation, ChatMessageActions, ChatTextSelection, type MessageAction, type MessageAnchor } from '../ui/ChatMessageActions';
 import { chatAppearance as appearance } from '../ui/ChatAppearance';
 import { colors as historyColors, styles as s } from '../ui/theme';
-import { Icon } from '../ui/visuals';
+import { AssistantOrb, Icon } from '../ui/visuals';
 import { ModeNotice, usePagedList } from './Main';
 import { createMessageHistory, mergeMessageHistory } from './messageHistory';
 import { ChatMessageList } from './ChatMessageList';
@@ -937,6 +937,7 @@ export function ChatScreen({
         )}
         {messages.length === 0 && !history.loading && (
           <View style={chat.welcome}>
+            <View style={chat.welcomeOrb}><AssistantOrb size={62} /></View>
             <Text style={chat.welcomeTitle}>今天想聊点什么？</Text>
             <Text style={chat.welcomeBody}>
               一个问题，一个想法，都可以。
@@ -953,6 +954,7 @@ export function ChatScreen({
                   style={chat.suggestion}
                 >
                   <Text style={chat.suggestionText}>{value}</Text>
+                  <Icon name="arrowUp" size={15} color={appearance.accent} />
                 </Pressable>
               ))}
             </View>
@@ -966,24 +968,7 @@ export function ChatScreen({
         </View>),
     [history.error, history.nextOffset, history.loading, refreshHistory, loadOlder,
       capabilities.error, capabilities.refresh, capabilities.value, messages.length, conversationId, setDraft]);
-  const messageFooter = useMemo(() => (
-    <View style={chat.messageFooter}>
-      <AutomaticMemoryConsent />
-      {id && messages.length > 0 && (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="从这段对话发现待办"
-          disabled={sending}
-          style={[chat.todoDiscovery, sending && s.disabled]}
-          onPress={() => navigate({ name: 'todoSources', conversationId: id })}
-        >
-          <Icon name="tasks" size={15} color={appearance.secondary} />
-          <Text style={chat.todoDiscoveryText}>从这段对话发现待办</Text>
-          <Icon name="chevronRight" size={14} color={appearance.secondary} />
-        </Pressable>
-      )}
-    </View>
-  ), [id, messages.length, navigate, sending]);
+  const messageFooter = useMemo(() => <View style={chat.messageFooter} />, []);
   return (
     <View
       style={[s.fill, chat.chatRoot]}
@@ -1439,28 +1424,20 @@ export function ConversationsScreen() {
 }
 
 const chat = StyleSheet.create({
-  contextStrip: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#eef0f9',
-    borderLeftWidth: 3, borderLeftColor: '#5665be', paddingVertical: 10, paddingLeft: 12, paddingRight: 8, marginBottom: 8, borderRadius: 12 },
-  contextLabel: { fontSize: 12, color: '#5665be', fontWeight: '500', marginBottom: 3 },
+  contextStrip: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: appearance.tint,
+    borderLeftWidth: 3, borderLeftColor: appearance.accent, paddingVertical: 10, paddingLeft: 12, paddingRight: 8, marginBottom: 8, borderRadius: 12 },
+  contextLabel: { fontSize: 12, color: appearance.accent, fontWeight: '500', marginBottom: 3 },
   contextExcerpt: { fontSize: 12, color: appearance.secondary, lineHeight: 19 },
   originalAttachment: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
-  chatRoot: { minHeight: 0, backgroundColor: appearance.background },
+  chatRoot: { minHeight: 0, backgroundColor: 'transparent' },
   messagePane: { flex: 1, minHeight: 0 },
   messages: { paddingHorizontal: 20, paddingTop: 20, flexGrow: 1 },
   messageFooter: { paddingBottom: 24 },
-  todoDiscovery: {
-    minHeight: 44,
-    paddingVertical: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
-  },
-  todoDiscoveryText: { fontSize: 12, color: appearance.secondary },
-  welcome: { alignItems: 'flex-start', paddingTop: 40, paddingBottom: 18 },
+  welcome: { alignItems: 'flex-start', paddingTop: 24, paddingBottom: 18 },
+  welcomeOrb: { marginBottom: 20 },
   welcomeTitle: {
-    fontSize: 21,
-    lineHeight: 30,
+    fontSize: 26,
+    lineHeight: 37,
     fontWeight: '500',
     color: appearance.ink,
   },
@@ -1471,19 +1448,19 @@ const chat = StyleSheet.create({
     marginTop: 9,
     textAlign: 'left',
   },
-  suggestions: { flexDirection: 'row', flexWrap: 'wrap', gap: 7, marginTop: 20, width: '100%' },
+  suggestions: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 24, width: '100%' },
   suggestion: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 14,
-    backgroundColor: appearance.surface,
-    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.82)',
+    borderRadius: 22,
     borderWidth: 1,
-    borderColor: appearance.line,
+    borderColor: 'rgba(255,255,255,0.95)',
     minHeight: 44,
     paddingVertical: 5,
-    paddingHorizontal: 12,
+    paddingHorizontal: 15,
   },
   suggestionText: { color: appearance.ink, fontSize: 12, lineHeight: 20 },
   userBubble: {
@@ -1524,10 +1501,10 @@ const chat = StyleSheet.create({
     marginBottom: 8,
   },
   composerArea: {
-    paddingHorizontal: 10,
+    paddingHorizontal: 20,
     paddingTop: 8,
     paddingBottom: 10,
-    backgroundColor: appearance.background,
+    backgroundColor: 'transparent',
     flexShrink: 0,
   },
   composerViewport: { flexGrow: 0, flexShrink: 1, minHeight: 0 },

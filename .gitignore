@@ -18,5 +18,7 @@
 /research/benchmarks/longmemeval_s_cleaned.json
 *.log
 *.tsbuildinfo
+/.tada-storage.local.json
+/.tada-storage.local.json.*.tmp
 *.keystore
 !**/debug.keystore

@@ -86,3 +86,16 @@ it('recognizes an explicitly selected shared image without sending or deleting i
   expect(NativeModules.TadaAppInputs.dismiss).not.toHaveBeenCalled();
   expect(NativeModules.TadaAppInputs.openApp).not.toHaveBeenCalled();
 });
+
+it('supports incoming shares without bundling a native OCR adapter', async () => {
+  delete NativeModules.TadaAppInputs.extractImageText;
+  NativeModules.TadaAppInputs.listPending.mockResolvedValue([]);
+  const {appInputs} = load();
+  expect(appInputs.supported).toBe(true);
+  expect(appInputs.hasImageTextRecognition).toBe(false);
+  expect(await appInputs.listPending()).toEqual([]);
+  await expect(appInputs.extractImageText('file:///private/shared/image.png'))
+    .rejects.toThrow('不支持图片文字识别');
+  expect(NativeModules.TadaAppInputs.dismiss).not.toHaveBeenCalled();
+  expect(NativeModules.TadaAppInputs.openApp).not.toHaveBeenCalled();
+});

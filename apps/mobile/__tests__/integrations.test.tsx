@@ -40,6 +40,7 @@ beforeAll(() => {
 });
 beforeEach(() => {
   jest.clearAllMocks();
+  appInputs.hasImageTextRecognition = true;
   (appInputs.extractImageText as jest.Mock).mockResolvedValue(
     '订单金额：58.60 元\n预计明天送达',
   );
@@ -474,6 +475,25 @@ it('aborts an upload and does not navigate or dismiss a share after account clea
   });
   expect(appInputs.dismiss).not.toHaveBeenCalled();
   expect(view.context.navigate).not.toHaveBeenCalled();
+});
+
+it('hides local recognition when OCR is absent and never substitutes a cloud upload', async () => {
+  appInputs.hasImageTextRecognition = false;
+  (appInputs.listPending as jest.Mock).mockResolvedValue([{
+    id: 'image-no-ocr', source_app: 'wechat', kind: 'share',
+    title: '截图', text: '', created_at: '',
+    file: {uri: 'file:///private/shared/image.png', name: 'image.png', mime_type: 'image/png'},
+  }]);
+  const view = await setup();
+  await view.tab('待接收');
+  expect(view.tree.root.findAllByType(Button).some(n => n.props.children === '识别图片文字')).toBe(false);
+  expect(view.tree.root.findAllByType(Text).some(n =>
+    String(n.props.children).includes('可在对话中发送图片'))).toBe(true);
+  expect(appInputs.extractImageText).not.toHaveBeenCalled();
+  expect(view.context.api.upload).not.toHaveBeenCalled();
+  expect(view.request.mock.calls.filter(call => call[1] === 'POST')).toHaveLength(0);
+  expect(appInputs.dismiss).not.toHaveBeenCalled();
+  await view.unmount();
 });
 
 it('recognizes a shared image only on tap and keeps the editable text local until confirmation', async () => {

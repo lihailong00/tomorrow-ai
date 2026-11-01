@@ -944,7 +944,7 @@ export function IntegrationTools({
                       <Text style={[s.small, { marginVertical: 8 }]}>
                         {appInputs.hasImageTextRecognition
                           ? '先在本机识别图片文字，检查后再决定是否导入。'
-                          : '此设备暂不支持图片文字识别。上传原件只会保存图片，不会自动读取其中内容。'}
+                          : '可在对话中发送图片，使用后台配置的图片理解服务。上传原件仅保存图片，不会自动解析。'}
                       </Text>
                       {appInputs.hasImageTextRecognition && (
                         <Button

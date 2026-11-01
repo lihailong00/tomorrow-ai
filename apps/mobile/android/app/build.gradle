@@ -19,6 +19,8 @@ androidComponents.onVariants(androidComponents.selector().all()) { variant ->
 }
 
 def offlineBundle = providers.gradleProperty("offlineBundle").getOrElse("false").toBoolean()
+// Opt-in for a measured candidate: smaller APK, but Android extracts libraries at install time.
+def compactApk = providers.gradleProperty("tadaCompactApk").getOrElse("false").toBoolean()
 
 /**
  * This is the configuration block to customize your React Native Android app.
@@ -77,7 +79,7 @@ react {
 /**
  * Set this to true to Run Proguard on Release builds to minify the Java bytecode.
  */
-def enableProguardInReleaseBuilds = false
+def enableProguardInReleaseBuilds = true
 
 /**
  * The preferred build flavor of JavaScriptCore (JSC)
@@ -111,8 +113,8 @@ android {
         applicationId "com.tomorrowai"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 33
-        versionName "0.1.32"
+        versionCode 34
+        versionName "0.1.33"
         buildConfigField "boolean", "OFFLINE_BUNDLE", offlineBundle.toString()
     }
     signingConfigs {
@@ -121,6 +123,12 @@ android {
             storePassword 'android'
             keyAlias 'androiddebugkey'
             keyPassword 'android'
+        }
+    }
+    if (compactApk) {
+        packaging {
+            jniLibs { useLegacyPackaging true }
+            dex { useLegacyPackaging true }
         }
     }
     buildTypes {
@@ -132,7 +140,8 @@ android {
             // see https://reactnative.dev/docs/signed-apk-android.
             signingConfig signingConfigs.debug
             minifyEnabled enableProguardInReleaseBuilds
-            proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+            shrinkResources enableProguardInReleaseBuilds
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }
 }
@@ -143,8 +152,6 @@ dependencies {
     implementation("com.facebook.react:react-android")
     implementation("androidx.work:work-runtime:2.10.5")
     implementation("androidx.health.connect:connect-client:1.1.0")
-    // Retain OCR for explicit shared-image import; photo indexing uses cloud vision.
-    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

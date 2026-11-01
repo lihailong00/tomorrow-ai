@@ -1,6 +1,7 @@
 import { addChatStreamMock } from '../test/chatStreamMock';
 import React from 'react';
 import {
+  Animated,
   Dimensions,
   ScrollView,
   StyleSheet,
@@ -35,12 +36,15 @@ beforeAll(() => {
 const mountedTrees = new Set<ReactTestRenderer>();
 beforeEach(() => {
   (platform.getSystemFontScale as jest.Mock).mockReset().mockResolvedValue(null);
+  // Layout checks have no native view tags; native motion has separate coverage.
+  jest.spyOn(Animated, 'timing').mockImplementation(() => ({ start: jest.fn(), stop: jest.fn(), reset: jest.fn() }));
 });
 afterEach(async () => {
   await act(async () => {
     mountedTrees.forEach(tree => tree.unmount());
   });
   mountedTrees.clear();
+  jest.restoreAllMocks();
 });
 
 const reply = {

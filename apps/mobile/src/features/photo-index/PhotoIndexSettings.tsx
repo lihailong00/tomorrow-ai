@@ -144,7 +144,7 @@ function PhotoIndexSettingsForAccount() {
         const next = result.next_offset;
         return { key: searchKey, api, items: [...unique.values()], notice: result.notice ?? '',
           nextOffset: result.items.length > 0 && typeof next === 'number' && Number.isSafeInteger(next) &&
-            next > offset && next <= 50000 ? next : null };
+            next > offset ? next : null };
       });
     } catch (error) {
       if (isCurrent()) setSearchError(errorMessage(error));

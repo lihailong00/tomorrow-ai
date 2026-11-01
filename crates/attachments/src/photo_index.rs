@@ -354,30 +354,8 @@ async fn persist_sync(
             ));
         }
     }
-    let existing: Option<String> = sqlx::query_scalar(
-        "SELECT revision FROM photo_index_assets WHERE user_id=$1 AND device_id=$2 AND asset_id=$3",
-    )
-    .bind(&user)
-    .bind(&device)
-    .bind(&asset)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if existing.is_none() {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM photo_index_assets WHERE user_id=$1 AND device_id=$2",
-        )
-        .bind(&user)
-        .bind(&device)
-        .fetch_one(&mut *tx)
-        .await?;
-        if count >= 50_000 {
-            return Err(AttachmentError::new(
-                StatusCode::CONFLICT,
-                "photo_index_full",
-                "当前设备的图片索引已达上限",
-            ));
-        }
-    }
+    // Storage has no per-device record ceiling. Page size and model admission
+    // limits are independent of the number of authorized photos we can retain.
     sqlx::query("INSERT INTO photo_index_assets(user_id,device_id,asset_id,revision,metadata,updated_at)VALUES($1,$2,$3,$4,$5,$6)ON CONFLICT(user_id,device_id,asset_id)DO UPDATE SET revision=$4,metadata=$5,updated_at=$6")
         .bind(&user).bind(&device).bind(&asset).bind(&input.revision).bind(metadata).bind(chrono::Utc::now().to_rfc3339()).execute(&mut *tx).await?;
     sqlx::query(
@@ -491,7 +469,7 @@ async fn list(
     let offset = search.offset.unwrap_or(0);
     let mode = search.mode.as_deref().unwrap_or("hybrid");
     if q.chars().count() > 200
-        || !(0..=50_000).contains(&offset)
+        || offset < 0
         || !["hybrid", "keyword"].contains(&mode)
     {
         return Err(invalid());
@@ -549,7 +527,7 @@ async fn list(
         }
     }
     Ok(Json(
-        json!({"next_offset":if items.len()==20 && (!hybrid||offset+20<100){Some(offset+20)}else{None},"items":items,"search_mode":if used_semantic{"hybrid"}else{"keyword"},"notice":fallback}),
+        json!({"next_offset":if items.len()==20 {offset.checked_add(20).filter(|next| !hybrid || *next < 100)}else{None},"items":items,"search_mode":if used_semantic{"hybrid"}else{"keyword"},"notice":fallback}),
     ))
 }
 

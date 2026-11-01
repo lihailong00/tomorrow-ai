@@ -56,7 +56,7 @@ export function ChatReasoningSelector({ value, onChange, disabled, owner }: {
 const css = StyleSheet.create({
   toolbar: { alignItems: 'flex-start', paddingBottom: 9 },
   trigger: { minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 7,
-    borderWidth: 1, borderColor: colors.line, borderRadius: 18, backgroundColor: colors.surface, paddingHorizontal: 13 },
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.95)', borderRadius: 20, backgroundColor: 'rgba(255,255,255,0.72)', paddingHorizontal: 13 },
   triggerText: { color: colors.secondary, fontSize: 13, fontWeight: '500', flexShrink: 1 },
   disabled: { opacity: 0.5 },
   layer: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(30,38,60,0.2)' },

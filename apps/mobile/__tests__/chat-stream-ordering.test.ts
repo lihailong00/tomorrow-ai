@@ -10,6 +10,24 @@ const response: ChatResponse = { conversation_id: 'conversation', message: {
 } };
 const event = (id: number, kind: string, data: Record<string, unknown>): SseEvent => ({ id, event: kind, data });
 
+test('research progress reflects actual planning, source reading and review events', async () => {
+  const changes: string[] = [];
+  const api = { chatStream: jest.fn(async (_intent, receive) => {
+    receive(event(0, 'snapshot', { status: 'running', content: '', tool_status: { status: 'tool_start', tool: 'research_plan' } }));
+    receive(event(1, 'tool_end', { tool: 'research_plan', is_error: false }));
+    receive(event(2, 'tool_end', { tool: 'web_search', is_error: false }));
+    receive(event(3, 'tool_end', { tool: 'web_fetch', is_error: false }));
+    receive(event(4, 'tool_start', { tool: 'research_review' }));
+    receive(event(5, 'tool_end', { tool: 'research_review', is_error: true }));
+    receive(event(6, 'done', { response }));
+  }) };
+  const controller = createChatStreamController({ api, intent, isCurrent: () => true,
+    onChange: progress => changes.push(progress.status), onComplete: jest.fn() });
+  await controller.start(); controller.dispose();
+  for (const status of ['正在整理调查清单…', '正在查找相关资料…', '正在核对搜索结果…',
+    '正在比对资料中的日期和条件…', '正在核对来源与未确认事项…', '这一步未完成，正在继续…']) expect(changes).toContain(status);
+});
+
 test('reattached snapshot preserves the active tool label before any answer text arrives', async () => {
   const changes: string[] = [];
   const api = { chatStream: jest.fn(async (_intent, receive) => {
@@ -22,6 +40,22 @@ test('reattached snapshot preserves the active tool label before any answer text
   await controller.start();
   expect(changes).toContain('正在搜索…');
   controller.dispose();
+});
+
+test('reattached snapshots retain completed research phases and failed-review status', async () => {
+  const changes: string[] = [];
+  const api = { chatStream: jest.fn(async (_intent, receive) => {
+    receive(event(4, 'snapshot', { status: 'running', content: '',
+      tool_status: { status: 'tool_end', tool: 'web_fetch', is_error: false } }));
+    receive(event(8, 'snapshot', { status: 'running', content: '',
+      tool_status: { status: 'tool_end', tool: 'research_review', is_error: true } }));
+    receive(event(9, 'done', { response }));
+  }) };
+  const controller = createChatStreamController({ api, intent, isCurrent: () => true,
+    onChange: progress => changes.push(progress.status), onComplete: jest.fn() });
+  await controller.start(); controller.dispose();
+  expect(changes).toContain('正在比对资料中的日期和条件…');
+  expect(changes).toContain('这一步未完成，正在继续…');
 });
 
 test('a missing fragment reattaches with the last complete cursor and the same immutable request', async () => {

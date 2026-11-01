@@ -47,8 +47,6 @@ class AppInputsModule(private val context: ReactApplicationContext) : ReactConte
 
   @ReactMethod fun clear(promise: Promise) = run(promise) { AppInputStore.clear(context); null }
 
-  @ReactMethod fun extractImageText(uri: String, promise: Promise) = AppSharedImageText.recognize(context, uri, promise)
-
   @ReactMethod fun openApp(id: String, promise: Promise) = run(promise) {
     val packages = AppInputStore.packages[id] ?: throw IllegalArgumentException("未知应用")
     val intent = packages.firstNotNullOfOrNull { context.packageManager.getLaunchIntentForPackage(it) }

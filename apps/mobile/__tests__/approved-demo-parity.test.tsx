@@ -108,30 +108,34 @@ const button = (root: ReactTestInstance, label: string) =>
       typeof node.props.onPress === 'function',
   )[0];
 
-test('approved fixed-light palette is exact and chat hides only its own ambient surface even when the system is dark', async () => {
-  expect(chatAppearance).toMatchObject({ background: '#F7F8FC', surface: '#FFFFFF', ink: '#303849', secondary: '#606B80', line: '#E2E6EF', accent: '#5665BE', onAccent: '#FFFFFF', keyboard: '#ECEEF5' });
+test('unified fixed-light palette keeps the home ambient surface in chat even when the system is dark', async () => {
+  expect(chatAppearance).toMatchObject({ background: '#F5F6FA', surface: '#FFFFFF', ink: '#303849', secondary: '#657083', line: '#E6EAF2', accent: '#416CCB', onAccent: '#FFFFFF', keyboard: '#EEEFF6' });
   const systemTheme = jest.spyOn(Appearance, 'getColorScheme').mockReturnValue('dark');
   const setSystemTheme = jest.spyOn(Appearance, 'setColorScheme');
   let tree!: ReactTestRenderer;
   try {
     await act(async () => { tree = create(<App />); });
-    expect(tree.root.findAll(n => n.props.testID === 'approved-ambient-marker').length).toBeGreaterThan(0);
+    const ambientCount = tree.root.findAll(n => n.props.testID === 'approved-ambient-marker').length;
+    expect(ambientCount).toBeGreaterThan(0);
     await act(async () => button(tree.root, '打开测试对话').props.onPress());
-    expect(tree.root.findAll(n => n.props.testID === 'approved-ambient-marker')).toHaveLength(0);
+    expect(tree.root.findAll(n => n.props.testID === 'approved-ambient-marker')).toHaveLength(ambientCount);
     const header = tree.root.findAll(n => n.props.testID === 'application-header')[0];
-    expect(StyleSheet.flatten(header.props.style)).toMatchObject({ backgroundColor: '#FFFFFF', minHeight: 60, paddingHorizontal: 8 });
-    const groups = header.findAll(n => StyleSheet.flatten(n.props.style)?.width === 88);
-    expect(groups.length).toBeGreaterThanOrEqual(2);
+    expect(StyleSheet.flatten(header.props.style)).toMatchObject({ backgroundColor: 'transparent', minHeight: 60, paddingHorizontal: 20 });
+    for (const label of ['返回', '开启新对话', '历史对话']) {
+      const control = button(header, label);
+      expect(control.props.accessibilityRole).toBe('button');
+      expect(StyleSheet.flatten(control.props.style)).toMatchObject({ width: 44, minHeight: 44, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.7)' });
+    }
     const chat = tree.root.findByType(ChatScreen);
     const root = chat.findAll(n => typeof n.props.onLayout === 'function')[0];
-    expect(StyleSheet.flatten(root.props.style).backgroundColor).toBe('#F7F8FC');
+    expect(StyleSheet.flatten(root.props.style).backgroundColor).toBe('transparent');
     expect(setSystemTheme).not.toHaveBeenCalled();
     const field = tree.root.findByType(TextInput);
     await act(async () => field.props.onChangeText('Unsent approved draft'));
     const composer = tree.root.findAll(n => n.props.testID === 'unified-input-bar')[0];
-    expect(StyleSheet.flatten(composer.props.style)).toMatchObject({ backgroundColor: '#FFFFFF', borderColor: '#E2E6EF', borderRadius: 25 });
+    expect(StyleSheet.flatten(composer.props.style)).toMatchObject({ backgroundColor: 'rgba(255,255,255,0.92)', borderColor: '#FFFFFF', borderRadius: 30 });
     const send = button(tree.root, '发送消息');
-    expect(StyleSheet.flatten(send.props.style).backgroundColor).toBe('#5665BE');
+    expect(StyleSheet.flatten(send.props.style).backgroundColor).toBe('#416CCB');
     const labels = tree.root.findAll(n => typeof n.props.children === 'string').map(n => n.props.children).join(' ');
     expect(labels).not.toContain('记忆由你主动添加'); expect(labels).not.toContain('交互演示');
     await act(async () => button(tree.root, '返回').props.onPress());
