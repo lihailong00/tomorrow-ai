@@ -45,7 +45,7 @@ export function ChatMessageActions({ anchor, timestamp, hasText, blocked, onActi
           <Pressable accessibilityRole="button" accessibilityLabel="更多消息操作" accessibilityState={{ expanded }}
             onPress={() => { setMeasuredHeight(undefined); setExpanded(!expanded); }} style={css.row}>
             <Icon name="more" size={19} color="#5665be" /><Text style={css.label}>更多</Text>
-            <View style={css.spacer} /><Icon name="chevronDown" size={16} color="#8a90a3" />
+            <View style={css.spacer} /><View style={expanded ? css.moreExpanded : undefined}><Icon name="chevronDown" size={16} color="#8a90a3" /></View>
           </Pressable>
           {expanded && <><View style={css.divider} />{action('branch', '创建新对话', 'plus')}{action('delete', '删除', 'delete')}</>}
         </ScrollView>
@@ -90,6 +90,7 @@ const css = StyleSheet.create({
   row: { minHeight: 53, paddingHorizontal: 20, paddingVertical: 11, flexDirection: 'row', alignItems: 'center', gap: 13 },
   label: { fontSize: 15, color: '#303849' }, compactLabel: { fontSize: 15 },
   danger: { color: '#c84c63' }, disabled: { opacity: 0.35 },
+  moreExpanded: { transform: [{ rotate: '180deg' }] },
   divider: { height: 1, marginHorizontal: 18, backgroundColor: '#f0f1f6' }, spacer: { flex: 1 },
   sheetLayer: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(24,31,55,0.20)' },
   sheet: { backgroundColor: '#f7f8fc', padding: 20, paddingBottom: 32, borderTopLeftRadius: 26, borderTopRightRadius: 26, maxHeight: '75%' },

@@ -544,6 +544,9 @@ test('cancelled hold cannot label a later accessible activation as cancelled and
   const app = await setup(); await hold(app);
   await act(async () => gestureNode(app).props.onResponderMove(event(100)));
   expect(app.tree().root.findByType(ChatVoiceOverlay).props.cancelled).toBe(true);
+  expect(gestureNode(app).props.accessibilityLabel).toBe('松开取消');
+  expect(gestureNode(app).props.accessibilityActions[0].label).toBe('取消这段录音');
+  expect(gestureNode(app).props.accessibilityHint).toBe('再次激活取消这段录音。');
   await act(async () => gestureNode(app).props.onResponderRelease());
   expect(app.api.upload).not.toHaveBeenCalled(); expect(app.api.transcribe).not.toHaveBeenCalled();
   await app.press('按住说话');

@@ -1262,10 +1262,10 @@ export function ChatScreen({
             ]}
           />
           {voiceMode && <View testID="chat-hold-to-talk" accessible accessibilityRole="button"
-            accessibilityLabel={holdActive ? '松开发送' : '按住说话'}
-            accessibilityHint={holdActive ? '再次激活结束录音并发送；也可以上滑取消。' : '按住说话，松开发送。屏幕阅读用户可激活开始，再次激活结束并发送。'}
+            accessibilityLabel={holdActive ? holdCancelled ? '松开取消' : '松开发送' : '按住说话'}
+            accessibilityHint={holdActive ? holdCancelled ? '再次激活取消这段录音。' : '再次激活结束录音并发送；也可以上滑取消。' : '按住说话，松开发送。屏幕阅读用户可激活开始，再次激活结束并发送。'}
             accessibilityState={{ disabled: fileAction.busy || sending || Boolean(voice) || deleting || (captureBusy && !holdActive) }}
-            accessibilityActions={[{ name: 'activate', label: holdActive ? '结束录音并发送' : '开始录音' }]}
+            accessibilityActions={[{ name: 'activate', label: holdActive ? holdCancelled ? '取消这段录音' : '结束录音并发送' : '开始录音' }]}
             onAccessibilityTap={activateHold}
             onAccessibilityAction={event => { if (event.nativeEvent.actionName === 'activate') activateHold(); }}
             style={[chat.holdButton, holdActive && chat.holdPressed, holdActive && holdCancelled && chat.recordingCancelled]}
