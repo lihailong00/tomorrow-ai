@@ -43,7 +43,14 @@ jest.mock('../src/platform/ports', () => ({
 jest.mock('../src/api/client', () => ({
   normalizeServerUrl: (url: string) => url,
   newRequestId: () => 'request',
+  errorMessage: (failure: unknown) => failure instanceof Error ? failure.message : '请求失败',
   ApiClient: jest.fn().mockImplementation(() => ({
+    request: jest.fn().mockImplementation(async (path: string, method = 'GET') => {
+      if (path === '/memory/preferences' && method === 'GET') {
+        return { enabled: false, configured: false };
+      }
+      throw new Error(`Unexpected API fixture request: ${method} ${path}`);
+    }),
     capabilities: jest
       .fn()
       .mockResolvedValue({ runtime: { model_mode: 'local' } }),
