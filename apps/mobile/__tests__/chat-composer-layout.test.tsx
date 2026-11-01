@@ -238,7 +238,9 @@ test('large-font multiline drafts scroll in a bounded input and send every line'
   await app.press('切换语音输入');
   const hold = app.composer().findAll(node => node.props.testID === 'chat-hold-to-talk')[0];
   expect(hold.props.onStartShouldSetResponder()).toBe(false);
-  expect(app.control('开始录音').props.disabled).toBe(true);
+  expect(hold.props.accessibilityState.disabled).toBe(true);
+  await act(async () => hold.props.onAccessibilityAction({ nativeEvent: { actionName: 'activate' } }));
+  expect(app.composer().findAll(node => node.props.testID === 'chat-hold-to-talk')[0].props.accessibilityLabel).toBe('按住说话');
   await app.press('切换文字输入');
   await act(async () => {
     finish(reply);

@@ -89,7 +89,7 @@ async function setup() {
     tree.root.findAll(
       n =>
         n.props.accessibilityLabel === label &&
-        typeof n.props.onPress === 'function',
+        (typeof n.props.onPress === 'function' || typeof n.props.onAccessibilityAction === 'function'),
     )[0];
   return {
     api,
@@ -106,16 +106,20 @@ async function setup() {
       );
     },
     press: async (label: string) => {
-      if (label === '开始录音' && !node(label)) {
+      if (label === '按住说话' && !node(label)) {
         await act(async () => node('切换语音输入').props.onPress());
       }
       await act(async () => {
-        await node(label).props.onPress();
+        const control = node(label);
+        if (control.props.onAccessibilityAction) control.props.onAccessibilityAction({ nativeEvent: { actionName: 'activate' } });
+        else await control.props.onPress();
       });
     },
     start: async (label: string) => {
       await act(async () => {
-        void node(label).props.onPress();
+        const control = node(label);
+        if (control.props.onAccessibilityAction) control.props.onAccessibilityAction({ nativeEvent: { actionName: 'activate' } });
+        else void control.props.onPress();
       });
     },
     button: async (label: string) => {
@@ -147,19 +151,18 @@ async function setup() {
   };
 }
 
-test('stopping recording automatically transcribes to an editable draft, without sending audio or chat', async () => {
+test('two screen-reader activations of the central control transcribe and send text without an audio attachment', async () => {
   const app = await setup();
-  await app.press('开始录音');
-  await app.press('结束录音');
+  await app.press('按住说话');
+  await app.press('松开发送');
   expect(app.api.upload).toHaveBeenCalledTimes(1);
   expect(app.api.transcribe).toHaveBeenCalledWith(
     'voice-upload',
     expect.anything(),
   );
-  expect(app.value()).toBe('明天下午提醒我开会。');
+  expect(app.value()).toBe('');
   expect(app.text()).not.toContain('voice.m4a');
-  expect(app.api.chat).not.toHaveBeenCalled();
-  await app.press('发送消息');
+  expect(app.api.chat).toHaveBeenCalledTimes(1);
   expect(app.api.chat).toHaveBeenCalledWith(
     '明天下午提醒我开会。',
     undefined,
@@ -178,8 +181,8 @@ test('dictation appends to text typed while recognition is pending', async () =>
         resolve = r;
       }),
   );
-  await app.press('开始录音');
-  await app.start('结束录音');
+  await app.press('按住说话');
+  await app.start('松开发送');
   await app.input('这是我原先写的内容。');
   await act(async () => resolve({ text: '语音补充。' }));
   expect(app.value()).toBe('这是我原先写的内容。\n语音补充。');
@@ -190,14 +193,15 @@ test('dictation appends to text typed while recognition is pending', async () =>
 test('transcription failure retains the recording and retry reuses its upload', async () => {
   const app = await setup();
   app.api.transcribe.mockRejectedValueOnce(new Error('识别暂时失败'));
-  await app.press('开始录音');
-  await app.press('结束录音');
+  await app.press('按住说话');
+  await app.press('松开发送');
   expect(app.value()).toBe('');
   expect(app.text()).toContain('识别暂时失败');
-  await app.button('重试转写');
+  await app.button('重试识别并发送');
   expect(app.api.upload).toHaveBeenCalledTimes(1);
   expect(app.api.transcribe).toHaveBeenCalledTimes(2);
-  expect(app.value()).toBe('明天下午提醒我开会。');
+  expect(app.value()).toBe('');
+  expect(app.api.chat).toHaveBeenCalledTimes(1);
   await app.unmount();
 });
 
@@ -210,8 +214,8 @@ test('cancelled recognition cannot insert late text or send it', async () => {
         resolve = r;
       }),
   );
-  await app.press('开始录音');
-  await app.start('结束录音');
+  await app.press('按住说话');
+  await app.start('松开发送');
   await app.press('取消语音转写');
   const signal = (
     app.api.transcribe.mock.calls as unknown as [string, AbortSignal][]
@@ -226,8 +230,8 @@ test('cancelled recognition cannot insert late text or send it', async () => {
 test('oversized combined draft preserves recognized text without paying for another transcription', async () => {
   const app = await setup();
   await app.input('字'.repeat(20000));
-  await app.press('开始录音');
-  await app.press('结束录音');
+  await app.press('按住说话');
+  await app.press('松开发送');
   expect(app.value()).toHaveLength(20000);
   await app.input('');
   await app.button('填入文字');
@@ -247,21 +251,22 @@ test('a failed transcription survives history/back with its upload and an explic
   const app = await setup();
   app.api.transcribe.mockRejectedValueOnce(new Error('ASR unavailable'));
   await app.input('Keep typed draft');
-  await app.press('开始录音');
-  await app.press('结束录音');
+  await app.press('按住说话');
+  await app.press('松开发送');
   await app.history();
   await app.back();
   expect(app.value()).toBe('Keep typed draft');
   expect(app.text()).toContain('ASR unavailable');
-  expect(app.buttonLabels()).toContain('重试转写');
+  expect(app.buttonLabels()).toContain('重试识别并发送');
   expect(app.text()).not.toContain('正在转成文字');
   expect(app.text()).toContain('转写未完成');
   expect(app.api.transcribe).toHaveBeenCalledTimes(1);
   expect(app.api.deleteUpload).not.toHaveBeenCalled();
-  await app.button('重试转写');
+  await app.button('重试识别并发送');
   expect(app.api.upload).toHaveBeenCalledTimes(1);
   expect(app.api.transcribe).toHaveBeenCalledTimes(2);
-  expect(app.value()).toBe('Keep typed draft\n明天下午提醒我开会。');
+  expect(app.value()).toBe('');
+  expect(app.api.chat).toHaveBeenCalledWith('Keep typed draft\n明天下午提醒我开会。', undefined, expect.any(String), []);
   expect(app.text()).not.toContain('ASR unavailable');
   await app.unmount();
 });
@@ -270,8 +275,8 @@ test('a retained ASR continues once through history/back and appends to the curr
   const app = await setup();
   const pending = deferred<{ text: string }>();
   app.api.transcribe.mockReturnValueOnce(pending.promise);
-  await app.press('开始录音');
-  await app.start('结束录音');
+  await app.press('按住说话');
+  await app.start('松开发送');
   const signal = (app.api.transcribe.mock.calls as unknown as [string, AbortSignal][])[0][1];
   const oldCancel = app.tree().root.findAll(n =>
     n.props.accessibilityLabel === '取消语音转写' && typeof n.props.onPress === 'function')[0].props.onPress;
@@ -279,7 +284,7 @@ test('a retained ASR continues once through history/back and appends to the curr
   expect(signal.aborted).toBe(false);
   await app.back();
   expect(app.text()).toContain('正在转成文字');
-  expect(app.buttonLabels()).not.toContain('重试转写');
+  expect(app.buttonLabels()).not.toContain('重试识别并发送');
   expect(app.api.transcribe).toHaveBeenCalledTimes(1);
   await act(async () => oldCancel());
   expect(signal.aborted).toBe(false);
@@ -287,7 +292,7 @@ test('a retained ASR continues once through history/back and appends to the curr
   await app.input('Edited after returning');
   await act(async () => pending.resolve({ text: 'Single authorized response' }));
   expect(app.value()).toBe('Edited after returning\nSingle authorized response');
-  expect(app.buttonLabels()).not.toContain('重试转写');
+  expect(app.buttonLabels()).not.toContain('重试识别并发送');
   expect(app.api.deleteUpload).toHaveBeenCalledWith('voice-upload');
   expect(app.api.transcribe).toHaveBeenCalledTimes(1);
   expect(app.api.upload).toHaveBeenCalledTimes(1);
@@ -301,20 +306,21 @@ test('an aborted earlier ASR cannot delete the upload or replace a newer retry p
   app.api.transcribe.mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
   app.api.upload.mockResolvedValueOnce({ id: 'old-upload', name: 'old.m4a' })
     .mockResolvedValueOnce({ id: 'new-upload', name: 'new.m4a' });
-  await app.press('开始录音');
-  await app.start('结束录音');
+  await app.press('按住说话');
+  await app.start('松开发送');
   await app.history();
   await app.back();
   await app.press('取消语音转写');
-  await app.press('开始录音');
-  await app.start('结束录音');
+  await app.press('按住说话');
+  await app.start('松开发送');
   expect(app.text()).toContain('正在转成文字');
   await act(async () => old.resolve({ text: 'Old response' }));
   expect(app.value()).toBe('');
   expect(app.text()).toContain('正在转成文字');
   expect(app.api.deleteUpload).not.toHaveBeenCalledWith('new-upload');
   await act(async () => fresh.resolve({ text: 'Fresh response' }));
-  expect(app.value()).toBe('Fresh response');
+  expect(app.value()).toBe('');
+  expect(app.api.chat).toHaveBeenCalledWith('Fresh response', undefined, expect.any(String), []);
   expect(app.api.upload).toHaveBeenCalledTimes(2);
   expect(app.api.deleteUpload).toHaveBeenCalledWith('new-upload');
   await app.unmount();
@@ -324,13 +330,13 @@ test('an upload already in progress finishes into its retained recording without
   const app = await setup();
   const old = deferred<{ id: string; name: string }>();
   app.api.upload.mockReturnValueOnce(old.promise);
-  await app.press('开始录音');
-  await app.start('结束录音');
+  await app.press('按住说话');
+  await app.start('松开发送');
   const signal = (app.api.upload.mock.calls as unknown as [unknown, AbortSignal][])[0][1];
   await app.history();
   await app.back();
   expect(signal.aborted).toBe(false);
-  expect(app.buttonLabels()).not.toContain('重试转写');
+  expect(app.buttonLabels()).not.toContain('重试识别并发送');
   expect(app.api.transcribe).not.toHaveBeenCalled();
   await act(async () => old.resolve({ id: 'orphan-old-upload', name: 'voice.m4a' }));
   expect(app.api.deleteUpload).toHaveBeenCalledWith('orphan-old-upload');
@@ -342,8 +348,8 @@ test('an upload already in progress finishes into its retained recording without
 test('recognized text that exceeds draft capacity survives navigation and inserts without another ASR', async () => {
   const app = await setup();
   await app.input('字'.repeat(19990));
-  await app.press('开始录音');
-  await app.press('结束录音');
+  await app.press('按住说话');
+  await app.press('松开发送');
   expect(app.buttonLabels()).toContain('填入文字');
   await app.history();
   await app.back();
@@ -369,19 +375,20 @@ test('cancelling a restored voice clears its phase and late ASR cannot revive it
   const app = await setup();
   const old = deferred<{ text: string }>();
   app.api.transcribe.mockReturnValueOnce(old.promise);
-  await app.press('开始录音');
-  await app.start('结束录音');
+  await app.press('按住说话');
+  await app.start('松开发送');
   await app.history();
   await app.back();
   await app.press('取消语音转写');
   await act(async () => old.resolve({ text: 'Cancelled old text' }));
   expect(app.value()).toBe('');
-  expect(app.buttonLabels()).not.toContain('重试转写');
+  expect(app.buttonLabels()).not.toContain('重试识别并发送');
   expect(app.text()).not.toContain('转写已暂停');
   expect(app.api.deleteUpload).toHaveBeenCalledWith('voice-upload');
-  await app.press('开始录音');
-  await app.press('结束录音');
-  expect(app.value()).toBe('明天下午提醒我开会。');
+  await app.press('按住说话');
+  await app.press('松开发送');
+  expect(app.value()).toBe('');
+  expect(app.api.chat).toHaveBeenCalledTimes(1);
   expect(app.text()).not.toContain('Cancelled old text');
   await app.unmount();
 });
@@ -392,8 +399,8 @@ test.each(['pop', 'reset', 'owner'] as const)(
     const app = await setup();
     const old = deferred<{ text: string }>();
     app.api.transcribe.mockReturnValueOnce(old.promise);
-    await app.press('开始录音');
-    await app.start('结束录音');
+    await app.press('按住说话');
+    await app.start('松开发送');
     if (reason === 'pop') {
       await app.back();
       await app.anotherChat();
@@ -402,7 +409,7 @@ test.each(['pop', 'reset', 'owner'] as const)(
     await app.input('New draft');
     await act(async () => old.resolve({ text: 'Previous owner text' }));
     expect(app.value()).toBe('New draft');
-    expect(app.buttonLabels()).not.toContain('重试转写');
+    expect(app.buttonLabels()).not.toContain('重试识别并发送');
     expect(app.text()).not.toContain('Previous owner text');
     expect(app.api.deleteUpload).toHaveBeenCalledWith('voice-upload');
     await app.unmount();
@@ -412,17 +419,17 @@ test.each(['pop', 'reset', 'owner'] as const)(
 test('a different chat does not inherit the recording and active recording still stops on navigation', async () => {
   const app = await setup();
   app.api.transcribe.mockRejectedValueOnce(new Error('Retain this voice'));
-  await app.press('开始录音');
-  await app.press('结束录音');
+  await app.press('按住说话');
+  await app.press('松开发送');
   await app.history();
   await app.anotherChat();
-  expect(app.buttonLabels()).not.toContain('重试转写');
-  await app.press('开始录音');
+  expect(app.buttonLabels()).not.toContain('重试识别并发送');
+  await app.press('按住说话');
   const stopped = (platform.stopRecording as jest.Mock).mock.calls.length;
   await app.back();
   expect(platform.stopRecording).toHaveBeenCalledTimes(stopped + 1);
   await app.back();
-  expect(app.buttonLabels()).toContain('重试转写');
+  expect(app.buttonLabels()).toContain('重试识别并发送');
   expect(app.api.transcribe).toHaveBeenCalledTimes(1);
   await app.unmount();
 });
@@ -431,13 +438,13 @@ test('a retained ASR can complete while history is visible and returns its final
   const app = await setup();
   const pending = deferred<{ text: string }>();
   app.api.transcribe.mockReturnValueOnce(pending.promise);
-  await app.press('开始录音');
-  await app.start('结束录音');
+  await app.press('按住说话');
+  await app.start('松开发送');
   await app.history();
   await act(async () => pending.resolve({ text: 'Completed while hidden' }));
   await app.back();
   expect(app.value()).toBe('Completed while hidden');
-  expect(app.buttonLabels()).not.toContain('重试转写');
+  expect(app.buttonLabels()).not.toContain('重试识别并发送');
   expect(app.api.transcribe).toHaveBeenCalledTimes(1);
   await app.unmount();
 });
@@ -446,8 +453,8 @@ test('a pending ASR checks the latest returned draft capacity and preserves over
   const app = await setup();
   const pending = deferred<{ text: string }>();
   app.api.transcribe.mockReturnValueOnce(pending.promise);
-  await app.press('开始录音');
-  await app.start('结束录音');
+  await app.press('按住说话');
+  await app.start('松开发送');
   await app.history();
   await app.back();
   await app.input('字'.repeat(19999));
@@ -467,8 +474,8 @@ test.each(['reset', 'owner'] as const)(
     const app = await setup();
     const pending = deferred<{ text: string }>();
     app.api.transcribe.mockReturnValueOnce(pending.promise);
-    await app.press('开始录音');
-    await app.start('结束录音');
+    await app.press('按住说话');
+    await app.start('松开发送');
     const signal = (app.api.transcribe.mock.calls as unknown as [string, AbortSignal][])[0][1];
     await app.history();
     expect(signal.aborted).toBe(false);

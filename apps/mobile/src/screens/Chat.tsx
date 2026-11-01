@@ -632,7 +632,8 @@ export function ChatScreen({
   };
   const beginHold = (pageY?: number) => {
     if (activeRecorder || !holdOwner.active || recordingRef.current || (holdOwner.gesture && !holdOwner.gesture.ended) ||
-        currentShareOwner.current !== shareOwner || fileActionRef.current.busy ||
+        currentShareOwner.current !== shareOwner || fileActionRef.current.busy || deletingRef.current ||
+        (state.scope && !state.scope.isRetained()) ||
         state.getSnapshot().sending || state.getSnapshot().voice || awaitingInitialConversation()) return;
     const lease = {}; activeRecorder = lease; recorderLease.current = lease;
     const gesture: HoldRecording = { held: true, cancelled: false, started: false, ended: false, lease, startY: pageY,
@@ -669,6 +670,14 @@ export function ChatScreen({
     gesture.held = false; gesture.cancelled = gesture.cancelled || cancel || !gesture.started;
     setHoldActive(false);
     if (gesture.started) void endHold(gesture).catch(reportVoiceFailure);
+  };
+  const activateHold = () => {
+    if (!mounted.current || !holdOwner.active || currentShareOwner.current !== shareOwner ||
+      voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
+      (state.scope && !state.scope.isRetained())) return;
+    const gesture = holdOwner.gesture;
+    if (gesture?.held && !gesture.ended) releaseHold();
+    else beginHold();
   };
   useEffect(() => {
     const subscription = AppState?.addEventListener('change', next => {
@@ -1252,7 +1261,13 @@ export function ChatScreen({
               voiceMode && chat.hiddenInput,
             ]}
           />
-          {voiceMode && <View testID="chat-hold-to-talk" accessible={false}
+          {voiceMode && <View testID="chat-hold-to-talk" accessible accessibilityRole="button"
+            accessibilityLabel={holdActive ? '松开发送' : '按住说话'}
+            accessibilityHint={holdActive ? '再次激活结束录音并发送；也可以上滑取消。' : '按住说话，松开发送。屏幕阅读用户可激活开始，再次激活结束并发送。'}
+            accessibilityState={{ disabled: fileAction.busy || sending || Boolean(voice) || deleting || (captureBusy && !holdActive) }}
+            accessibilityActions={[{ name: 'activate', label: holdActive ? '结束录音并发送' : '开始录音' }]}
+            onAccessibilityTap={activateHold}
+            onAccessibilityAction={event => { if (event.nativeEvent.actionName === 'activate') activateHold(); }}
             style={[chat.holdButton, holdActive && chat.holdPressed, holdActive && holdCancelled && chat.recordingCancelled]}
             onStartShouldSetResponder={() => !fileAction.busy && !sending && !voice && !deleting}
             onResponderGrant={event => beginHold(event?.nativeEvent?.pageY)}
@@ -1290,43 +1305,6 @@ export function ChatScreen({
               >
                 <Icon name="plus" size={23} color={appearance.secondary} />
               </Pressable>
-              {voiceMode && <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={recording ? '结束录音' : '开始录音'}
-                style={[
-                  chat.toolButton,
-                  recording && chat.recordingTool,
-                  (fileAction.busy || sending) && s.disabled,
-                ]}
-                disabled={fileAction.busy || sending || Boolean(voice) || captureBusy || deleting}
-                onPress={() =>
-                  fileAction.run(async ({ isCurrent }) => {
-                    if (recording) {
-                      await finishRecording();
-                    } else {
-                      if (activeRecorder) throw new Error('上一段录音尚未结束，请稍后重试。');
-                      const lease = {}; activeRecorder = lease; recorderLease.current = lease;
-                      try {
-                        await platform.startRecording();
-                        if (!isCurrent()) {
-                          await stopRecorder(lease); releaseRecorder(lease);
-                          return;
-                        }
-                        recordingRef.current = true;
-                        setSeconds(0); setRecording(true);
-                      } catch (failure) {
-                        releaseRecorder(lease); throw failure;
-                      }
-                    }
-                  })
-                }
-              >
-                {recording ? (
-                  <View style={chat.stopSymbol} />
-                ) : (
-                  <Icon name="mic" size={21} color={appearance.secondary} />
-                )}
-              </Pressable>}
             </View>
             {!voiceMode && <Pressable
               accessibilityRole="button"

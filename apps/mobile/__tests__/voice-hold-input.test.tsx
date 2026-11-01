@@ -94,7 +94,7 @@ async function setup() {
     tree.root.findAll(
       n =>
         n.props.accessibilityLabel === label &&
-        typeof n.props.onPress === 'function',
+        (typeof n.props.onPress === 'function' || typeof n.props.onAccessibilityAction === 'function'),
     )[0];
   return {
     api,
@@ -112,16 +112,20 @@ async function setup() {
       );
     },
     press: async (label: string) => {
-      if (label === '开始录音' && !node(label)) {
+      if (label === '按住说话' && !node(label)) {
         await act(async () => node('切换语音输入').props.onPress());
       }
       await act(async () => {
-        await node(label).props.onPress();
+        const control = node(label);
+        if (control.props.onAccessibilityAction) control.props.onAccessibilityAction({ nativeEvent: { actionName: 'activate' } });
+        else await control.props.onPress();
       });
     },
     start: async (label: string) => {
       await act(async () => {
-        void node(label).props.onPress();
+        const control = node(label);
+        if (control.props.onAccessibilityAction) control.props.onAccessibilityAction({ nativeEvent: { actionName: 'activate' } });
+        else void control.props.onPress();
       });
     },
     button: async (label: string) => {
@@ -171,6 +175,26 @@ test('hold release transcribes once and automatically sends its text once', asyn
   expect(app.api.chat).toHaveBeenCalledTimes(1);
   expect(app.api.chat).toHaveBeenCalledWith('明天下午提醒我开会。', undefined, expect.any(String), []);
   expect(app.text()).not.toContain('voice.m4a'); await app.unmount();
+});
+
+test('voice mode has one accessible central control and no legacy recorder or send buttons', async () => {
+  const app = await setup(); await app.press('切换语音输入');
+  let control = gestureNode(app);
+  expect(control.props.accessible).toBe(true);
+  expect(control.props.accessibilityRole).toBe('button');
+  expect(control.props.accessibilityLabel).toBe('按住说话');
+  for (const label of ['开始录音', '结束录音', '发送消息']) {
+    expect(app.tree().root.findAll(node => node.props.accessibilityLabel === label)).toHaveLength(0);
+  }
+  await act(async () => control.props.onAccessibilityTap());
+  control = gestureNode(app);
+  expect(control.props.accessibilityLabel).toBe('松开发送');
+  expect(platform.startRecording).toHaveBeenCalledTimes(1);
+  await act(async () => control.props.onAccessibilityTap());
+  expect(platform.stopRecording).toHaveBeenCalledTimes(1);
+  expect(app.api.transcribe).toHaveBeenCalledTimes(1); expect(app.api.chat).toHaveBeenCalledTimes(1);
+  expect(app.value()).toBe(''); expect(app.text()).not.toContain('voice.m4a');
+  await app.unmount();
 });
 
 test('a selected image uses the prepared local analysis copy while voice sends only text plus image ID', async () => {
@@ -422,9 +446,9 @@ test('pending native start stays mutually exclusive after early touch release', 
   (platform.startRecording as jest.Mock).mockImplementationOnce(() => new Promise<void>(r => { resolve=r; }));
   const app = await setup(); await hold(app);
   await act(async () => gestureNode(app).props.onResponderRelease());
-  const button=app.tree().root.findAll(n => n.props.accessibilityLabel === '开始录音' && typeof n.props.onPress === 'function')[0];
-  expect(button.props.disabled).toBe(true);
-  await act(async () => { button.props.onPress(); gestureNode(app).props.onResponderGrant(event(200)); });
+  const button=gestureNode(app);
+  expect(button.props.accessibilityState.disabled).toBe(true);
+  await act(async () => { button.props.onAccessibilityAction({ nativeEvent: { actionName: 'activate' } }); gestureNode(app).props.onResponderGrant(event(200)); });
   expect(platform.startRecording).toHaveBeenCalledTimes(1);
   await act(async () => resolve());
   expect(platform.stopRecording).toHaveBeenCalledTimes(1); expect(app.api.transcribe).not.toHaveBeenCalled(); await app.unmount();
@@ -485,7 +509,7 @@ test('API owner replacement on the same Chat component resets capture UI and can
   const node = (label: string) => tree.root.findAll(n => n.props.accessibilityLabel === label && typeof n.props.onPress === 'function')[0];
   const touch = () => tree.root.findAll(n => n.props.testID === 'chat-hold-to-talk' && typeof n.props.onResponderGrant === 'function')[0];
   await act(async () => node('切换语音输入').props.onPress());
-  await act(async () => node('开始录音').props.onPress());
+  await act(async () => touch().props.onAccessibilityAction({ nativeEvent: { actionName: 'activate' } }));
   await act(async () => tree.update(content({ ...api })));
   expect(platform.stopRecording).toHaveBeenCalledTimes(1);
   await act(async () => touch().props.onResponderGrant(event(200)));
@@ -516,19 +540,19 @@ test('voice mode blurs and dismisses the keyboard; returning to text focuses the
   blur.mockRestore(); focus.mockRestore(); dismiss.mockRestore();
 });
 
-test('cancelled hold cannot label a later accessible tap recording as cancelled', async () => {
+test('cancelled hold cannot label a later accessible activation as cancelled and the central control still sends', async () => {
   const app = await setup(); await hold(app);
   await act(async () => gestureNode(app).props.onResponderMove(event(100)));
   expect(app.tree().root.findByType(ChatVoiceOverlay).props.cancelled).toBe(true);
   await act(async () => gestureNode(app).props.onResponderRelease());
   expect(app.api.upload).not.toHaveBeenCalled(); expect(app.api.transcribe).not.toHaveBeenCalled();
-  await app.press('开始录音');
+  await app.press('按住说话');
   expect(app.tree().root.findByType(ChatVoiceOverlay).props.cancelled).toBe(false);
   expect(app.text()).toContain('正在聆听'); expect(app.text()).not.toContain('这段录音不会发送');
-  expect(app.text()).toContain('点击结束转文字'); expect(app.text()).not.toContain('松开发送，上滑取消');
-  await app.press('结束录音');
+  expect(app.text()).toContain('松开发送，上滑取消'); expect(app.text()).not.toContain('点击结束转文字');
+  await app.press('松开发送');
   expect(platform.stopRecording).toHaveBeenCalledTimes(2);
   expect(app.api.upload).toHaveBeenCalledTimes(1); expect(app.api.transcribe).toHaveBeenCalledTimes(1);
-  expect(app.value()).toBe('明天下午提醒我开会。'); expect(app.api.chat).not.toHaveBeenCalled();
+  expect(app.value()).toBe(''); expect(app.api.chat).toHaveBeenCalledTimes(1);
   await app.unmount();
 });
