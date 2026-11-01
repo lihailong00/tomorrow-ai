@@ -99,6 +99,15 @@ export function createMessageHistory() {
       load(api, id, apply, canApply, false),
     older: (api: ApiClient, id: string | undefined, apply: (items: Message[]) => void, canApply: () => boolean) =>
       load(api, id, apply, canApply, true),
+    // Editing/deleting can invalidate a saved before-ID. Cancel the old page
+    // generation and rebuild its boundary from a new latest page; the caller
+    // still owns and merges all previously loaded messages.
+    restart: (api: ApiClient, id: string | undefined, apply: (items: Message[]) => void, canApply: () => boolean) => {
+      generation += 1;
+      owner = undefined;
+      update({ initialized: false, loading: false, error: null, nextOffset: null, nextBefore: null });
+      return load(api, id, apply, canApply, false);
+    },
     dispose: () => {
       generation += 1;
       owner = undefined;

@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod auth;
 pub mod chat_stream;
+pub mod chat_messages;
 pub mod dto;
 pub mod knowledge;
 pub mod model;

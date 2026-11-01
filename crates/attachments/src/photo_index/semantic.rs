@@ -24,7 +24,7 @@ impl Config {
         if !["http", "https"].contains(&url.scheme()) || url.host_str().is_none() { return None; }
         Some(url.origin().ascii_serialization())
     }
-    pub(super) fn identity(&self, protocol: &str) -> String {
+    pub(crate) fn identity(&self, protocol: &str) -> String {
         // Credentials may select a tenant/deployment behind the same endpoint.
         // Rotate conservatively into a new vector space; never persist the key.
         let bytes = serde_json::to_vec(&(protocol, self.destination(), &self.model,

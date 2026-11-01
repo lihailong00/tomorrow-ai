@@ -6,6 +6,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaRecorder
@@ -208,6 +210,51 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
         type = "text/plain"; putExtra(Intent.EXTRA_TEXT, text)
       }, "分享自 妥啦")); promise.resolve(null)
     } catch (error: Exception) { promise.reject("E_SHARE", error.message, error) }
+  }
+
+  @ReactMethod fun copyText(text: String, promise: Promise) = onUi {
+    try {
+      val activity = context.currentActivity ?: error("请在应用前台重试")
+      val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+      clipboard.setPrimaryClip(ClipData.newPlainText("妥啦消息", text))
+      promise.resolve(null)
+    } catch (error: Exception) { promise.reject("E_CLIPBOARD", "复制失败，请使用选取文字重试", error) }
+  }
+
+  @ReactMethod fun prepareChatImage(uri: String, mimeType: String, name: String, promise: Promise) {
+    Thread {
+      var preparedFile: File? = null
+      try {
+        val sourceUri = Uri.parse(uri)
+        require(sourceUri.scheme == "file") { "请重新选择图片" }
+        val sourceFile = File(sourceUri.path ?: error("图片无法读取")).canonicalFile
+        require(sourceFile.parentFile == attachmentDir.canonicalFile && sourceFile.isFile) { "请重新选择图片" }
+        require(mimeType.equals("image/jpeg", true) || mimeType.equals("image/png", true)) { "请选择 JPEG 或 PNG 图片" }
+        // Older Android builds keep the bounded original. The server still
+        // validates the image before inference; current Android uses a copy.
+        if (Build.VERSION.SDK_INT < 28) {
+          require(sourceFile.length() <= 4L * 1024L * 1024L) { "请选择 4 MB 以内的图片" }
+          promise.resolve(Arguments.createMap().apply {
+            putString("uri", sourceUri.toString()); putString("name", name)
+            putString("mime_type", mimeType.lowercase()); putDouble("size", sourceFile.length().toDouble())
+          })
+          return@Thread
+        }
+        val copy = PhotoAnalysisImage.create(context, sourceUri, mimeType.lowercase())
+        val suffix = if (copy.mime == "image/png") ".png" else ".jpg"
+        val output = File(attachmentDir, "chat-image-${UUID.randomUUID()}$suffix")
+        preparedFile = output
+        output.writeBytes(copy.bytes)
+        val safeName = File(name).name.substringBeforeLast('.', "image").take(100).ifBlank { "image" } + suffix
+        promise.resolve(Arguments.createMap().apply {
+          putString("uri", Uri.fromFile(output).toString()); putString("name", safeName)
+          putString("mime_type", copy.mime); putDouble("size", output.length().toDouble())
+        })
+      } catch (error: Exception) {
+        preparedFile?.delete()
+        promise.reject("E_IMAGE_PREPARE", "图片准备失败，请选择清晰的 JPEG 或 PNG 图片后重试。原图片未修改。", error)
+      }
+    }.start()
   }
 
   private fun notificationPermissionState(): String {

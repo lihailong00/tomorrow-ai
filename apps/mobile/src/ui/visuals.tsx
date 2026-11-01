@@ -46,6 +46,13 @@ const paths = {
   search: 'M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0Zm-2 4 6 6',
   menu: 'M4 6h16M4 12h11M4 18h16',
   more: 'M5 12h.1M12 12h.1M19 12h.1',
+  copy: 'M9 8h11v13H9V8ZM5 16H3V3h12v2',
+  edit: 'm15 4 5 5M4 20l4-1L21 6a2.1 2.1 0 0 0-3-3L5 16l-1 4Zm0 0h15',
+  quote: 'M4 7h6v7H6c0 3-1 5-3 6M14 7h6v7h-4c0 3-1 5-3 6',
+  select: 'M4 7V4h3m10 0h3v3M4 17v3h3m10 0h3v-3M8 8h8m-4 0v8m-3 0h6',
+  share: 'm14 3 7 6-7 6V11c-6 0-9 3-11 8 0-9 4-13 11-13V3Z',
+  chevronDown: 'm5 9 7 7 7-7',
+  delete: 'M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7',
 } as const;
 
 export type IconName = keyof typeof paths;

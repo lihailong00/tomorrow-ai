@@ -12,6 +12,8 @@ import { Button } from '../src/ui/components';
 jest.mock('../src/platform/ports', () => ({
   platform: {
     hasRecorder: true,
+    pickDocument: jest.fn().mockResolvedValue({ uri: 'file:///receipt.png', name: 'receipt.png', mime_type: 'image/png', size: 128 }),
+    prepareChatImage: jest.fn(async (file: any) => file),
     startRecording: jest.fn().mockResolvedValue(undefined),
     stopRecording: jest
       .fn()
@@ -50,6 +52,7 @@ async function setup() {
       .fn()
       .mockResolvedValue({ id: 'voice-upload', name: 'voice.m4a' }),
     transcribe: jest.fn().mockResolvedValue({ text: '明天下午提醒我开会。' }),
+    analyzeImage: jest.fn().mockResolvedValue({ upload_id: 'image-upload', text: '一张测试收据', model: 'synthetic-vision' }),
     deleteUpload: jest.fn().mockResolvedValue({ ok: true }),
     chat: jest
       .fn()
@@ -65,6 +68,7 @@ async function setup() {
   };
   addChatStreamMock(api);
   let navigation!: ReturnType<typeof useRouteStack>;
+  let chatState!: ReturnType<typeof createChatEntryState>;
   function Harness({ client }: { client: typeof api }) {
     navigation = useRouteStack(client);
     const route = navigation.entry.route;
@@ -74,7 +78,7 @@ async function setup() {
           {route.name === 'chat' ? <ChatScreen
             conversationId={route.conversationId}
             prompt={route.prompt}
-            entryState={navigation.getEntryState(scope =>
+            entryState={chatState = navigation.getEntryState(scope =>
               createChatEntryState(route.conversationId, route.prompt, scope))}
           /> : <Text>{route.name}</Text>}
         </React.Fragment>
@@ -94,6 +98,7 @@ async function setup() {
     )[0];
   return {
     api,
+    state: () => chatState,
     tree: () => tree,
     value: () => tree.root.findByType(TextInput).props.value,
     text: () =>
@@ -156,17 +161,204 @@ async function hold(app: Awaited<ReturnType<typeof setup>>) {
   await act(async () => gestureNode(app).props.onResponderGrant(event(200)));
 }
 
-test('hold release transcribes once to a draft and never auto-sends', async () => {
+test('hold release transcribes once and automatically sends its text once', async () => {
   const app = await setup(); await hold(app);
   await act(async () => { gestureNode(app).props.onResponderRelease(); });
   expect(platform.startRecording).toHaveBeenCalledTimes(1);
   expect(platform.stopRecording).toHaveBeenCalledTimes(1);
   expect(app.api.transcribe).toHaveBeenCalledTimes(1);
-  expect(app.value()).toBe('明天下午提醒我开会。');
-  expect(app.api.chat).not.toHaveBeenCalled(); await app.unmount();
+  expect(app.value()).toBe('');
+  expect(app.api.chat).toHaveBeenCalledTimes(1);
+  expect(app.api.chat).toHaveBeenCalledWith('明天下午提醒我开会。', undefined, expect.any(String), []);
+  expect(app.text()).not.toContain('voice.m4a'); await app.unmount();
 });
 
-test('release before native permission/start resolves still stops and transcribes only once', async () => {
+test('a selected image uses the prepared local analysis copy while voice sends only text plus image ID', async () => {
+  const app = await setup();
+  const prepared = { uri: 'file:///prepared.jpg', name: 'prepared.jpg', mime_type: 'image/jpeg', size: 64 };
+  (platform.prepareChatImage as jest.Mock).mockResolvedValueOnce(prepared);
+  app.api.upload.mockImplementation(async (file: any) => ({ id: file.mime_type.startsWith('image/') ? 'image-upload' : 'voice-upload', name: file.name }));
+  await app.press('选择附件'); await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  expect(platform.prepareChatImage).toHaveBeenCalledTimes(1);
+  expect(app.api.upload).toHaveBeenCalledWith(prepared, expect.any(AbortSignal));
+  expect(app.api.chat).toHaveBeenCalledWith('明天下午提醒我开会。', undefined, expect.any(String), ['image-upload']);
+  await app.unmount();
+});
+
+test('removing the image during native preparation prevents its late upload and any partial auto-send', async () => {
+  const app = await setup(); let finish!: (file: any) => void;
+  (platform.prepareChatImage as jest.Mock).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  await app.press('选择附件'); await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  await app.press('移除附件');
+  await act(async () => finish({ uri: 'file:///late.jpg', name: 'late.jpg', mime_type: 'image/jpeg', size: 64 }));
+  expect(app.api.upload.mock.calls.every(([file]: any[]) => !file.mime_type.startsWith('image/'))).toBe(true);
+  expect(app.api.chat).not.toHaveBeenCalled(); expect(app.value()).toContain('明天下午提醒我开会。'); await app.unmount();
+});
+
+test('an image picked before speech is prepared and sent with the recognized question, never the audio ID', async () => {
+  const app = await setup();
+  app.api.upload.mockImplementation(async (file: any) => ({ id: file.mime_type.startsWith('image/') ? 'image-upload' : 'voice-upload', name: file.name }));
+  await app.input('请看这张图。');
+  await app.press('选择附件');
+  await hold(app);
+  await act(async () => { gestureNode(app).props.onResponderRelease(); });
+  expect(app.api.chat).toHaveBeenCalledTimes(1);
+  expect(app.api.chat).toHaveBeenCalledWith('请看这张图。\n明天下午提醒我开会。', undefined, expect.any(String), ['image-upload']);
+  expect(app.api.upload).toHaveBeenCalledTimes(2);
+  expect(app.value()).toBe('');
+  await app.unmount();
+});
+
+const useImageUploads = (app: Awaited<ReturnType<typeof setup>>) => app.api.upload.mockImplementation(async (file: any) =>
+  ({ id: file.mime_type.startsWith('image/') ? 'image-upload' : 'voice-upload', name: file.name }));
+
+test('sending a picture and then a new voice turn keeps audio out of both immutable chat intents', async () => {
+  const app = await setup(); useImageUploads(app);
+  await app.press('选择附件');
+  await app.press('发送消息');
+  expect(app.api.chat).toHaveBeenNthCalledWith(1, '请描述这张图片的内容。', undefined, expect.any(String), ['image-upload']);
+  expect(app.api.analyzeImage).toHaveBeenCalledTimes(1);
+  await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  expect(app.api.chat).toHaveBeenNthCalledWith(2, '明天下午提醒我开会。', 'c', expect.any(String), []);
+  expect(app.api.chat).toHaveBeenCalledTimes(2);
+  expect(app.api.upload).toHaveBeenCalledTimes(2);
+  expect(app.api.transcribe).toHaveBeenCalledTimes(1);
+  expect(app.text()).not.toContain('voice.m4a');
+  await app.unmount();
+});
+
+test('an already uploaded picture still needs image analysis, never audio transcription of the picture', async () => {
+  const app = await setup(); useImageUploads(app);
+  await app.press('选择附件');
+  await act(async () => app.state().update(old => ({ ...old, attachment: old.attachment && {
+    ...old.attachment, upload: { id: 'image-upload', name: 'receipt.png', mime_type: 'image/png', size: 128, uri: '', created_at: '' },
+  } })));
+  await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  expect(app.api.upload).toHaveBeenCalledTimes(1);
+  expect(app.api.analyzeImage).toHaveBeenCalledWith('image-upload', expect.anything());
+  expect(app.api.transcribe).toHaveBeenCalledWith('voice-upload', expect.anything());
+  expect(app.api.chat).toHaveBeenCalledWith('明天下午提醒我开会。', undefined, expect.any(String), ['image-upload']);
+  await app.unmount();
+});
+
+test('ASR failure keeps the picture and typed draft; explicit retry reuses recording upload and sends once', async () => {
+  const app = await setup(); useImageUploads(app);
+  app.api.transcribe.mockRejectedValueOnce(new Error('ASR unavailable'));
+  await app.input('已有文字'); await app.press('选择附件'); await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  expect(app.api.chat).not.toHaveBeenCalled(); expect(app.api.analyzeImage).not.toHaveBeenCalled();
+  expect(app.value()).toBe('已有文字'); expect(app.state().getSnapshot().attachment?.file.name).toBe('receipt.png');
+  expect(app.text()).toContain('ASR unavailable'); expect(app.text()).not.toContain('voice.m4a');
+  await app.button('重试识别并发送');
+  expect(app.api.upload).toHaveBeenCalledTimes(2); expect(app.api.transcribe).toHaveBeenCalledTimes(2);
+  expect(app.api.chat).toHaveBeenCalledTimes(1);
+  expect(app.api.chat).toHaveBeenCalledWith('已有文字\n明天下午提醒我开会。', undefined, expect.any(String), ['image-upload']);
+  await app.unmount();
+});
+
+test('image analysis failure preserves recognized speech; retry reuses both uploads and does not pay for another ASR', async () => {
+  const app = await setup(); useImageUploads(app);
+  app.api.analyzeImage.mockRejectedValueOnce(new Error('Vision unavailable'));
+  await app.input('已有文字'); await app.press('选择附件'); await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  expect(app.api.chat).not.toHaveBeenCalled(); expect(app.value()).toBe('已有文字');
+  expect(app.text()).toContain('已识别：'); expect(app.text()).toContain('明天下午提醒我开会。');
+  expect(app.state().getSnapshot().attachment?.upload?.id).toBe('image-upload');
+  await app.button('重试发送');
+  expect(app.api.upload).toHaveBeenCalledTimes(2); expect(app.api.transcribe).toHaveBeenCalledTimes(1);
+  expect(app.api.analyzeImage).toHaveBeenCalledTimes(2); expect(app.api.chat).toHaveBeenCalledTimes(1);
+  expect(app.api.chat).toHaveBeenCalledWith('已有文字\n明天下午提醒我开会。', undefined, expect.any(String), ['image-upload']);
+  await app.unmount();
+});
+
+test('image upload failure keeps the successful ASR and retries only the missing picture upload', async () => {
+  const app = await setup(); useImageUploads(app);
+  app.api.upload.mockResolvedValueOnce({ id: 'voice-upload', name: 'voice.m4a' }).mockRejectedValueOnce(new Error('Picture upload failed'));
+  await app.press('选择附件'); await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  expect(app.api.chat).not.toHaveBeenCalled(); expect(app.text()).toContain('Picture upload failed');
+  await app.button('重试发送');
+  expect(app.api.upload).toHaveBeenCalledTimes(3); expect(app.api.transcribe).toHaveBeenCalledTimes(1);
+  expect(app.api.chat).toHaveBeenCalledTimes(1); await app.unmount();
+});
+
+test('a changed draft during recognition retains both texts instead of automatically sending the edited draft', async () => {
+  const app = await setup(); let resolve!: (value: { text: string }) => void;
+  app.api.transcribe.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+  await app.input('Original'); await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  await app.input('User edited');
+  await act(async () => resolve({ text: 'Recognized speech' }));
+  expect(app.api.chat).not.toHaveBeenCalled(); expect(app.value()).toBe('User edited\nRecognized speech');
+  expect(app.text()).toContain('输入内容已变化'); await app.unmount();
+});
+
+test('removing the image during analysis never sends the picture or silently sends speech without it', async () => {
+  const app = await setup(); useImageUploads(app); let resolve!: (value: any) => void;
+  app.api.analyzeImage.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+  await app.press('选择附件'); await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  await app.press('移除附件');
+  await act(async () => resolve({ text: 'Late image result' }));
+  expect(app.api.chat).not.toHaveBeenCalled(); expect(app.value()).toBe('明天下午提醒我开会。');
+  expect(app.state().getSnapshot().attachment).toBeNull(); await app.unmount();
+});
+
+test('a retained hold ASR completing in history becomes a draft and never sends from the detached view', async () => {
+  const app = await setup(); let resolve!: (value: { text: string }) => void;
+  app.api.transcribe.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+  await hold(app); await act(async () => gestureNode(app).props.onResponderRelease());
+  await app.history(); await act(async () => resolve({ text: 'Speech retained offscreen' }));
+  expect(app.api.chat).not.toHaveBeenCalled();
+  await app.back(); expect(app.value()).toBe('Speech retained offscreen');
+  expect(app.api.transcribe).toHaveBeenCalledTimes(1); await app.unmount();
+});
+
+test('owner replacement during hold ASR cannot send late speech to either account', async () => {
+  const app = await setup(); let resolve!: (value: { text: string }) => void;
+  app.api.transcribe.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+  await hold(app); await act(async () => gestureNode(app).props.onResponderRelease());
+  await app.owner(); await act(async () => resolve({ text: 'Old account speech' }));
+  expect(app.api.chat).not.toHaveBeenCalled(); expect(app.text()).not.toContain('Old account speech');
+  await app.unmount();
+});
+
+test('cancel after hold release aborts recognition and cannot revive a late automatic send', async () => {
+  const app = await setup(); let resolve!: (value: { text: string }) => void;
+  app.api.transcribe.mockImplementationOnce(() => new Promise(r => { resolve = r; }));
+  await hold(app); await act(async () => gestureNode(app).props.onResponderRelease());
+  await app.press('取消语音转写');
+  expect((app.api.transcribe.mock.calls[0] as unknown as [string, AbortSignal])[1].aborted).toBe(true);
+  await act(async () => resolve({ text: 'Must not send' }));
+  expect(app.api.chat).not.toHaveBeenCalled(); expect(app.value()).toBe(''); await app.unmount();
+});
+
+test('empty speech does not send the selected image as an unintended image-only turn', async () => {
+  const app = await setup(); useImageUploads(app); app.api.transcribe.mockResolvedValueOnce({ text: '  ' });
+  await app.press('选择附件'); await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  expect(app.api.chat).not.toHaveBeenCalled(); expect(app.api.analyzeImage).not.toHaveBeenCalled();
+  expect(app.state().getSnapshot().attachment?.file.name).toBe('receipt.png');
+  expect(app.text()).toContain('未听清语音'); await app.unmount();
+});
+
+test('a failed send retries the existing chat request rather than recording or recognizing again', async () => {
+  const app = await setup(); app.api.chat.mockRejectedValueOnce(new Error('Network lost'));
+  await hold(app); await act(async () => gestureNode(app).props.onResponderRelease());
+  expect(app.api.chat).toHaveBeenCalledTimes(1); expect(app.api.transcribe).toHaveBeenCalledTimes(1);
+  const requestId = app.api.chat.mock.calls[0][2];
+  await app.button('重试');
+  expect(app.api.chat).toHaveBeenCalledTimes(2);
+  expect(app.api.chat.mock.calls[1][2]).toBe(requestId);
+  expect(app.api.upload).toHaveBeenCalledTimes(1); expect(app.api.transcribe).toHaveBeenCalledTimes(1);
+  await app.unmount();
+});
+
+test('release before native permission/start resolves stops without transcribing or sending empty audio', async () => {
   let resolve!: () => void;
   (platform.startRecording as jest.Mock).mockImplementationOnce(() => new Promise<void>(r => { resolve=r; }));
   const app = await setup(); await hold(app);
@@ -174,8 +366,9 @@ test('release before native permission/start resolves still stops and transcribe
   expect(platform.stopRecording).not.toHaveBeenCalled();
   await act(async () => resolve());
   expect(platform.stopRecording).toHaveBeenCalledTimes(1);
-  expect(app.api.transcribe).toHaveBeenCalledTimes(1);
-  expect(app.value()).toBe('明天下午提醒我开会。'); await app.unmount();
+  expect(app.api.transcribe).not.toHaveBeenCalled();
+  expect(app.api.chat).not.toHaveBeenCalled();
+  expect(app.value()).toBe(''); await app.unmount();
 });
 
 test.each(['slide','touch-cancel'])('cancelled hold %s discards audio without upload or ASR', async kind => {
@@ -234,7 +427,7 @@ test('pending native start stays mutually exclusive after early touch release', 
   await act(async () => { button.props.onPress(); gestureNode(app).props.onResponderGrant(event(200)); });
   expect(platform.startRecording).toHaveBeenCalledTimes(1);
   await act(async () => resolve());
-  expect(platform.stopRecording).toHaveBeenCalledTimes(1); expect(app.api.transcribe).toHaveBeenCalledTimes(1); await app.unmount();
+  expect(platform.stopRecording).toHaveBeenCalledTimes(1); expect(app.api.transcribe).not.toHaveBeenCalled(); await app.unmount();
 });
 
 test('time limit closes the gesture once, so touch release cannot stop or upload twice', async () => {
@@ -332,7 +525,7 @@ test('cancelled hold cannot label a later accessible tap recording as cancelled'
   await app.press('开始录音');
   expect(app.tree().root.findByType(ChatVoiceOverlay).props.cancelled).toBe(false);
   expect(app.text()).toContain('正在聆听'); expect(app.text()).not.toContain('这段录音不会发送');
-  expect(app.text()).toContain('点击结束转文字'); expect(app.text()).not.toContain('松开转文字，上滑取消');
+  expect(app.text()).toContain('点击结束转文字'); expect(app.text()).not.toContain('松开发送，上滑取消');
   await app.press('结束录音');
   expect(platform.stopRecording).toHaveBeenCalledTimes(2);
   expect(app.api.upload).toHaveBeenCalledTimes(1); expect(app.api.transcribe).toHaveBeenCalledTimes(1);

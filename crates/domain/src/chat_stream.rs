@@ -57,6 +57,7 @@ impl Repository {
         let fingerprint = auth::hash_token(fingerprint);
         let token = new_id();
         let mut tx = self.pool.begin().await?;
+        crate::chat_messages::valid_request_tx(&mut tx,user_id,&key).await?;
         let inserted = sqlx::query("INSERT INTO chat_requests(request_key,user_id,created_at)VALUES($1,$2,$3)ON CONFLICT(request_key)DO NOTHING")
             .bind(&key).bind(user_id).bind(now()).execute(&mut *tx).await?.rows_affected();
         if inserted == 1 {
@@ -152,7 +153,18 @@ impl Repository {
         message_created_at: &str,
         agent_run_id: Option<&str>,
     ) -> Result<(), DomainError> {
+        self.accept_chat_stream_replacing(producer,user_id,conversation,user_message,message_id,message_created_at,agent_run_id,None).await
+    }
+
+    pub async fn accept_chat_stream_replacing(
+        &self, producer: &ChatStreamProducer, user_id: &str, conversation: &Conversation,
+        user_message: &Message, message_id: &str, message_created_at: &str,
+        agent_run_id: Option<&str>, replacement: Option<&crate::chat_messages::ChatReplacement>,
+    ) -> Result<(), DomainError> {
         let mut tx = self.pool.begin().await?;
+        crate::chat_messages::lock_conversation_tx(&mut tx,user_id,&conversation.id).await?;
+        crate::chat_messages::valid_request_tx(&mut tx,user_id,&producer.request_key).await?;
+        if let Some(replacement)=replacement {crate::chat_messages::validate_replacement_tx(&mut tx,user_id,replacement).await?;}
         // Use the callback/retry lock order: run, then stream. Enabling ordinal
         // replay must be atomic with proving that a legacy run has no old effects.
         if let Some(run) = agent_run_id {
@@ -198,13 +210,21 @@ impl Repository {
                 serde_json::to_string(user_message),
             ),
         ] {
+            // An edited stream exposes its tentative text to this subscriber, but
+            // keeps the original durable question/reply until successful commit.
+            if replacement.is_some() {continue;}
             let changed = sqlx::query("INSERT INTO resources(id,user_id,kind,body,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$5)ON CONFLICT(id)DO UPDATE SET body=$4,updated_at=$5 WHERE resources.user_id=$2 AND resources.kind=$3")
                 .bind(id).bind(user_id).bind(kind).bind(body.map_err(|_|DomainError::Internal("消息保存失败".into()))?).bind(now()).execute(&mut *tx).await?.rows_affected();
             if changed != 1 {
                 return Err(DomainError::Forbidden);
             }
         }
-        let accepted = json!({"conversation_id":conversation.id,"user_message":user_message,"message_id":message_id,"message_created_at":message_created_at,"agent_run_id":agent_run_id});
+        if let Some(replacement)=replacement {
+            sqlx::query("INSERT INTO chat_message_requests(request_key,user_id,user_message_id,revision)VALUES($1,$2,$3,$4)ON CONFLICT(request_key)DO NOTHING")
+                .bind(&producer.request_key).bind(user_id).bind(&user_message.id).bind(replacement.revision+1).execute(&mut *tx).await?;
+        }else{crate::chat_messages::track_request_tx(&mut tx,user_id,Some(&producer.request_key),user_message,message_id,0).await?;}
+        let accepted = json!({"conversation_id":conversation.id,"user_message":user_message,"message_id":message_id,"message_created_at":message_created_at,"agent_run_id":agent_run_id,
+            "replacement":replacement,"removed_message_ids":replacement.map(|r|r.removed_message_ids()).unwrap_or_default()});
         sqlx::query("UPDATE chat_streams SET accepted=$1,agent_run_id=$2 WHERE request_key=$3")
             .bind(accepted.to_string())
             .bind(agent_run_id)
@@ -270,6 +290,7 @@ impl Repository {
         user_id: &str,
         request_id: &str,
     ) -> Result<ChatStreamView, DomainError> {
+        self.ensure_chat_request_visible(user_id,request_id).await?;
         let key = crate::repository::chat_request_key(user_id, request_id)?;
         const SELECT:&str="SELECT s.sequence,s.status,s.partial,s.accepted,s.error,s.tool_status,s.attempt,s.previous_content,s.lease_until,c.response FROM chat_streams s JOIN chat_requests c ON c.request_key=s.request_key AND c.user_id=s.user_id WHERE s.request_key=$1 AND s.user_id=$2";
         let mut row = sqlx::query(SELECT)
@@ -324,6 +345,7 @@ impl Repository {
         after: i64,
         through: i64,
     ) -> Result<Vec<ChatStreamEvent>, DomainError> {
+        self.ensure_chat_request_visible(user_id,request_id).await?;
         let key = crate::repository::chat_request_key(user_id, request_id)?;
         let rows = sqlx::query("SELECT e.sequence,e.kind,e.body FROM chat_stream_events e JOIN chat_streams s ON s.request_key=e.request_key WHERE s.request_key=$1 AND s.user_id=$2 AND e.sequence>$3 AND e.sequence<=$4 ORDER BY e.sequence LIMIT 500")
             .bind(&key).bind(user_id).bind(after).bind(through).fetch_all(&self.pool).await?;

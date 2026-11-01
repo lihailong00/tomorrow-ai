@@ -1,4 +1,4 @@
-//! Authenticated local attachment storage and optional OpenAI-compatible ASR.
+//! Authenticated attachments, optional ASR and explicit uploaded-image preparation.
 //! Original names are display metadata; only server-generated UUIDs become paths.
 
 use std::{
@@ -12,6 +12,8 @@ pub mod service_probe;
 mod ai_history;
 mod office;
 mod photo_index;
+mod upload_image;
+pub use upload_image::ImageAnalysis;
 
 use axum::{
     Json, Router,
@@ -248,6 +250,7 @@ impl AttachmentsState {
         ai_history::initialize(&pool).await?;
         let photo_index = Arc::new(photo_index::initialize(&pool).await?);
         let photo_vision = Arc::new(photo_index::vision::initialize(&pool).await?);
+        upload_image::initialize(&pool).await?;
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(120))
@@ -490,7 +493,7 @@ impl AttachmentsState {
         upload_from_row(&row)
     }
 
-    /// Read genuine UTF-8, bounded DOCX/XLSX body text, or successful ASR text.
+    /// Read bounded UTF-8/Office, successful ASR, or explicitly prepared image text.
     pub async fn read_text(
         &self,
         user_id: &str,
@@ -512,6 +515,11 @@ impl AttachmentsState {
                 ));
             }
             text
+        } else if upload_image::is_image(&upload) {
+            upload_image::cached_text(self, user_id, upload_id).await?.ok_or_else(|| {
+                AttachmentError::new(StatusCode::UNPROCESSABLE_ENTITY, "image_not_analyzed",
+                    "请先分析这张图片，再与问题一起发送；可在后台配置图片理解模型")
+            })?
         } else if office::supported(&upload.name) {
             let cached: Option<String> = sqlx::query_scalar("SELECT c.text FROM upload_text_cache c JOIN uploads u ON u.id=c.upload_id WHERE u.user_id=$1 AND u.id=$2 AND c.engine='ooxml_v1'")
                 .bind(user_id).bind(upload_id).fetch_optional(&self.pool).await?;
@@ -762,6 +770,7 @@ pub fn router(state: AttachmentsState) -> Router {
         .route("/v1/uploads/{id}/download", get(download))
         .route("/v1/uploads/{id}/text", get(read_upload_text))
         .route("/v1/uploads/{id}/transcribe", post(transcribe))
+        .route("/v1/uploads/{id}/analyze", post(upload_image::analyze))
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state.clone())
         .merge(photo_index::router(state.clone()))
@@ -916,6 +925,12 @@ async fn delete_upload(
         }
     }
     let mut transaction = state.pool.begin().await?;
+    sqlx::query("UPDATE uploads SET name=name WHERE id=$1 AND user_id=$2")
+        .bind(&id).bind(&user_id).execute(&mut *transaction).await?;
+    for table in ["upload_image_jobs", "upload_image_results"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE upload_id=$1 AND user_id=$2"))
+            .bind(&id).bind(&user_id).execute(&mut *transaction).await?;
+    }
     sqlx::query("DELETE FROM upload_text_cache WHERE upload_id=$1 AND EXISTS(SELECT 1 FROM uploads WHERE id=$1 AND user_id=$2)")
         .bind(&id).bind(&user_id).execute(&mut *transaction).await?;
     sqlx::query("DELETE FROM upload_objects WHERE upload_id=$1 AND EXISTS(SELECT 1 FROM uploads WHERE id=$1 AND user_id=$2)")

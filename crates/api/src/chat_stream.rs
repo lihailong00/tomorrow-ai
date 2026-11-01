@@ -100,6 +100,8 @@ pub(super) async fn chat_stream(
                 let message = match result {
                     Ok(Ok(_)) => return,
                     Ok(Err(ApiError(DomainError::Validation(message)))) => message,
+                    Ok(Err(ApiError(DomainError::Conflict(message)))) => message,
+                    Ok(Err(ApiError(DomainError::NotFound))) => "原消息或对话已不存在，请重新打开后发送".into(),
                     Ok(Err(ApiError(DomainError::AgentReplayConflict))) => {
                         DomainError::AgentReplayConflict.to_string()
                     }
@@ -245,9 +247,11 @@ fn snapshot(view: &ChatStreamView) -> Event {
             "message_id",
             "message_created_at",
             "agent_run_id",
+            "removed_message_ids",
         ] {
             body[field] = accepted[field].clone();
         }
     }
+    if !body["removed_message_ids"].is_array() {body["removed_message_ids"]=json!([]);}
     sse("snapshot", view.sequence, body)
 }

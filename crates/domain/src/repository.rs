@@ -819,6 +819,7 @@ impl Repository {
         let key = chat_request_key(user_id, request_id)?;
         let fingerprint = auth::hash_token(input_fingerprint);
         let mut transaction = self.pool.begin().await?;
+        crate::chat_messages::valid_request_tx(&mut transaction, user_id, &key).await?;
         sqlx::query("DELETE FROM chat_requests WHERE request_key=$1 AND user_id=$2 AND response IS NULL AND created_at<$3 AND NOT EXISTS(SELECT 1 FROM chat_streams s WHERE s.request_key=chat_requests.request_key)").bind(&key).bind(user_id).bind(now()-300).execute(&mut *transaction).await?;
         let inserted=sqlx::query("INSERT INTO chat_requests(request_key,user_id,created_at)VALUES($1,$2,$3)ON CONFLICT(request_key)DO NOTHING").bind(&key).bind(user_id).bind(now()).execute(&mut *transaction).await?.rows_affected();
         if inserted > 0 {
@@ -869,6 +870,20 @@ impl Repository {
         input_fingerprint: &str,
         attempt_token: &str,
     ) -> Result<(), DomainError> {
+        self.commit_chat_turn_replacing(user_id, turn, input_fingerprint, attempt_token, None).await
+    }
+
+    pub async fn commit_chat_turn_replacing(
+        &self, user_id: &str, turn: &ChatTurn, input_fingerprint: &str,
+        attempt_token: &str, replacement: Option<&crate::chat_messages::ChatReplacement>,
+    ) -> Result<(), DomainError> {
+        if let Some(replacement)=replacement {
+            if turn.user_message.id!=replacement.original.id || turn.conversation.id!=replacement.original.conversation_id
+                || turn.user_message.conversation_id!=turn.conversation.id || turn.assistant_message.conversation_id!=turn.conversation.id
+                || turn.user_message.role!="user" || turn.assistant_message.role!="assistant" {
+                return Err(DomainError::Validation("修改消息的对应关系无效".into()));
+            }
+        }
         let mut memory = turn.memory.clone();
         if let Some(memory) = &mut memory {
             memory.content = validate_text(&memory.content, "记忆内容", 10000)?;
@@ -881,6 +896,14 @@ impl Repository {
             .map(|request_id| chat_request_key(user_id, request_id))
             .transpose()?;
         let mut transaction = self.pool.begin().await?;
+        crate::chat_messages::lock_conversation_tx(&mut transaction,user_id,&turn.conversation.id).await?;
+        let obsolete:i64=sqlx::query_scalar("SELECT COUNT(*) FROM chat_message_turns WHERE user_id=$1 AND user_message_id=$2 AND (deleted<>0 OR (revision>0 AND $3=0))")
+            .bind(user_id).bind(&turn.user_message.id).bind(if replacement.is_some(){1_i64}else{0_i64}).fetch_one(&mut *transaction).await?;
+        if obsolete>0 {return Err(DomainError::Conflict("原消息已修改或删除，请发送新消息".into()));}
+        if let Some(key)=&request_key {crate::chat_messages::valid_request_tx(&mut transaction,user_id,key).await?;}
+        if let Some(replacement)=replacement {
+            crate::chat_messages::replace_tx(&mut transaction,user_id,replacement,request_key.as_deref()).await?;
+        }
         for message in [&turn.user_message, &turn.assistant_message] {
             if message.attachments.len() > 5 {
                 return Err(DomainError::Validation("每条消息最多附带 5 个附件".into()));
@@ -907,7 +930,12 @@ impl Repository {
             }
         }
         let mut conversation = turn.conversation.clone();
-        conversation.updated_at = turn.assistant_message.created_at.clone();
+        conversation.updated_at = if replacement.is_some(){timestamp(now())}else{turn.assistant_message.created_at.clone()};
+        if let Some(replacement)=replacement {
+            if conversation.title==replacement.original.content.chars().take(40).collect::<String>() {
+                conversation.title=turn.user_message.content.chars().take(40).collect();
+            }
+        }
         let mut resources = vec![
             (
                 "conversation",
@@ -935,6 +963,7 @@ impl Repository {
                 return Err(DomainError::Forbidden);
             }
         }
+        crate::chat_messages::track_request_tx(&mut transaction,user_id,request_key.as_deref(),&turn.user_message,&turn.assistant_message.id,replacement.map_or(0,|r|r.revision+1)).await?;
         if let Some(key) = &request_key {
             crate::chat_stream::finish_tx(&mut transaction,user_id,key,attempt_token,&turn.response).await?;
         }
@@ -1108,6 +1137,7 @@ impl Repository {
             .execute(&pool).await?;
         sqlx::raw_sql(include_str!("../../../migrations/sqlite/014_daily_growth.sql"))
             .execute(&pool).await?;
+        crate::chat_messages::initialize(&pool).await?;
         // Authentication checks this table even in non-admin processes such as
         // attachment and connector services; it must exist before any login.
         sqlx::query("CREATE TABLE IF NOT EXISTS admin_user_controls(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,disabled BIGINT NOT NULL DEFAULT 0,updated_at BIGINT NOT NULL)")

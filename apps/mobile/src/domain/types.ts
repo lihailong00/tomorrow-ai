@@ -140,12 +140,14 @@ export type ChatIntent = {
   client_request_id: string;
   remember: boolean;
   upload_ids: readonly string[];
+  replace_message_id?: string;
 };
 export type ChatResponse = {
   conversation_id: string;
   message: Message;
   user_message?: Message | null;
   agent_run_id?: string;
+  removed_message_ids?: string[];
 };
 export type Upload = {
   id: string;

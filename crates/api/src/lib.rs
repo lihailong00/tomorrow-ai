@@ -210,6 +210,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/conversations", get(conversations))
         .route("/conversations/{id}/messages", get(messages))
+        .route("/conversations/{id}/messages/{message_id}", axum::routing::delete(delete_message))
         .route("/chat", post(chat))
         .route("/chat/stream", post(chat_stream::chat_stream))
         .route("/capabilities", get(capabilities))
@@ -702,6 +703,8 @@ struct ChatInput {
     remember: Option<bool>,
     #[serde(default)]
     upload_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replace_message_id: Option<String>,
 }
 #[derive(serde::Serialize, serde::Deserialize, ToSchema)]
 struct ChatResponse {
@@ -711,6 +714,13 @@ struct ChatResponse {
     user_message: Option<Message>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    removed_message_ids: Vec<String>,
+}
+#[utoipa::path(delete,path="/v1/conversations/{id}/messages/{message_id}",params(("id"=String,Path),("message_id"=String,Path)),responses((status=200,description="Deleted question and its linked reply")))]
+async fn delete_message(State(state):State<Arc<AppState>>,auth:Auth,Path((id,message_id)):Path<(String,String)>)->Result<Json<Value>>{
+    let removed=state.repository.delete_message_turn(&auth.user_id,&id,&message_id).await?;
+    Ok(Json(json!({"removed_message_ids":removed})))
 }
 #[utoipa::path(post,path="/v1/chat",request_body=ChatInput,responses((status=200,body=ChatResponse)))]
 async fn chat(
@@ -762,9 +772,13 @@ async fn run_chat(state: &AppState, user_id: &str, input: ChatInput, attempt_tok
 }
 async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attempt_token: &str,
     stream: Option<&tomorrow_domain::chat_stream::ChatStreamProducer>) -> Result<ChatResponse> {
+    if let Some(request)=&input.client_request_id {state.repository.ensure_chat_request_visible(user_id,request).await?;}
     let content = validate_text(&input.message, "消息", 20000)?;
     let fingerprint = serde_json::to_string(&input)
         .map_err(|_| DomainError::Validation("消息格式无效".into()))?;
+    if input.replace_message_id.is_some() && (input.conversation_id.is_none() || input.client_request_id.is_none()) {
+        return Err(DomainError::Validation("修改消息需要原对话和新的请求编号".into()).into());
+    }
     let message_attachments = if input.upload_ids.is_empty() {
         Vec::new()
     } else {
@@ -794,6 +808,15 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
             Vec::new(),
         )
     };
+    let replacement=if let Some(id)=&input.replace_message_id {
+        let replacement=if let Some(value)=resumed.and_then(|v|v.get("replacement")).filter(|v|!v.is_null()) {
+            serde_json::from_value::<tomorrow_domain::chat_messages::ChatReplacement>(value.clone())
+                .map_err(|_|DomainError::Internal("原消息记录读取失败".into()))?
+        }else{state.repository.chat_replacement_for_request(user_id,&conversation.id,id,input.client_request_id.as_deref().expect("validated replacement request")).await?};
+        if replacement.original.id!=*id || replacement.original.conversation_id!=conversation.id {return Err(DomainError::Conflict("原消息已变化".into()).into());}
+        let removed=replacement.removed_message_ids();context.retain(|m|!removed.contains(&m.id));
+        Some(replacement)
+    }else{None};
     let recent_start = context.len().saturating_sub(39);
     let attachment_context = if let Some(attachments) = &state.attachments {
         attachments
@@ -819,6 +842,7 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
         if let Some(id) = &ticket.conversation_id {
             conversation.id = id.clone();
         }
+        if replacement.is_some() {state.repository.bind_chat_replacement_run(user_id,input.client_request_id.as_deref().expect("validated replacement request"),&ticket.id).await?;}
         Some(ticket)
     } else {
         None
@@ -834,11 +858,11 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
         version: 1,
     });
     let user_message = Message {
-        id: resumed.and_then(|accepted|accepted.pointer("/user_message/id")).and_then(Value::as_str).map(str::to_owned).unwrap_or_else(new_id),
+        id: replacement.as_ref().map(|r|r.original.id.clone()).or_else(||resumed.and_then(|accepted|accepted.pointer("/user_message/id")).and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(new_id),
         conversation_id: conversation.id.clone(),
         role: "user".into(),
         content,
-        created_at: resumed.and_then(|accepted|accepted.pointer("/user_message/created_at")).and_then(Value::as_str).map(str::to_owned)
+        created_at: replacement.as_ref().map(|r|r.original.created_at.clone()).or_else(||resumed.and_then(|accepted|accepted.pointer("/user_message/created_at")).and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_else(||chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos,true)),
         model_mode: None,
         attachments: message_attachments,
@@ -889,11 +913,14 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
         );
     }
     let assistant_id = resumed.and_then(|accepted|accepted["message_id"].as_str()).map(str::to_owned).unwrap_or_else(new_id);
-    let assistant_created_at=resumed.and_then(|accepted|accepted["message_created_at"].as_str()).map(str::to_owned)
+    let assistant_created_at=replacement.as_ref().and_then(|r|r.assistant_created_at.clone()).or_else(||resumed.and_then(|accepted|accepted["message_created_at"].as_str()).map(str::to_owned))
+        .or_else(||replacement.as_ref().and_then(|r|chrono::DateTime::parse_from_rfc3339(&r.original.created_at).ok())
+            .and_then(|date|date.checked_add_signed(chrono::Duration::nanoseconds(1))).map(|date|date.to_rfc3339_opts(chrono::SecondsFormat::Nanos,true)))
         .unwrap_or_else(||chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos,true));
     if let Some(stream) = stream {
-        state.repository.accept_chat_stream(stream,user_id,&conversation,&user_message,&assistant_id,&assistant_created_at,ticket.as_ref().map(|t|t.id.as_str())).await?;
+        state.repository.accept_chat_stream_replacing(stream,user_id,&conversation,&user_message,&assistant_id,&assistant_created_at,ticket.as_ref().map(|t|t.id.as_str()),replacement.as_ref()).await?;
     }
+    if let Some(request)=&input.client_request_id {state.repository.ensure_chat_request_visible(user_id,request).await?;}
     let reply = if let (Some(agent), Some(ticket)) = (&state.agent, &ticket) {
         ModelReply {
             content: agent
@@ -916,7 +943,7 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
         conversation_id: conversation.id.clone(),
         role: "assistant".into(),
         content: reply.content,
-        created_at: if stream.is_some() {assistant_created_at} else {chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos,true)},
+        created_at: if stream.is_some() || replacement.is_some() {assistant_created_at} else {chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos,true)},
         model_mode: Some(reply.mode),
         attachments: Vec::new(),
     };
@@ -925,10 +952,11 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
         message: message.clone(),
         user_message: Some(user_message.clone()),
         agent_run_id: ticket.as_ref().map(|t| t.id.clone()),
+        removed_message_ids: replacement.as_ref().map(|r|r.removed_message_ids()).unwrap_or_default(),
     };
     state
         .repository
-        .commit_chat_turn_attempt(
+        .commit_chat_turn_replacing(
             user_id,
             &ChatTurn {
                 conversation,
@@ -941,6 +969,7 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
             },
             &fingerprint,
             attempt_token,
+            replacement.as_ref(),
         )
         .await?;
     Ok(response)
@@ -1050,11 +1079,11 @@ async fn capabilities(State(state): State<Arc<AppState>>, auth: Auth) -> Result<
         items.push(Capability {
             id: "attachments".into(),
             name: "文件与录音附件".into(),
-            description: "私有存储，支持文本、DOCX、XLSX 与转写后的音频作为对话资料".into(),
+            description: "私有存储，支持文本、办公文档、转写后的音频与主动解析后的 JPEG/PNG 图片作为对话资料".into(),
             category: "core".into(),
             status: "available".into(),
             detail: format!(
-                "当前存储：{}；支持文本、DOCX 与 XLSX；PDF、PPT 和图片仅存储，尚未解析",
+                "当前存储：{}；支持文本、DOCX 与 XLSX；JPEG/PNG 需主动解析后用于对话，未配置图片模型时会提示配置；PDF、PPT 目前仅存储",
                 attachments.storage_mode()
             ),
         });
@@ -1206,6 +1235,7 @@ async fn download_artifact(
         delete_schedule,
         conversations,
         messages,
+        delete_message,
         chat,
         chat_stream::chat_stream,
         capabilities,

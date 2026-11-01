@@ -129,7 +129,7 @@ export class ApiClient {
         ? 50000 // Includes MCP initialization, tool discovery and the bounded provider call.
         : path === '/chat'
         ? CHAT_REQUEST_TIMEOUT_MS
-        : path === '/todos/extract' || path.endsWith('/transcribe')
+        : path === '/todos/extract' || path.endsWith('/transcribe') || /^\/uploads\/[^/]+\/analyze$/.test(path)
         ? 120000
         : multipart
         ? 60000
@@ -217,6 +217,12 @@ export class ApiClient {
         );
       }
       if ((error as Error).name === 'AbortError') {
+        if (this.disposed) {
+          throw new ApiError('connection_changed', '服务器连接已变化，请重新操作。');
+        }
+        if (signal?.aborted) {
+          throw new ApiError('cancelled', '操作已取消。');
+        }
         throw new ApiError(
           'timeout',
           '服务响应超时。任务可能已经提交，请先刷新列表，避免重复执行。',
@@ -372,11 +378,19 @@ export class ApiClient {
     this.request<{ items: Message[]; next_offset?: number | null; next_before?: string | null }>(
       `/conversations/${encodeURIComponent(id)}/messages${listQuery(page)}`,
     );
+  deleteMessage = (conversationId: string, messageId: string, signal?: AbortSignal) =>
+    this.request<{ removed_message_ids: string[] }>(
+      `/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`,
+      'DELETE',
+      undefined,
+      signal,
+    );
   chat = (
     message: string,
     conversation_id: string | undefined,
     client_request_id: string,
     upload_ids: string[] = [],
+    replace_message_id?: string,
   ) =>
     this.request<ChatResponse>('/chat', 'POST', {
       message,
@@ -384,6 +398,7 @@ export class ApiClient {
       client_request_id,
       remember: false,
       upload_ids,
+      ...(replace_message_id ? { replace_message_id } : {}),
     });
   async chatStream(
     intent: ChatIntent,
@@ -452,6 +467,13 @@ export class ApiClient {
   transcribe = (id: string, signal?: AbortSignal) =>
     this.request<{ upload_id: string; text: string; model: string }>(
       `/uploads/${encodeURIComponent(id)}/transcribe`,
+      'POST',
+      {},
+      signal,
+    );
+  analyzeImage = (id: string, signal?: AbortSignal) =>
+    this.request<{ upload_id: string; name: string; text: string; model: string }>(
+      `/uploads/${encodeURIComponent(id)}/analyze`,
       'POST',
       {},
       signal,

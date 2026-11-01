@@ -52,7 +52,7 @@ export function ChatVoiceOverlay({ seconds, cancelled, holding, bottom, availabl
           {cancelling ? '松开取消' : '正在聆听'} · {clock}
         </Text>
         {height >= (fontScale > 1.5 ? 140 : 100) && <Text style={[styles.hint, { color: cancelling ? foreground : appearance.secondary }]}>
-          {cancelling ? '这段录音不会发送' : holding ? '松开转文字，上滑取消' : '点击结束转文字'}
+          {cancelling ? '这段录音不会发送' : holding ? '松开发送，上滑取消' : '点击结束转文字'}
         </Text>}
       </View>
     </ChatRecordingMotion>

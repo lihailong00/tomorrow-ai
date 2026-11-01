@@ -70,3 +70,21 @@ test('replayed fragments never duplicate visible text and disposal rejects all l
   expect(changes).toHaveLength(count);
   expect(controller.getSnapshot().content).toBe('你好');
 });
+
+test('edit turn linkage survives accepted, reattached snapshots and final response without changing the request', async () => {
+  const edited: ChatIntent = { ...intent, conversation_id: 'conversation', replace_message_id: 'old-user' };
+  const changes: Array<string[] | undefined> = [];
+  const complete = { ...response, removed_message_ids: ['old-user', 'old-answer'] };
+  const api = { chatStream: jest.fn(async (_intent, receive) => {
+    receive(event(0, 'accepted', { conversation_id: 'conversation', message_id: 'new-answer', message_created_at: '2026-10-28T04:00:00Z', removed_message_ids: ['old-user', 'old-answer'] }));
+    receive(event(4, 'snapshot', { status: 'running', content: '新内容', message_created_at: '2026-10-28T04:00:00Z', removed_message_ids: ['old-user', 'old-answer'] }));
+    receive(event(5, 'done', { response: complete }));
+  }) };
+  const controller = createChatStreamController({ api, intent: edited, isCurrent: () => true,
+    onChange: value => changes.push(value.removedMessageIds), onComplete: jest.fn() });
+  await controller.start();
+  expect(changes.filter(Boolean)).toEqual([['old-user', 'old-answer'], ['old-user', 'old-answer'], ['old-user', 'old-answer']]);
+  expect(controller.getSnapshot().response).toEqual(complete);
+  expect(controller.getSnapshot().assistantCreatedAt).toBe('2026-10-28T04:00:00Z');
+  expect(api.chatStream.mock.calls[0][0]).toEqual(edited); controller.dispose();
+});

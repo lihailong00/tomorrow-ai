@@ -11,8 +11,11 @@ export type ChatProgress = {
   conversationId?: string;
   userMessage?: Message;
   assistantId?: string;
+  assistantCreatedAt?: string;
   error?: string;
   response?: ChatResponse;
+  /** Authoritative turn linkage, including tentative edit accepted events. */
+  removedMessageIds?: string[];
 };
 
 function toolLabel(tool: unknown) {
@@ -58,7 +61,8 @@ export function createChatStreamController(options: Options) {
     publish({ phase: 'complete', status: '', error: undefined, response,
       content: response.message.content, conversationId: response.conversation_id,
       userMessage: response.user_message ?? progress.userMessage,
-      assistantId: response.message.id });
+      removedMessageIds: response.removed_message_ids ?? progress.removedMessageIds,
+      assistantId: response.message.id, assistantCreatedAt: response.message.created_at });
     if (current()) options.onComplete(response);
     connection?.abort();
   };
@@ -77,6 +81,8 @@ export function createChatStreamController(options: Options) {
         conversationId: body.conversation_id ?? progress.conversationId,
         userMessage: body.user_message ?? progress.userMessage,
         assistantId: body.message_id ?? progress.assistantId,
+        assistantCreatedAt: typeof body.message_created_at === 'string' ? body.message_created_at : progress.assistantCreatedAt,
+        removedMessageIds: Array.isArray(body.removed_message_ids) ? body.removed_message_ids : progress.removedMessageIds,
         phase: 'replying', error: undefined,
         status: ['running', 'tool_start'].includes(body.tool_status?.status)
           ? toolLabel(body.tool_status.tool) : '正在回复…' });
@@ -98,6 +104,8 @@ export function createChatStreamController(options: Options) {
     switch (event.event) {
       case 'accepted':
         publish({ conversationId: body.conversation_id, userMessage: body.user_message,
+          removedMessageIds: Array.isArray(body.removed_message_ids) ? body.removed_message_ids : undefined,
+          assistantCreatedAt: typeof body.message_created_at === 'string' ? body.message_created_at : undefined,
           assistantId: body.message_id, phase: 'replying', status: '正在回复…' });
         break;
       case 'text_delta':

@@ -2,6 +2,7 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSync
 import {
   ActivityIndicator,
   AppState,
+  Image,
   Keyboard,
   Pressable,
   RefreshControl,
@@ -27,6 +28,7 @@ import {
 import { ResultText } from '../ui/ResultText';
 import { ChatModeMotion, useChatReducedMotion } from '../ui/ChatMotion';
 import { ChatVoiceOverlay } from '../ui/ChatVoiceOverlay';
+import { ChatDeleteConfirmation, ChatMessageActions, ChatTextSelection, type MessageAction, type MessageAnchor } from '../ui/ChatMessageActions';
 import { chatAppearance as appearance } from '../ui/ChatAppearance';
 import { colors as historyColors, styles as s } from '../ui/theme';
 import { Icon } from '../ui/visuals';
@@ -35,10 +37,24 @@ import { createMessageHistory, mergeMessageHistory } from './messageHistory';
 import { ChatMessageList } from './ChatMessageList';
 import { createChatStreamController, type ChatProgress, type ChatStreamController } from './chatStreamController';
 
-type Attachment = { file: LocalFile; upload?: Upload; transcript?: string };
-type VoiceInput = { key: string; file: LocalFile; upload?: Upload; text?: string };
-type HoldRecording = { held: boolean; cancelled: boolean; started: boolean; ended: boolean; lease: object; startY?: number };
+type Attachment = { file: LocalFile; upload?: Upload; transcript?: string; imageText?: string };
+type VoiceSendIntent = { draft: string; file: LocalFile | null; context: object | null; isVisible: () => boolean };
+type VoiceInput = { key: string; file: LocalFile; upload?: Upload; text?: string; sendIntent?: VoiceSendIntent };
+type HoldRecording = { held: boolean; cancelled: boolean; started: boolean; ended: boolean; lease: object; startY?: number; sendIntent: VoiceSendIntent };
 type VoiceRequest = { cancel: () => void; release: () => void };
+type EditContext = { message: Message; previousDraft: string; previousAttachment: Attachment | null;
+  removedUploadIds?: string[]; retry?: () => Promise<void> | void; retryDraft?: string; retryAttachment?: Attachment | null; discardRetry?: () => void };
+export const quoteMessageText = (source: Message, text: string) =>
+  `引用消息（${source.created_at}）：\n${source.content.split('\n').map(line => `> ${line}`).join('\n')}\n\n${text}`;
+const afterMessageDate = (date: string) => {
+  const parts = /^(.*T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(date);
+  if (parts) {
+    const next = Number((parts[2] ?? '').padEnd(9, '0')) + 1;
+    if (next < 1_000_000_000) return `${parts[1]}.${String(next).padStart(9, '0')}${parts[3]}`;
+  }
+  const milliseconds = Date.parse(date);
+  return new Date((Number.isFinite(milliseconds) ? milliseconds : Date.now()) + 1).toISOString();
+};
 const INPUT_LINE_ALLOWANCE = 23;
 // The microphone is process-wide, including permission requests from an old route.
 let activeRecorder: object | null = null;
@@ -65,6 +81,8 @@ type ChatSnapshot = {
   messageVersion: number;
   sending: boolean;
   sendError: string | null;
+  editing: EditContext | null;
+  quoting: Message | null;
 };
 
 /** Only the navigation entry owns this memory; no hidden screen stays mounted. */
@@ -85,6 +103,8 @@ export function createChatEntryState(
     messageVersion: 0,
     sending: false,
     sendError: null,
+    editing: null,
+    quoting: null,
   };
   const listeners = new Set<() => void>();
   const history = createMessageHistory();
@@ -95,6 +115,7 @@ export function createChatEntryState(
   return {
     scope,
     history,
+    hiddenHistoryIds: new Set<string>(),
     voiceRequest: null as VoiceRequest | null,
     streams,
     disposeStreams,
@@ -115,6 +136,9 @@ type ChatEntryState = ReturnType<typeof createChatEntryState>;
 const isTextFile = (file: LocalFile) =>
   /\.(txt|md|csv|tsv|json|log|docx|xlsx)$/i.test(file.name);
 const isAudioFile = (file: LocalFile) => file.mime_type.startsWith('audio/');
+const isImageFile = (file: LocalFile) => /^(image\/(jpeg|png))$/i.test(file.mime_type) || /\.(jpe?g|png)$/i.test(file.name);
+const isReadableAttachment = (selected: Attachment | null) => !selected || Boolean(selected.upload &&
+  (isTextFile(selected.file) || selected.transcript || (isImageFile(selected.file) && selected.imageText)));
 
 export function ChatScreen({
   conversationId,
@@ -139,7 +163,7 @@ export function ChatScreen({
     localState.current = { api, value: createChatEntryState(conversationId, prompt) };
   }
   const state = entryState ?? localState.current.value;
-  const { id, messages, messageVersion, draft, attachment, voice, voicePhase, voiceError, voiceBusy, sending } =
+  const { id, messages, messageVersion, draft, attachment, voice, voicePhase, voiceError, voiceBusy, sending, editing, quoting, sendError } =
     useSyncExternalStore(state.subscribe, state.getSnapshot, state.getSnapshot);
   const setDraft = useCallback((next: React.SetStateAction<string>) => state.update(old => ({
     ...old,
@@ -165,6 +189,7 @@ export function ChatScreen({
   const voiceOwner = useRef({ api, state });
   voiceOwner.current = { api, state };
   const attachmentAbort = useRef<AbortController | null>(null);
+  const [attachmentPhase, setAttachmentPhase] = useState('');
   const recordingRef = useRef(false);
   const composerScroll = useRef<ScrollView>(null);
   const composerTop = useRef(0);
@@ -234,12 +259,17 @@ export function ChatScreen({
   const canApplyHistory = useCallback(() => state.scope ? state.scope.isRetained() :
     mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state, [api, state]);
   const applyHistory = useCallback((items: Message[]) => state.update(old => ({
-    ...old, messages: mergeMessageHistory(items, old.messages),
+    ...old, messages: mergeMessageHistory(items.filter(message => !state.hiddenHistoryIds.has(message.id)), old.messages),
   })), [state]);
   const refreshHistory = useCallback(() => state.history.refresh(api, initialConversationId, applyHistory, canApplyHistory),
     [state, api, initialConversationId, applyHistory, canApplyHistory]);
   const loadOlder = useCallback(() => state.history.older(api, id, applyHistory, canApplyHistory),
     [state, api, id, applyHistory, canApplyHistory]);
+  const restartHistory = useCallback(() => {
+    state.history.viewport.anchor = null;
+    state.history.viewport.pendingAppendAnchor = null;
+    return state.history.restart(api, state.getSnapshot().id, applyHistory, canApplyHistory);
+  }, [api, state, applyHistory, canApplyHistory]);
   const capabilities = useResource(() => api.capabilities(), [api]);
   const fileAction = useAction();
   const fileActionRef = useRef(fileAction);
@@ -264,15 +294,102 @@ export function ChatScreen({
       state.getSnapshot().sending || (state.scope && !state.scope.isRetained())) return;
     return state.streams.get(key)?.retry();
   }, [api, state, shareOwner]);
+  const [messageMenu, setMessageMenu] = useState<{ message: Message; anchor: MessageAnchor; owner: typeof shareOwner } | null>(null);
+  const [selection, setSelection] = useState<{ text: string; owner: typeof shareOwner } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ message: Message; owner: typeof shareOwner } | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const deletingRef = useRef(false);
+  const deletionAbort = useRef<AbortController | null>(null);
+  useEffect(() => {
+    deletingRef.current = false;
+    setDeleting(false); setDeleteError(null); setMessageMenu(null); setSelection(null); setDeleteTarget(null);
+    return () => { deletionAbort.current?.abort(); };
+  }, [shareOwner]);
+  const actionOwnerCurrent = (owner: typeof shareOwner) => mounted.current && currentShareOwner.current === owner &&
+    voiceOwner.current.api === owner.api && voiceOwner.current.state === owner.state &&
+    (!state.scope || state.scope.isRetained());
+  const mutationBlocked = () => state.getSnapshot().sending || Boolean(state.getSnapshot().voice) ||
+    recordingRef.current || Boolean(activeRecorder) || fileActionRef.current.busy || deletingRef.current;
+  const liveSentMessage = (messageId: string) => state.getSnapshot().messages.find(message =>
+    message.id === messageId && message.role === 'user' && (!message.delivery || message.delivery === 'sent'));
+  const showMessageMenu = useCallback((message: Message, anchor: MessageAnchor) => {
+    if (!mounted.current || currentShareOwner.current !== shareOwner ||
+      voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
+      (state.scope && !state.scope.isRetained()) || recordingRef.current || activeRecorder) return;
+    const latest = state.getSnapshot().messages.find(item => item.id === message.id && item.role === 'user' &&
+      (!item.delivery || item.delivery === 'sent'));
+    if (!latest) return;
+    Keyboard.dismiss();
+    setMessageMenu({ message: latest, anchor, owner: shareOwner });
+  }, [api, state, shareOwner]);
+  const cancelEditing = () => {
+    if (!actionOwnerCurrent(shareOwner) || mutationBlocked()) return;
+    const current = state.getSnapshot().editing;
+    if (!current) return;
+    // A failed immutable request is retired only when the user cancels it.
+    current.discardRetry?.();
+    state.update(old => ({ ...old, editing: null, draft: current.previousDraft,
+      attachment: current.previousAttachment, sendError: null }));
+  };
+  const performMessageAction = (name: MessageAction) => {
+    const selected = messageMenu;
+    if (!selected || !actionOwnerCurrent(selected.owner)) return;
+    const message = liveSentMessage(selected.message.id);
+    if (!message || (['edit', 'quote', 'branch', 'delete'].includes(name) && mutationBlocked())) return;
+    setMessageMenu(null);
+    if (name === 'copy') return fileActionRef.current.run(() => platform.copyText(message.content));
+    if (name === 'share') return fileActionRef.current.run(() => platform.share(message.content));
+    if (name === 'select') { setSelection({ text: message.content, owner: selected.owner }); return; }
+    if (name === 'delete') { setDeleteError(null); setDeleteTarget({ message, owner: selected.owner }); return; }
+    if (name === 'branch') { navigate({ name: 'chat', prompt: message.content }); return; }
+    state.getSnapshot().editing?.discardRetry?.();
+    if (name === 'edit') {
+      state.update(old => ({ ...old, editing: { message,
+        previousDraft: old.editing?.previousDraft ?? old.draft,
+        previousAttachment: old.editing?.previousAttachment ?? old.attachment },
+        quoting: null, draft: message.content, attachment: null, sendError: null }));
+    } else {
+      state.update(old => ({ ...old, quoting: message, editing: null,
+        draft: old.editing ? old.editing.previousDraft : old.draft,
+        attachment: old.editing ? old.editing.previousAttachment : old.attachment, sendError: null }));
+    }
+    focusAfterModeChange.current = true;
+    setVoiceMode(false);
+    inputRef.current?.focus();
+  };
+  const confirmDelete = async () => {
+    const target = deleteTarget;
+    if (!target || !actionOwnerCurrent(target.owner) || mutationBlocked()) return;
+    const message = liveSentMessage(target.message.id);
+    const conversation = state.getSnapshot().id;
+    if (!message || !conversation) return;
+    deletingRef.current = true; setDeleting(true); setDeleteError(null);
+    const controller = new AbortController(); deletionAbort.current = controller;
+    try {
+      const result = await api.deleteMessage(conversation, message.id, controller.signal);
+      if (!actionOwnerCurrent(target.owner)) return;
+      result.removed_message_ids.forEach(messageId => state.hiddenHistoryIds.add(messageId));
+      const removed = new Set(result.removed_message_ids);
+      state.history.viewport.heights.forEach((value, key) => { if (removed.has(value.message.id)) state.history.viewport.heights.delete(key); });
+      if (state.getSnapshot().editing && removed.has(state.getSnapshot().editing!.message.id)) state.getSnapshot().editing?.discardRetry?.();
+      state.update(old => ({ ...old, messages: old.messages.filter(item => !removed.has(item.id)),
+        messageVersion: old.messageVersion + 1,
+        ...(old.editing && removed.has(old.editing.message.id) ? { editing: null,
+          draft: old.editing.previousDraft, attachment: old.editing.previousAttachment } : {}),
+        ...(old.quoting && removed.has(old.quoting.id) ? { quoting: null } : {}) }));
+      setDeleteTarget(null); invalidate(); void restartHistory();
+    } catch (error) {
+      if (actionOwnerCurrent(target.owner)) setDeleteError(errorMessage(error));
+    } finally {
+      if (deletionAbort.current === controller) deletionAbort.current = null;
+      if (actionOwnerCurrent(target.owner)) { deletingRef.current = false; setDeleting(false); }
+    }
+  };
   const renderMessage = useCallback(({ item }: { item: Message }) =>
-    <ChatMessage message={item} formatDate={formatDate} share={shareMessage} retry={retryMessage} />,
-    [formatDate, shareMessage, retryMessage]);
-  const attachmentReady =
-    !attachment ||
-    Boolean(
-      attachment.upload &&
-        (isTextFile(attachment.file) || attachment.transcript),
-    );
+    <ChatMessage message={item} formatDate={formatDate} share={shareMessage} retry={retryMessage} menu={showMessageMenu} />,
+    [formatDate, shareMessage, retryMessage, showMessageMenu]);
+  const attachmentReady = isReadableAttachment(attachment);
   useEffect(() => {
     void state.history.ensure(api, initialConversationId, applyHistory, canApplyHistory);
     // History belongs to this entry; draft/recording updates must not restart it.
@@ -316,6 +433,51 @@ export function ChatScreen({
     }
     state.update(old => ({ ...old, draft: `${previous}${separator}${text}`,
       voice: null, voicePhase: '', voiceError: null, voiceBusy: false }));
+  };
+  const makeVoiceSendIntent = (): VoiceSendIntent => ({
+    draft: state.getSnapshot().draft,
+    file: state.getSnapshot().attachment?.file ?? null,
+    context: state.getSnapshot().editing ?? state.getSnapshot().quoting,
+    // A retained ASR may finish in History, but a detached view cannot send.
+    isVisible: () => holdOwner.active && mounted.current && currentShareOwner.current === shareOwner &&
+      voiceOwner.current.api === api && voiceOwner.current.state === state,
+  });
+  const matchesVoiceIntent = (intent: VoiceSendIntent) => {
+    const latest = state.getSnapshot();
+    return intent.isVisible() && latest.draft === intent.draft &&
+      (latest.attachment?.file ?? null) === intent.file &&
+      (latest.editing ?? latest.quoting) === intent.context;
+  };
+  const prepareAttachment = async (selected: Attachment | null, signal: AbortSignal,
+    isCurrent: () => boolean, phase: (text: string) => void) => {
+    if (!selected || isReadableAttachment(selected)) return;
+    if (!isTextFile(selected.file) && !isImageFile(selected.file))
+      throw new Error('这份附件还不能读取，请先完成转写或移除附件。');
+    const sameSelection = () => isCurrent() && state.getSnapshot().attachment?.file === selected.file;
+    let prepared = state.getSnapshot().attachment;
+    if (!sameSelection() || !prepared) return;
+    if (!prepared.upload) {
+      phase(isImageFile(selected.file) ? '正在发送图片…' : '正在上传资料…');
+      // Some Android document providers omit image MIME. The server still
+      // validates the bytes; normalize the known suffix before transport.
+      const transportFile = isImageFile(selected.file) && !/^image\/(jpeg|png)$/i.test(selected.file.mime_type)
+        ? { ...selected.file, mime_type: /\.png$/i.test(selected.file.name) ? 'image/png' : 'image/jpeg' } : selected.file;
+      const preparedFile = isImageFile(selected.file) && platform.prepareChatImage
+        ? await platform.prepareChatImage(transportFile) : transportFile;
+      if (!sameSelection() || signal.aborted) return;
+      const upload = await api.upload(preparedFile, signal);
+      if (!sameSelection()) { api.deleteUpload(upload.id).catch(() => {}); return; }
+      prepared = { ...prepared, upload };
+      setAttachment(old => old?.file === selected.file ? { ...old, upload } : old);
+    }
+    if (isImageFile(selected.file) && !prepared.imageText) {
+      phase('正在理解图片…');
+      const result = await api.analyzeImage(prepared.upload!.id, signal);
+      if (!sameSelection()) return;
+      const text = result.text.trim();
+      if (!text) throw new Error('图片理解未返回内容，请重试或更换图片。');
+      setAttachment(old => old?.file === selected.file ? { ...old, imageText: text } : old);
+    }
   };
   const deleteUnreferencedVoiceUpload = (uploadId: string) => {
     const retained = state.scope
@@ -362,15 +524,7 @@ export function ChatScreen({
     fileAction.setError(null);
     if (!current()) return;
     try {
-      if (input.text) {
-        insertVoiceText(input.text);
-        if (upload) {
-          deleteUnreferencedVoiceUpload(upload.id);
-        }
-        release();
-        return;
-      }
-      if (!upload) {
+      if (!recognized && !upload) {
         setVoicePhase('正在识别语音…');
         upload = await api.upload(input.file, controller.signal);
         if (!current()) {
@@ -379,37 +533,59 @@ export function ChatScreen({
         }
         setVoice({ ...input, upload });
       }
-      setVoicePhase('正在转成文字…');
-      const transcript = await api.transcribe(upload.id, controller.signal);
-      if (!current()) {
-        deleteUnreferencedVoiceUpload(upload.id);
-        return;
+      if (!recognized) {
+        setVoicePhase('正在转成文字…');
+        const transcript = await api.transcribe(upload!.id, controller.signal);
+        if (!current()) {
+          deleteUnreferencedVoiceUpload(upload!.id);
+          return;
+        }
+        recognized = transcript.text.trim();
       }
-      const text = transcript.text.trim();
-      if (!text) {
+      if (!recognized) {
         throw new Error('未听清语音，请重新录制。');
       }
-      recognized = text;
-      insertVoiceText(text);
-      // Chat dictation is plain editable text; do not attach its audio to chat.
-      deleteUnreferencedVoiceUpload(upload.id);
+      const intent = input.sendIntent;
+      if (intent && matchesVoiceIntent(intent)) {
+        await prepareAttachment(state.getSnapshot().attachment, controller.signal, current, setVoicePhase);
+        if (!current()) return;
+      }
+      const automatic = Boolean(intent && matchesVoiceIntent(intent));
+      const previous = state.getSnapshot().draft;
+      const separator = previous && !/\s$/.test(previous) ? '\n' : '';
+      const expectedDraft = `${previous}${separator}${recognized}`;
+      insertVoiceText(recognized);
       release();
+      // Recognition is an input step; raw recording IDs never enter chat intent.
+      if (upload) deleteUnreferencedVoiceUpload(upload.id);
+      if (automatic) {
+        const submitted = submitPrepared({ draft: expectedDraft, file: intent!.file });
+        if (!submitted && intent!.isVisible()) {
+          setVoiceMode(false);
+          state.update(old => ({ ...old, voiceError: '语音已识别并保留，请先处理上一条消息后再发送。' }));
+        }
+        await submitted;
+      } else if (intent && intent.isVisible()) {
+        setVoiceMode(false);
+        state.update(old => ({ ...old, voiceError: '输入内容已变化，识别文字已保留，请确认后发送。' }));
+      }
     } catch (error) {
       if (current()) {
         setVoice({ ...input, upload, text: recognized });
         setVoicePhase(
           recognized
-            ? '文字已识别，请整理输入框后再填入。'
+            ? '语音已识别，文字和附件已保留，可重试发送。'
             : '转写未完成，录音已保留，可重试或重新录制。',
         );
         state.update(old => ({ ...old, voiceError: errorMessage(error) }));
+        if (input.sendIntent && input.sendIntent.isVisible()) setVoiceMode(false);
         throw error;
       }
     } finally {
       if (current()) state.update(old => ({ ...old, voiceBusy: false }));
     }
   };
-  const finishRecording = async () => {
+  const finishRecording = async (sendIntent?: VoiceSendIntent) => {
     if (holdOwner.gesture?.started) {
       holdOwner.gesture.held = false; holdOwner.gesture.ended = true;
       setHoldActive(false);
@@ -425,8 +601,8 @@ export function ChatScreen({
       if (mounted.current) setRecording(false);
     }
     if (file && mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state) {
-      setVoiceMode(false);
-      await convertVoice({ key: newRequestId(), file });
+      if (!sendIntent) setVoiceMode(false);
+      await convertVoice({ key: newRequestId(), file, sendIntent });
     }
   };
   const reportVoiceFailure = (failure: unknown) => {
@@ -448,7 +624,7 @@ export function ChatScreen({
           if (holdOwner.active && mounted.current) setRecording(false);
         }
       } else {
-        await finishRecording();
+        await finishRecording(gesture.sendIntent);
       }
     } finally {
       if (holdOwner.active && mounted.current) setCaptureBusy(false);
@@ -456,9 +632,11 @@ export function ChatScreen({
   };
   const beginHold = (pageY?: number) => {
     if (activeRecorder || !holdOwner.active || recordingRef.current || (holdOwner.gesture && !holdOwner.gesture.ended) ||
-        fileAction.busy || sending || voice) return;
+        currentShareOwner.current !== shareOwner || fileActionRef.current.busy ||
+        state.getSnapshot().sending || state.getSnapshot().voice || awaitingInitialConversation()) return;
     const lease = {}; activeRecorder = lease; recorderLease.current = lease;
-    const gesture: HoldRecording = { held: true, cancelled: false, started: false, ended: false, lease, startY: pageY };
+    const gesture: HoldRecording = { held: true, cancelled: false, started: false, ended: false, lease, startY: pageY,
+      sendIntent: makeVoiceSendIntent() };
     holdOwner.gesture = gesture;
     setHoldActive(true); setHoldCancelled(false); setCaptureBusy(true);
     state.update(old => ({ ...old, voiceError: null }));
@@ -488,7 +666,7 @@ export function ChatScreen({
   const releaseHold = (cancel = false) => {
     const gesture = holdOwner.gesture;
     if (!gesture || gesture.ended) return;
-    gesture.held = false; gesture.cancelled = gesture.cancelled || cancel;
+    gesture.held = false; gesture.cancelled = gesture.cancelled || cancel || !gesture.started;
     setHoldActive(false);
     if (gesture.started) void endHold(gesture).catch(reportVoiceFailure);
   };
@@ -512,44 +690,91 @@ export function ChatScreen({
   const awaitingInitialConversation = () => !state.getSnapshot().id &&
     Array.from(state.streams.values()).some(stream => stream.intent.conversation_id === null &&
       stream.getSnapshot().phase === 'failed' && !stream.getSnapshot().conversationId);
-  const send = () => {
+  const submitPrepared = (automatic?: { draft: string; file: LocalFile | null }) => {
     const before = state.getSnapshot();
-    const text = before.draft.trim();
     const selected = before.attachment;
-    const ready = !selected || Boolean(selected.upload &&
-      (isTextFile(selected.file) || selected.transcript));
+    const entered = before.draft.trim() || (selected && isImageFile(selected.file) ? '请描述这张图片的内容。' : '');
+    const text = before.quoting ? quoteMessageText(before.quoting, entered) : entered;
+    const ready = isReadableAttachment(selected);
     if (!mounted.current || currentShareOwner.current !== shareOwner ||
       voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
       (state.scope && !state.scope.isRetained()) ||
-      !text || before.sending || awaitingInitialConversation() ||
-      recording || captureBusy || activeRecorder || fileAction.busy || voice || !ready) return;
+      !entered || before.sending || deletingRef.current || awaitingInitialConversation() ||
+      recordingRef.current || activeRecorder || (!automatic && fileActionRef.current.busy) || before.voice || !ready ||
+      (automatic && (before.draft !== automatic.draft || (selected?.file ?? null) !== automatic.file))) return;
+    if (Array.from(text).length > 20000) {
+      fileActionRef.current.setError('引用后的消息超过 20,000 字，请缩短追问或取消引用后再发送。');
+      return;
+    }
+    if (before.editing?.retry && before.draft === before.editing.retryDraft && selected === before.editing.retryAttachment) return before.editing.retry();
+    before.editing?.discardRetry?.();
+    const edit = before.editing;
+    const targetIndex = edit ? before.messages.findIndex(message => message.id === edit.message.id) : -1;
+    if (edit && (targetIndex < 0 || !before.id)) return;
+    // Adjacent rows are not necessarily a pair when another device sends at
+    // the same time. Only the server's removed_message_ids link a reply.
+    const originalTurn = edit ? [before.messages[targetIndex]] : [];
+    const originalIds = new Set(originalTurn.map(message => message.id));
     const requestId = newRequestId();
     const userKey = `${requestId}:user`;
     const assistantKey = `${requestId}:assistant`;
-    const uploadIds = selected?.upload && (isTextFile(selected.file) || selected.transcript)
-      ? [selected.upload.id] : [];
+    const uploadIds = selected?.upload && ready ? [selected.upload.id]
+      : edit ? (edit.message.attachments ?? []).filter(file => !file.unavailable && !edit.removedUploadIds?.includes(file.upload_id)).map(file => file.upload_id) : [];
     const now = Date.now();
     const userMessage: Message = {
-      id: userKey, client_key: userKey, conversation_id: before.id ?? '', role: 'user',
-      content: text, created_at: new Date(now).toISOString(), delivery: 'sending',
+      id: edit?.message.id ?? userKey, client_key: userKey, conversation_id: before.id ?? '', role: 'user',
+      content: text, created_at: edit?.message.created_at ?? new Date(now).toISOString(), delivery: 'sending',
       attachments: selected?.upload && uploadIds.length ? [{
         upload_id: selected.upload.id, name: selected.upload.name,
         mime_type: selected.upload.mime_type, size: selected.upload.size, unavailable: false,
-      }] : [],
+      }] : (edit?.message.attachments ?? []).filter(file => uploadIds.includes(file.upload_id)),
     };
     const assistantMessage: Message = {
       id: assistantKey, client_key: assistantKey, conversation_id: before.id ?? '', role: 'assistant',
-      content: '', created_at: new Date(now + 1).toISOString(), stream_status: '发送中…',
+      content: '', created_at: edit ? afterMessageDate(edit.message.created_at) : new Date(now + 1).toISOString(), stream_status: '发送中…',
     };
     const canApply = () => currentShareOwner.current === shareOwner &&
       (state.scope ? state.scope.isRetained() :
         mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state);
+    const setTurn = (items: Message[], turn: Message[]) => {
+      if (!edit) return [...items, ...turn];
+      const at = items.findIndex(message => message.client_key === userKey || message.id === edit.message.id);
+      const filtered = items.filter(message => !originalIds.has(message.id) && message.client_key !== userKey && message.client_key !== assistantKey);
+      filtered.splice(Math.max(0, Math.min(at >= 0 ? at : targetIndex, filtered.length)), 0, ...turn);
+      return filtered;
+    };
+    const retryEdit = () => {
+      // The visible owner fences the button/send callback. The operation itself
+      // belongs to the retained entry and remains retryable after History.
+      if (!canApply() || state.getSnapshot().sending) return;
+      const latest = state.getSnapshot();
+      if (latest.editing?.retry !== retryEdit || latest.draft !== before.draft || latest.attachment !== selected) return;
+      originalTurn.filter(message => message.role === 'assistant').forEach(message => state.hiddenHistoryIds.add(message.id));
+      state.update(old => ({ ...old, editing: null, draft: '', attachment: null, sendError: null,
+        sending: true, messages: setTurn(old.messages, [userMessage, assistantMessage]), messageVersion: old.messageVersion + 1 }));
+      return operation.retry();
+    };
     const applyProgress = (progress: ChatProgress) => {
       if (!canApply()) return;
       const conversationChanged = Boolean(progress.conversationId &&
         progress.conversationId !== state.getSnapshot().id);
       state.update(old => {
-        const next = old.messages.map(message => {
+        if (edit) for (const removedId of progress.removedMessageIds ?? []) {
+          originalIds.add(removedId);
+          if (removedId !== edit.message.id) state.hiddenHistoryIds.add(removedId);
+        }
+        if (edit && progress.phase === 'failed') {
+          originalIds.forEach(removedId => state.hiddenHistoryIds.delete(removedId));
+          return { ...old, messages: mergeMessageHistory(before.messages.filter(message => originalIds.has(message.id)),
+            old.messages.filter(message => !originalIds.has(message.id) && message.client_key !== userKey && message.client_key !== assistantKey)), sending: false,
+            draft: old.draft || before.draft, attachment: old.attachment ?? selected,
+            editing: { ...edit, retry: retryEdit, retryDraft: before.draft, retryAttachment: selected,
+              discardRetry: () => { operation.dispose(); state.streams.delete(userKey); } },
+            messageVersion: old.messageVersion + 1,
+            sendError: `修改未完成，原消息和回复已保留。${progress.error ?? ''}` };
+        }
+        const next = old.messages.filter(message => !edit || !originalIds.has(message.id) ||
+          message.client_key === userKey || message.client_key === assistantKey).map(message => {
           if (message.client_key === userKey) {
             const canonical = progress.userMessage;
             const error = progress.error && !before.id && !progress.conversationId
@@ -569,10 +794,12 @@ export function ChatScreen({
             if (!progress.response && message.content === progress.content &&
               message.stream_status === progress.status && message.stream_error === error &&
               (!progress.assistantId || message.id === progress.assistantId) &&
+              (!progress.assistantCreatedAt || message.created_at === progress.assistantCreatedAt) &&
               (!progress.conversationId || message.conversation_id === progress.conversationId)) return message;
             return {
             ...message, ...(progress.response?.message ?? {}),
             id: progress.assistantId ?? message.id, client_key: assistantKey,
+            created_at: progress.assistantCreatedAt ?? message.created_at,
             conversation_id: progress.conversationId ?? message.conversation_id,
             content: progress.content, stream_status: progress.status,
             stream_error: error,
@@ -580,18 +807,23 @@ export function ChatScreen({
           }
           return message;
         });
-        const reconciled = next.some((message, index) => message.id !== old.messages[index].id);
-        const localIds = reconciled ? new Set(next.filter(message => message.client_key).map(message => message.id)) : null;
+        // The backend reuses the question ID, so remove old IDs before keeping
+        // this operation's canonical revised question and answer.
+        const removed = new Set(progress.response?.removed_message_ids ?? []);
+        const confirmed = removed.size ? next.filter(message => !removed.has(message.id) ||
+          message.client_key === userKey || message.client_key === assistantKey) : next;
+        const reconciled = confirmed.length !== old.messages.length || confirmed.some((message, index) => message.id !== old.messages[index]?.id);
+        const localIds = reconciled ? new Set(confirmed.filter(message => message.client_key).map(message => message.id)) : null;
         const seen = new Set<string>();
         return { ...old, id: progress.conversationId ?? old.id,
           // Preserve the submitted turn's order while removing any server row
           // that a history refresh returned before the accepted event arrived.
-          messages: reconciled ? next.filter(message => {
+          messages: edit && progress.phase === 'complete' ? mergeMessageHistory([], confirmed) : reconciled ? confirmed.filter(message => {
             if (!message.client_key && localIds?.has(message.id)) return false;
             if (seen.has(message.id)) return false;
             seen.add(message.id);
             return true;
-          }) : next,
+          }) : confirmed,
           sending: progress.phase !== 'complete' && progress.phase !== 'failed',
           sendError: progress.error ?? null };
       });
@@ -600,11 +832,22 @@ export function ChatScreen({
     };
     const operation: ChatStreamController = createChatStreamController({ api,
       intent: { message: text, conversation_id: before.id ?? null,
-        client_request_id: requestId, upload_ids: uploadIds, remember: false },
+        client_request_id: requestId, upload_ids: uploadIds, remember: false,
+        ...(edit ? { replace_message_id: edit.message.id } : {}) },
       isCurrent: () => canApply() && state.streams.get(userKey) === operation,
       onChange: applyProgress,
       onComplete: result => {
         if (!canApply()) return;
+        for (const messageId of result.removed_message_ids ?? []) {
+          if (messageId !== result.user_message?.id && messageId !== result.message.id) state.hiddenHistoryIds.add(messageId);
+        }
+        if (edit) {
+          const removed = new Set(result.removed_message_ids ?? []);
+          state.history.viewport.heights.forEach((value, key) => { if (removed.has(value.message.id)) state.history.viewport.heights.delete(key); });
+          state.update(old => ({ ...old, editing: null,
+            draft: old.draft || edit.previousDraft, attachment: old.attachment ?? edit.previousAttachment }));
+          void restartHistory();
+        }
         if (mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state)
           onConversationCreated?.(result.conversation_id);
         invalidate();
@@ -612,22 +855,42 @@ export function ChatScreen({
       },
     });
     state.streams.set(userKey, operation);
+    if (edit) originalTurn.filter(message => message.role === 'assistant').forEach(message => state.hiddenHistoryIds.add(message.id));
     // Publish before the first identity probe or HTTP request can yield.
-    state.history.viewport.anchor = null;
-    state.history.viewport.followTail = true;
-    state.update(old => ({ ...old, draft: '', attachment: null, sending: true, sendError: null,
-      messages: [...old.messages, userMessage, assistantMessage],
+    if (!edit) { state.history.viewport.anchor = null; state.history.viewport.followTail = true; }
+    state.update(old => ({ ...old, draft: '', attachment: null, sending: true, sendError: null, voiceError: null,
+      editing: null, quoting: null,
+      messages: setTurn(old.messages, [userMessage, assistantMessage]),
       messageVersion: old.messageVersion + 1 }));
     return operation.start();
   };
+  const send = () => {
+    const before = state.getSnapshot();
+    if (!before.attachment || isReadableAttachment(before.attachment)) return submitPrepared();
+    if (!isImageFile(before.attachment.file) || before.voice || before.sending || recordingRef.current || activeRecorder) return;
+    return fileAction.run(async ({ isCurrent }) => {
+      const controller = new AbortController();
+      attachmentAbort.current = controller;
+      try {
+        await prepareAttachment(before.attachment, controller.signal, isCurrent, text => {
+          if (isCurrent()) setAttachmentPhase(text);
+        });
+        if (!isCurrent()) return;
+        return submitPrepared({ draft: before.draft, file: before.attachment!.file });
+      } finally {
+        if (attachmentAbort.current === controller) attachmentAbort.current = null;
+        if (isCurrent()) setAttachmentPhase('');
+      }
+    });
+  };
   const sendDisabled =
-    !draft.trim() ||
+    (!draft.trim() && !Boolean(attachment && isImageFile(attachment.file))) ||
     awaitingInitialConversation() ||
-    sending ||
+    sending || deleting ||
     recording || captureBusy ||
     Boolean(voice) ||
     fileAction.busy ||
-    !attachmentReady;
+    (!attachmentReady && !Boolean(attachment && isImageFile(attachment.file)));
   const supportMaxHeight = Math.max(64, Math.min(130, availableHeight * 0.28));
   // Keep one scaled line visible even when the keyboard reduces the viewport.
   // Live Android font changes can precede DeviceInfo's next host-resume event.
@@ -727,7 +990,7 @@ export function ChatScreen({
           revealFocusedInput();
         }}
       >
-        {(fileAction.error || voiceError || attachment || voice) && (
+        {(fileAction.error || voiceError || attachment || voice || (editing && sendError)) && (
           <ScrollView
             style={[chat.composerSupport, { maxHeight: supportMaxHeight }]}
             keyboardShouldPersistTaps="handled"
@@ -735,6 +998,10 @@ export function ChatScreen({
             bounces={false}
           >
             <ErrorNotice message={voiceError ?? fileAction.error} />
+            {editing && <ErrorNotice message={sendError} />}
+            {editing?.retry && draft === editing.retryDraft && attachment === editing.retryAttachment && <Button variant="ghost"
+              onPress={() => { if (actionOwnerCurrent(shareOwner) && !mutationBlocked()) return submitPrepared(); }}>重试修改</Button>}
+            {attachmentPhase ? <Text style={chat.attachmentHint}>{attachmentPhase}</Text> : null}
             {attachment && !attachment.upload && (
               <Text style={[s.small, { fontSize: 10, marginBottom: 6 }]}>
                 附件最多 25 MB。录音会自动转成文字。
@@ -767,26 +1034,35 @@ export function ChatScreen({
                     <Icon name="close" size={18} color={appearance.secondary} />
                   </Pressable>
                 </View>
+                {voice.text && <Text style={[s.small, { marginTop: 6 }]} numberOfLines={3}>已识别：{voice.text}</Text>}
                 {!voiceBusy && !fileAction.busy && (
                   <Button
                     variant="ghost"
-                    onPress={() => fileAction.run(() => convertVoice(voice))}
+                    onPress={() => fileAction.run(() => convertVoice({ ...voice,
+                      sendIntent: voice.sendIntent ? makeVoiceSendIntent() : undefined }))}
                   >
-                    {voice.text ? '填入文字' : '重试转写'}
+                    {voice.sendIntent ? voice.text ? '重试发送' : '重试识别并发送' : voice.text ? '填入文字' : '重试转写'}
                   </Button>
                 )}
+                {!voiceBusy && !fileAction.busy && voice.sendIntent && voice.text && <Button variant="ghost" onPress={() => fileAction.run(async () => {
+                  state.voiceRequest?.release();
+                  insertVoiceText(voice.text!);
+                  if (voice.upload) deleteUnreferencedVoiceUpload(voice.upload.id);
+                  setVoiceMode(false);
+                })}>填入文字</Button>}
               </Card>
             )}
             {attachment && (
               <Card style={chat.attachmentCard}>
                 <View style={[s.between, { gap: 8 }]}>
-                  <View style={chat.fileIcon}>
+                  {isImageFile(attachment.file) ? <Image source={{ uri: attachment.file.uri }}
+                    accessibilityLabel="所选图片预览" style={{ width: 38, height: 38, borderRadius: 10 }} /> : <View style={chat.fileIcon}>
                     <Icon
                       name={isAudioFile(attachment.file) ? 'mic' : 'file'}
                       size={20}
                       color={appearance.accent}
                     />
-                  </View>
+                  </View>}
                   <View style={s.fill}>
                     <Text style={[s.body, { fontSize: 12 }]} numberOfLines={1}>
                       {attachment.file.name}
@@ -809,7 +1085,7 @@ export function ChatScreen({
                     <Icon name="close" size={18} color={appearance.secondary} />
                   </Pressable>
                 </View>
-                {!attachment.upload ? (
+                {!attachment.upload && !isImageFile(attachment.file) ? (
                   <Button
                     variant="ghost"
                     loading={fileAction.busy}
@@ -865,13 +1141,13 @@ export function ChatScreen({
                 ) : null}
                 {attachment.upload &&
                   !isTextFile(attachment.file) &&
+                  !isImageFile(attachment.file) &&
                   !attachment.transcript &&
                   !isAudioFile(attachment.file) && (
                     <Text
                       style={[s.small, { color: appearance.secondary, marginTop: 6 }]}
                     >
-                      已真实保存。暂不能解析 PDF、PPT
-                      或图片，不会将其作为已读资料。
+                      已真实保存。暂不能解析 PDF、PPT 等此类资料，不会将其作为已读资料。
                     </Text>
                   )}
                 {attachment.transcript && (
@@ -880,7 +1156,7 @@ export function ChatScreen({
                   </Text>
                 )}
                 {attachment.upload &&
-                  (isTextFile(attachment.file) || attachment.transcript) && (
+                  (isTextFile(attachment.file) || attachment.transcript || attachment.imageText) && (
                     <Text style={[s.small, { marginTop: 6 }]}>
                       发送文字时，会一起提供这份资料的可读内容。
                     </Text>
@@ -890,7 +1166,9 @@ export function ChatScreen({
             {!attachmentReady && (
               <Text style={chat.attachmentHint}>
                 {!attachment?.upload
-                  ? '请先上传或移除附件，再发送消息。'
+                  ? attachment && isImageFile(attachment.file) ? '发送时会自动上传并理解图片，也可以按住说出你的问题。' : '请先上传或移除附件，再发送消息。'
+                  : attachment && isImageFile(attachment.file)
+                  ? '发送时会先理解图片；若失败会保留图片和文字，便于重试。'
                   : isAudioFile(attachment.file)
                   ? '录音需完成转写后发送；也可以移除附件继续文字聊天。'
                   : '该格式已保存但暂不能解析，请移除附件后继续文字聊天。'}
@@ -898,6 +1176,34 @@ export function ChatScreen({
             )}
           </ScrollView>
         )}
+        {(editing || quoting) && <View style={chat.contextStrip} testID={editing ? 'chat-edit-context' : 'chat-quote-context'}>
+          <View style={s.fill}>
+            <Text style={chat.contextLabel}>{editing ? '修改消息' : '追问这条消息'}</Text>
+            <Text numberOfLines={1} style={chat.contextExcerpt}>{(editing?.message ?? quoting)?.content}</Text>
+            {editing && !attachment && (editing.message.attachments ?? []).filter(file => !editing.removedUploadIds?.includes(file.upload_id)).map(file =>
+              <View key={file.upload_id} style={chat.originalAttachment}>
+                <Icon name="file" size={14} color={appearance.secondary} />
+                <Text numberOfLines={1} style={[chat.contextExcerpt, s.fill]}>{file.name}{file.unavailable ? '（不可用）' : ' · 会保留'}</Text>
+                <Pressable accessibilityRole="button" accessibilityLabel={`移除原附件：${file.name}`} style={chat.removeButton}
+                  disabled={sending || recording || captureBusy || Boolean(voice) || fileAction.busy || deleting}
+                  onPress={() => {
+                    if (!actionOwnerCurrent(shareOwner) || mutationBlocked()) return;
+                    const current = state.getSnapshot().editing;
+                    if (!current || current.message.id !== editing.message.id) return;
+                    current.discardRetry?.();
+                    state.update(old => ({ ...old, editing: old.editing ? { ...old.editing,
+                      removedUploadIds: [...(old.editing.removedUploadIds ?? []), file.upload_id],
+                      retry: undefined, retryDraft: undefined, retryAttachment: undefined, discardRetry: undefined } : null }));
+                  }}><Icon name="close" size={14} color={appearance.secondary} /></Pressable>
+              </View>)}
+          </View>
+          <Pressable accessibilityRole="button" accessibilityLabel={editing ? '取消修改消息' : '取消引用消息'}
+            disabled={sending || recording || captureBusy || Boolean(voice) || fileAction.busy || deleting}
+            style={chat.removeButton} onPress={() => {
+              if (editing) cancelEditing();
+              else if (actionOwnerCurrent(shareOwner) && !mutationBlocked()) state.update(old => ({ ...old, quoting: null }));
+            }}><Icon name="close" size={18} color={appearance.secondary} /></Pressable>
+        </View>}
         <View
           style={chat.composer}
           testID="chat-composer-content"
@@ -939,7 +1245,7 @@ export function ChatScreen({
             onBlur={() => {
               inputFocused.current = false;
             }}
-            editable
+            editable={!deleting}
             style={[
               chat.input,
               { minHeight: inputMinHeight, maxHeight: inputMaxHeight },
@@ -948,7 +1254,7 @@ export function ChatScreen({
           />
           {voiceMode && <View testID="chat-hold-to-talk" accessible={false}
             style={[chat.holdButton, holdActive && chat.holdPressed, holdActive && holdCancelled && chat.recordingCancelled]}
-            onStartShouldSetResponder={() => !fileAction.busy && !sending && !voice}
+            onStartShouldSetResponder={() => !fileAction.busy && !sending && !voice && !deleting}
             onResponderGrant={event => beginHold(event?.nativeEvent?.pageY)}
             onResponderRelease={() => releaseHold()}
             onResponderTerminationRequest={() => true}
@@ -960,7 +1266,7 @@ export function ChatScreen({
               setHoldCancelled(gesture.cancelled);
             }}
             onTouchCancel={() => releaseHold(true)}>
-            <Text style={[chat.holdText, holdActive && holdCancelled && chat.cancelText]}>{holdActive ? holdCancelled ? '松开取消' : '松开转文字' : '按住说话'}</Text>
+            <Text style={[chat.holdText, holdActive && holdCancelled && chat.cancelText]}>{holdActive ? holdCancelled ? '松开取消' : '松开发送' : '按住说话'}</Text>
           </View>}
           <View style={chat.composerActions}>
             <View style={chat.inputTools}>
@@ -972,7 +1278,7 @@ export function ChatScreen({
                   (fileAction.busy || recording || sending) &&
                     s.disabled,
                 ]}
-                disabled={fileAction.busy || recording || captureBusy || sending}
+                disabled={fileAction.busy || recording || captureBusy || sending || deleting}
                 onPress={() =>
                   fileAction.run(async ({ isCurrent }) => {
                     const file = await platform.pickDocument();
@@ -992,7 +1298,7 @@ export function ChatScreen({
                   recording && chat.recordingTool,
                   (fileAction.busy || sending) && s.disabled,
                 ]}
-                disabled={fileAction.busy || sending || Boolean(voice) || captureBusy}
+                disabled={fileAction.busy || sending || Boolean(voice) || captureBusy || deleting}
                 onPress={() =>
                   fileAction.run(async ({ isCurrent }) => {
                     if (recording) {
@@ -1024,7 +1330,7 @@ export function ChatScreen({
             </View>
             {!voiceMode && <Pressable
               accessibilityRole="button"
-              accessibilityLabel="发送消息"
+              accessibilityLabel={editing ? '提交修改' : '发送消息'}
               disabled={sendDisabled}
               onPress={send}
               style={[chat.sendButton, sendDisabled && chat.sendDisabled]}
@@ -1044,6 +1350,13 @@ export function ChatScreen({
           </ChatModeMotion>
         </View>
       </ScrollView>
+      {messageMenu?.owner === shareOwner && <ChatMessageActions anchor={messageMenu.anchor}
+        timestamp={formatDate(messageMenu.message.created_at)} hasText={Boolean(messageMenu.message.content)}
+        blocked={mutationBlocked()} onAction={performMessageAction} onClose={() => setMessageMenu(null)} />}
+      {selection?.owner === shareOwner && <ChatTextSelection text={selection.text} onClose={() => setSelection(null)} />}
+      {deleteTarget?.owner === shareOwner && <ChatDeleteConfirmation text={deleteTarget.message.content}
+        busy={deleting} error={deleteError} onDelete={confirmDelete}
+        onClose={() => { if (!deletingRef.current) setDeleteTarget(null); }} />}
       {recording && <ChatVoiceOverlay seconds={seconds} cancelled={holdActive && holdCancelled} holding={holdActive}
         bottom={composerHeight} availableHeight={availableHeight - composerHeight - 8}
         fontScale={nativeFontScale ?? fontScale} reducedMotion={reducedMotion} />}
@@ -1056,19 +1369,36 @@ const ChatMessage = memo(function ChatMessage({
   formatDate,
   share,
   retry,
+  menu,
 }: {
   message: Message;
   formatDate: (value: string) => string;
   share: (content: string) => unknown;
   retry: (key: string) => unknown;
+  menu: (message: Message, anchor: MessageAnchor) => void;
 }) {
+  const bubbleRef = useRef<View>(null);
+  const openMenu = (event?: { nativeEvent?: { pageX?: number; pageY?: number } }) => {
+    if (message.delivery && message.delivery !== 'sent') return;
+    const fallback = { x: event?.nativeEvent?.pageX ?? 20, y: event?.nativeEvent?.pageY ?? 100, width: 200, height: 50 };
+    if (bubbleRef.current?.measureInWindow) bubbleRef.current.measureInWindow((x, y, width, height) =>
+      menu(message, width > 0 && height > 0 ? { x, y, width, height } : fallback));
+    else menu(message, fallback);
+  };
   return message.role === 'user' ? (
-    <View
+    <Pressable
+      ref={bubbleRef}
       testID={`chat-message-${message.client_key ?? message.id}`}
       collapsable={false}
       style={chat.userBubble}
+      delayLongPress={420}
+      onLongPress={openMenu}
+      accessibilityLabel={`你的消息：${message.content}`}
+      accessibilityHint="长按打开消息操作"
+      accessibilityActions={[{ name: 'longpress', label: '消息操作' }]}
+      onAccessibilityAction={event => { if (event.nativeEvent.actionName === 'longpress') openMenu(); }}
     >
-      <Text selectable style={chat.userText}>
+      <Text style={chat.userText}>
         {message.content}
       </Text>
       {message.delivery === 'sending' && <Text style={chat.userMeta}>发送中…</Text>}
@@ -1082,7 +1412,7 @@ const ChatMessage = memo(function ChatMessage({
           {file.unavailable ? '（已删除或不可用）' : ''}
         </Text>
       ))}
-    </View>
+    </Pressable>
   ) : (
     <View
       testID={`chat-message-${message.client_key ?? message.id}`}
@@ -1182,6 +1512,11 @@ export function ConversationsScreen() {
 }
 
 const chat = StyleSheet.create({
+  contextStrip: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#eef0f9',
+    borderLeftWidth: 3, borderLeftColor: '#5665be', paddingVertical: 10, paddingLeft: 12, paddingRight: 8, marginBottom: 8, borderRadius: 12 },
+  contextLabel: { fontSize: 12, color: '#5665be', fontWeight: '500', marginBottom: 3 },
+  contextExcerpt: { fontSize: 12, color: appearance.secondary, lineHeight: 19 },
+  originalAttachment: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
   chatRoot: { minHeight: 0, backgroundColor: appearance.background },
   messagePane: { flex: 1, minHeight: 0 },
   messages: { paddingHorizontal: 20, paddingTop: 20, flexGrow: 1 },

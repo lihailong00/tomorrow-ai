@@ -27,8 +27,10 @@ interface NativePort {
   setSecureItem(key: string, value: string): Promise<void>;
   removeSecureItem(key: string): Promise<void>;
   pickDocument(): Promise<LocalFile | null>;
+  prepareChatImage(uri: string, mimeType: string, name: string): Promise<LocalFile>;
   startRecording(): Promise<void>;
   stopRecording(): Promise<LocalFile | null>;
+  copyText(text: string): Promise<void>;
   getSystemFontScale(): Promise<number | null>;
   requestNotifications(): Promise<boolean>;
   notificationPermissionStatus(): Promise<NotificationPermissionStatus>;
@@ -170,6 +172,13 @@ export const platform = {
     }
     return native.pickDocument();
   },
+  async prepareChatImage(file: LocalFile): Promise<LocalFile> {
+    if (native?.prepareChatImage) return native.prepareChatImage(file.uri, file.mime_type, file.name);
+    if (!/^image\/(jpeg|png)$/i.test(file.mime_type) || (file.size ?? 0) > 4 * 1024 * 1024) {
+      throw new Error('请选择 4 MB 以内的 JPEG 或 PNG 图片。');
+    }
+    return file;
+  },
   async startRecording() {
     if (!native?.startRecording) {
       throw missing();
@@ -226,6 +235,10 @@ export const platform = {
   },
   async share(text: string, title?: string) {
     await Share.share({ message: text, title });
+  },
+  async copyText(text: string): Promise<void> {
+    if (!native?.copyText) throw new Error('此设备暂时无法直接复制，请使用选取文字。');
+    await native.copyText(text);
   },
   async openUrl(url: string) {
     if (!/^https?:\/\//i.test(url)) {
