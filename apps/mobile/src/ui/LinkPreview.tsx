@@ -48,10 +48,11 @@ export function LinkPreviewScope({ blocks, children }: { blocks: MarkdownBlock[]
   const attempt = useRef(0);
   const selected = sources.find(s => s.url === panel);
   const sourceIdentity = sources.map(source => source.url).join('\n');
+  useEffect(() => () => { attempt.current++; }, []);
   useEffect(() => {
+    if (panel === null || (panel === 'list' ? sources.length > 0 : sources.some(source => source.url === panel))) return;
     attempt.current++; setPanel(null); setExpanded(false); setError(''); setOpening(false);
-    return () => { attempt.current++; };
-  }, [sourceIdentity]);
+  }, [sourceIdentity, panel]);
   const show = useCallback((source: WebSource) => { attempt.current++; setPanel(source.url); setExpanded(false); setError(''); setOpening(false); }, []);
   const close = () => { attempt.current++; setPanel(null); setExpanded(false); setOpening(false); setError(''); };
   const context = useMemo(() => ({ open: show }), [show]);

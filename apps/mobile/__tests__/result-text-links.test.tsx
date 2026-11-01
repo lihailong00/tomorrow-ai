@@ -55,3 +55,30 @@ test('reading progress counts visible titles instead of hidden Markdown URLs', (
   const message = { content: '参考[来源](https://example.com/a/very/long/hidden/url)。' } as Message;
   expect(messageReadingCharacters(message)).toBe(readingCharacters('参考来源。'));
 });
+
+test('streaming new sources preserves the selected preview and expanded URL until that source disappears', async () => {
+  const original = '[原始来源](https://example.com/original)';
+  await render(original);
+  await press('原始来源，example.com');
+  await press('查看完整网址');
+  await act(async () => tree.update(<ResultText content={`${original}\n继续参考[新增来源](https://example.org/new)`} />));
+  expect(tree.root.findByType(Modal).props.visible).toBe(true);
+  expect(action('收起完整网址')).toBeTruthy();
+  expect(text()).toContain('https://example.com/original');
+  await press('打开原文');
+  expect(platform.openUrl).toHaveBeenCalledWith('https://example.com/original');
+  await act(async () => tree.update(<ResultText content="改为[其他来源](https://example.org/new)" />));
+  expect(tree.root.findAllByType(Modal)).toHaveLength(0);
+});
+
+test('a late URL open failure cannot restore a preview removed by a message edit', async () => {
+  let rejectOpen!: (reason: Error) => void;
+  (platform.openUrl as jest.Mock).mockImplementationOnce(() => new Promise((_, reject) => { rejectOpen = reject; }));
+  await render('[来源](https://example.com/original)');
+  await press('来源，example.com');
+  act(() => { void action('打开原文').props.onPress(); });
+  await act(async () => tree.update(<ResultText content="用户已修改这条消息，没有来源。" />));
+  await act(async () => { rejectOpen(new Error('late failure')); });
+  expect(tree.root.findAllByType(Modal)).toHaveLength(0);
+  expect(text()).not.toContain('未能打开链接');
+});

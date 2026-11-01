@@ -55,10 +55,7 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
           val promise = cameraPromise ?: return
           val file = cameraFile
           cameraPromise = null; cameraFile = null
-          if (file != null) try {
-            context.revokeUriPermission(FileProvider.getUriForFile(context, context.packageName + ".attachments", file),
-              Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-          } catch (_: Exception) { }
+          revokeCameraGrant(file)
           if (resultCode != Activity.RESULT_OK || file == null || !file.isFile || file.length() == 0L) {
             file?.delete(); promise.resolve(null); return
           }
@@ -205,7 +202,7 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
       }, CAPTURE_PHOTO)
     } catch (error: Exception) {
-      cameraPromise = null; cameraFile = null; file.delete()
+      cameraPromise = null; cameraFile = null; revokeCameraGrant(file); file.delete()
       promise.reject("E_CAMERA", "无法打开相机，可从“＋”选择图片", error)
     }
   }
@@ -387,11 +384,26 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
 
   @ReactMethod fun clearCache(promise: Promise) {
     if (recorder != null) { promise.reject("E_BUSY", "请先结束录音"); return }
+    if (cameraPromise != null || pickerPromise != null) { promise.reject("E_BUSY", "请先完成当前图片或文件选择"); return }
     attachmentDir.listFiles()?.forEach { it.delete() }; promise.resolve(null)
   }
 
+  private fun revokeCameraGrant(file: File?) {
+    if (file == null) return
+    try {
+      context.revokeUriPermission(FileProvider.getUriForFile(context, context.packageName + ".attachments", file),
+        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+    } catch (_: Exception) { }
+  }
+
   override fun invalidate() {
-    recorder?.release(); recorder = null; recordingFile?.delete(); recordingFile = null
+    try { recorder?.release() } catch (_: Exception) { }
+    recorder = null; recordingFile?.delete(); recordingFile = null
+    val pendingCamera = cameraPromise
+    val pendingPhoto = cameraFile
+    cameraPromise = null; cameraFile = null
+    revokeCameraGrant(pendingPhoto); pendingPhoto?.delete()
+    pendingCamera?.reject("E_CANCELLED", "应用已关闭拍照")
     pickerPromise?.reject("E_CANCELLED", "应用已关闭文件选择"); pickerPromise = null
     super.invalidate()
   }
