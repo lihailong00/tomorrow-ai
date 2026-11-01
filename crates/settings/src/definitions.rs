@@ -56,6 +56,8 @@ pub static DEFINITIONS: &[SettingDefinition] = &[
     item!("ASR_BASE_URL", "speech", "语音识别 API 地址", "url", ""),
     item!("ASR_MODEL", "speech", "语音识别模型", "text", ""),
     item!(secret "ASR_API_KEY","speech","语音识别 API Key"),
+    item!("ASR_USER_DAILY_LIMIT", "speech", "每个用户最近 24 小时转写次数上限", "number", "1000"),
+    item!("ASR_GLOBAL_DAILY_LIMIT", "speech", "服务器最近 24 小时转写次数上限", "number", "5000"),
     item!(
         "PHOTO_VISION_ENABLED",
         "vision",

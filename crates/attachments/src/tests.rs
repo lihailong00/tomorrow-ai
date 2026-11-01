@@ -735,6 +735,7 @@ async fn configured_asr_makes_real_multipart_request_and_persists_transcript() {
     });
     let config = AsrConfig {
         protocol: asr::Protocol::Multipart,
+        limits: asr::Limits::default(),
         endpoint: format!("http://{address}/v1/audio/transcriptions"),
         api_key: Some("test-secret".into()),
         model: "test-whisper".into(),
@@ -799,6 +800,7 @@ async fn qwen_adapter_preserves_audio_and_caches_without_cross_user_calls() {
         DEFAULT_MAX_BYTES,
         Some(AsrConfig {
             protocol: asr::Protocol::Qwen,
+            limits: asr::Limits { user_daily: 1, global_daily: 1 },
             endpoint: format!("http://{address}/chat/completions"),
             api_key: Some("mock-asr-key".into()),
             model: "qwen3-asr-flash".into(),
@@ -841,16 +843,21 @@ async fn qwen_adapter_preserves_audio_and_caches_without_cross_user_calls() {
     remove_fixture(state).await;
 }
 
+async fn reserve_asr_test(state: &AttachmentsState, user: &str, upload: &str) -> Result<Option<String>, AttachmentError> {
+    let observed = asr::observe(state, user, upload).await?;
+    asr::reserve(state, user, upload, asr::Limits { user_daily: 20, global_daily: 50 }, observed).await
+}
+
 #[tokio::test]
 async fn asr_admission_rejects_duplicate_running_jobs_and_retains_failed_attempts() {
     let (state, user, _, _) = fixture(DEFAULT_MAX_BYTES, None).await;
     assert!(
-        asr::reserve(&state, &user, "first")
+        reserve_asr_test(&state, &user, "first")
             .await
             .unwrap()
             .is_none()
     );
-    let error = asr::reserve(&state, &user, "first").await.unwrap_err();
+    let error = reserve_asr_test(&state, &user, "first").await.unwrap_err();
     assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
     assert!(error.retry_after.unwrap() > 0);
     sqlx::query("UPDATE asr_jobs SET status='failed'")
@@ -858,17 +865,17 @@ async fn asr_admission_rejects_duplicate_running_jobs_and_retains_failed_attempt
         .await
         .unwrap();
     assert!(
-        asr::reserve(&state, &user, "first")
+        reserve_asr_test(&state, &user, "first")
             .await
             .unwrap()
             .is_none()
     );
     for n in 2..20 {
-        asr::reserve(&state, &user, &format!("upload-{n}"))
+        reserve_asr_test(&state, &user, &format!("upload-{n}"))
             .await
             .unwrap();
     }
-    let error = asr::reserve(&state, &user, "over-user-limit")
+    let error = reserve_asr_test(&state, &user, "over-user-limit")
         .await
         .unwrap_err();
     assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
@@ -880,18 +887,159 @@ async fn asr_admission_rejects_duplicate_running_jobs_and_retains_failed_attempt
     assert_eq!(count, 20);
     // Global quota still applies when callers use different accounts.
     for n in 20..50 {
-        asr::reserve(&state, &format!("other-{n}"), &format!("upload-{n}"))
+        reserve_asr_test(&state, &format!("other-{n}"), &format!("upload-{n}"))
             .await
             .unwrap();
     }
     assert_eq!(
-        asr::reserve(&state, "new-user", "over-global-limit")
+        reserve_asr_test(&state, "new-user", "over-global-limit")
             .await
             .unwrap_err()
             .status,
         StatusCode::TOO_MANY_REQUESTS
     );
     remove_fixture(state).await;
+}
+
+#[test]
+fn asr_limit_configuration_defaults_to_1000_and_rejects_unbounded_values() {
+    let config = |user: Option<&str>, global: Option<&str>| asr_from_lookup(|key| match key {
+        "ASR_BASE_URL" => Some("http://127.0.0.1:9/v1".into()),
+        "ASR_MODEL" => Some("fixture".into()),
+        "ASR_USER_DAILY_LIMIT" => user.map(str::to_owned),
+        "ASR_GLOBAL_DAILY_LIMIT" => global.map(str::to_owned),
+        _ => None,
+    });
+    assert_eq!(config(None, None).unwrap().unwrap().limits, asr::Limits { user_daily: 1000, global_daily: 5000 });
+    assert_eq!(config(Some("2"), Some("4")).unwrap().unwrap().limits, asr::Limits { user_daily: 2, global_daily: 4 });
+    for invalid in ["0", "-1", "1000001", "1.5", "unlimited"] {
+        assert!(config(Some(invalid), None).is_err());
+        assert!(config(None, Some(invalid)).is_err());
+    }
+}
+
+async fn asr_seed(state: &AttachmentsState, user: &str, count: i64, at: i64) {
+    let prefix = uuid::Uuid::new_v4().to_string();
+    let mut tx = state.pool.begin().await.unwrap();
+    for n in 0..count {
+        sqlx::query("INSERT INTO asr_attempts(id,user_id,upload_id,requested_at) VALUES($1,$2,$3,$4)")
+            .bind(format!("{prefix}-{n}")).bind(user).bind(format!("seed-{prefix}-{n}")).bind(at)
+            .execute(&mut *tx).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+}
+
+async fn asr_admission_reliability_contract(state: &AttachmentsState, user: &str) {
+    let defaults = asr::Limits::default();
+    let now = chrono::Utc::now().timestamp();
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM asr_attempts").fetch_one(&state.pool).await.unwrap(), 0,
+        "This contract requires a fresh isolated ASR test database");
+    asr_seed(state, user, 20, now - 86400 + 180).await;
+    assert!(asr::reserve(state, user, "normal-21st", defaults, 0).await.unwrap().is_none());
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM asr_attempts").fetch_one(&state.pool).await.unwrap(), 21);
+    asr_seed(state, user, 979, now - 86400 + 180).await;
+    let denied = asr::reserve(state, user, "normal-1001st", defaults, 0).await.unwrap_err();
+    assert_eq!(denied.code, "asr_user_daily_limit");
+    let expected = now - 86400 + 180 + 86400 - chrono::Utc::now().timestamp();
+    assert!((expected..=expected + 1).contains(&denied.retry_after.unwrap()));
+    assert_eq!(denied.status, StatusCode::TOO_MANY_REQUESTS);
+    let global = asr::reserve(state, "another-owner", "global-exhausted", asr::Limits { user_daily: 1000, global_daily: 1000 }, 0).await.unwrap_err();
+    assert_eq!(global.code, "asr_global_daily_limit");
+    assert!(global.retry_after.unwrap() > 0);
+    // Sliding-window expiry does not delete the attempted-call history.
+    sqlx::query("UPDATE asr_attempts SET requested_at=$1").bind(chrono::Utc::now().timestamp() - 86400).execute(&state.pool).await.unwrap();
+    assert!(asr::reserve(state, user, "after-window", asr::Limits { user_daily: 1, global_daily: 1 }, 0).await.unwrap().is_none());
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM asr_attempts").fetch_one(&state.pool).await.unwrap(), 1001);
+    // Two requests observed the same entry generation. Only the first may pay,
+    // even if it fails before the second leaves the admission queue.
+    assert_eq!(asr::observe(state, user, "duplicate").await.unwrap(), 0);
+    asr::reserve(state, user, "duplicate", defaults, 0).await.unwrap();
+    sqlx::query("UPDATE asr_jobs SET status='failed' WHERE upload_id='duplicate'").execute(&state.pool).await.unwrap();
+    let stale = asr::reserve(state, user, "duplicate", defaults, 0).await.unwrap_err();
+    assert_eq!(stale.code, "asr_retry_required");
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM asr_attempts WHERE upload_id='duplicate'").fetch_one(&state.pool).await.unwrap(), 1);
+    let manual = asr::observe(state, user, "duplicate").await.unwrap();
+    assert_eq!(manual, 1);
+    let failed_still_counts = asr::reserve(state, user, "duplicate", asr::Limits { user_daily: 2, global_daily: 5000 }, manual).await.unwrap_err();
+    assert_eq!(failed_still_counts.code, "asr_user_daily_limit");
+    assert!(asr::reserve(state, user, "duplicate", defaults, manual).await.unwrap().is_none());
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM asr_attempts WHERE upload_id='duplicate'").fetch_one(&state.pool).await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn asr_reliability_admission_sqlite() {
+    let (state, user, _, _) = fixture(DEFAULT_MAX_BYTES, None).await;
+    asr_admission_reliability_contract(&state, &user).await;
+    remove_fixture(state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires TADA_ASR_TEST_DATABASE_URL naming a fresh isolated tada_asr_* PostgreSQL database"]
+async fn asr_reliability_admission_postgres() {
+    let url = std::env::var("TADA_ASR_TEST_DATABASE_URL").expect("explicit isolated ASR QA database required");
+    assert!(url.starts_with("postgres://") || url.starts_with("postgresql://"));
+    assert!(url.split('?').next().unwrap().rsplit('/').next().unwrap().starts_with("tada_asr_"));
+    let repo = Repository::connect(&url).await.unwrap();
+    let user = repo.create_user("asr-qa@example.test", "test-only-unused-password", "ASR QA", "Asia/Shanghai").await.unwrap();
+    let root = std::env::temp_dir().join(format!("tomorrow-uploads-test-{}", uuid::Uuid::new_v4()));
+    let state = AttachmentsState::initialize(repo, root, DEFAULT_MAX_BYTES, None).await.unwrap();
+    asr_admission_reliability_contract(&state, &user.id).await;
+    remove_fixture(state).await;
+}
+
+#[tokio::test]
+async fn asr_short_queue_waits_for_capacity_then_reports_distinct_unstarted_busy() {
+    let semaphore = tokio::sync::Semaphore::new(1);
+    let held = semaphore.acquire().await.unwrap();
+    let (waiting, ()) = tokio::join!(asr::acquire(&semaphore, Duration::from_millis(100)), async {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        drop(held);
+    });
+    drop(waiting.unwrap());
+    let _held = semaphore.acquire().await.unwrap();
+    let busy = asr::acquire(&semaphore, Duration::from_millis(2)).await.unwrap_err();
+    assert_eq!(busy.code, "asr_busy");
+    assert_eq!(busy.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(busy.retry_after, Some(2));
+}
+
+#[tokio::test]
+async fn asr_provider_failures_are_specific_safe_and_keep_attempts() {
+    for (status, timeout, expected_status, expected_code) in [
+        (StatusCode::UNAUTHORIZED, false, StatusCode::BAD_GATEWAY, "asr_provider_auth"),
+        (StatusCode::TOO_MANY_REQUESTS, false, StatusCode::SERVICE_UNAVAILABLE, "asr_provider_rate_limited"),
+        (StatusCode::SERVICE_UNAVAILABLE, false, StatusCode::SERVICE_UNAVAILABLE, "asr_provider_unavailable"),
+        (StatusCode::SERVICE_UNAVAILABLE, true, StatusCode::GATEWAY_TIMEOUT, "asr_timeout"),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mock = Router::new().route("/audio/transcriptions", post(move || async move {
+            if timeout { tokio::time::sleep(Duration::from_millis(300)).await; }
+            (status, [(header::RETRY_AFTER, "17")], "fixture-upstream-private-key-and-body").into_response()
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap(); });
+        let (mut state, _, token, _) = fixture(DEFAULT_MAX_BYTES, Some(AsrConfig {
+            endpoint: format!("http://{address}/audio/transcriptions"), api_key: Some("fixture-private-api-key".into()),
+            model: "fixture".into(), protocol: asr::Protocol::Multipart, limits: asr::Limits::default(),
+        })).await;
+        if timeout { state.client = reqwest::Client::builder().timeout(Duration::from_millis(50)).build().unwrap(); }
+        let upload: Upload = serde_json::from_value(json_body(post_file(&state, &token, "voice.m4a", "audio/mp4", b"audio").await).await).unwrap();
+        let response = router(state.clone()).oneshot(Request::builder().method("POST")
+            .uri(format!("/v1/uploads/{}/transcribe", upload.id)).header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), expected_status);
+        if expected_code == "asr_provider_rate_limited" || expected_code == "asr_provider_unavailable" {
+            assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "17");
+        }
+        let body = json_body(response).await;
+        assert_eq!(body["error"]["code"], expected_code);
+        assert!(!body.to_string().contains("fixture-"));
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM asr_attempts").fetch_one(&state.pool).await.unwrap(), 1);
+        assert_eq!(sqlx::query_scalar::<_, String>("SELECT status FROM asr_jobs WHERE upload_id=$1").bind(&upload.id).fetch_one(&state.pool).await.unwrap(), "failed");
+        server.abort();
+        remove_fixture(state).await;
+    }
 }
 
 #[tokio::test]

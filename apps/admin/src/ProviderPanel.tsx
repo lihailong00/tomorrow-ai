@@ -213,6 +213,24 @@ export function ProviderPanel({ service, settings, edits, onEdits, onTest }: {
           {!customMode && !inherited && <details className="provider-advanced"><summary>查看自动配置的接口</summary>
             <code>{state.base}</code><p>地址已自动填写，无需修改。业务空间专属域名可通过“自定义接入”设置。</p>
           </details>}
+          {service === "speech" && settings.some(item => item.key === "ASR_USER_DAILY_LIMIT") &&
+            <details className="provider-advanced">
+              <summary>转写使用额度</summary>
+              <p>按最近 24 小时累计，保存后生效。留空使用默认额度：每人 1000 次、整个服务器 5000 次。</p>
+              <div className="provider-form-grid">
+                {[
+                  ["ASR_USER_DAILY_LIMIT", "每人过去 24 小时上限（次）"],
+                  ["ASR_GLOBAL_DAILY_LIMIT", "整个服务器过去 24 小时上限（次）"],
+                ].map(([field, label]) => <div className="setting-field" key={field}>
+                  <label htmlFor={field}>{label}</label>
+                  <input id={field} type="number" inputMode="numeric" min={1} max={1000000} step={1}
+                    value={value(settings, edits, field)} disabled={blocked(field)}
+                    onChange={event => change(field, event.target.value)} />
+                  {blocked(field) && <small>由服务器部署配置管理。</small>}
+                </div>)}
+              </div>
+              <p>这是调用次数上限，不是金额预算。已调用服务的失败或超时尝试也计入；重读已完成的转写不重复计数。</p>
+            </details>}
           {onTest && <div className="provider-test">
             <div className="provider-test-actions">
               <button type="button" className="button button-secondary" disabled={testing || inherited && !state.inheritanceReady}

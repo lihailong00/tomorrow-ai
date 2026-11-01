@@ -33,6 +33,7 @@ import { ResultText } from '../ui/ResultText';
 import { AutomaticMemoryNotice } from '../features/memory/AutomaticMemory';
 import { ChatModeMotion, useChatReducedMotion } from '../ui/ChatMotion';
 import { ChatVoiceOverlay } from '../ui/ChatVoiceOverlay';
+import { ChatVoiceRecovery } from '../ui/ChatVoiceRecovery';
 import { ChatDeleteConfirmation, ChatMessageActions, ChatTextSelection, type MessageAction, type MessageAnchor } from '../ui/ChatMessageActions';
 import { chatAppearance as appearance } from '../ui/ChatAppearance';
 import { colors as historyColors, styles as s } from '../ui/theme';
@@ -41,6 +42,7 @@ import { ModeNotice, usePagedList } from './Main';
 import { createMessageHistory, mergeMessageHistory } from './messageHistory';
 import { ChatMessageList } from './ChatMessageList';
 import { createChatStreamController, type ChatProgress, type ChatStreamController } from './chatStreamController';
+import { voiceFailure, type VoiceFailure } from './chatVoiceRecovery';
 
 type Attachment = { file: LocalFile; upload?: Upload; transcript?: string; imageText?: string };
 type VoiceSendIntent = { draft: string; file: LocalFile | null; context: object | null; isVisible: () => boolean };
@@ -69,6 +71,7 @@ type ChatSnapshot = {
   voice: VoiceInput | null;
   voicePhase: string;
   voiceError: string | null;
+  voiceFailure: VoiceFailure | null;
   voiceBusy: boolean;
   messages: Message[];
   messageVersion: number;
@@ -92,6 +95,7 @@ export function createChatEntryState(
     voice: null,
     voicePhase: '',
     voiceError: null,
+    voiceFailure: null,
     voiceBusy: false,
     messages: [],
     messageVersion: 0,
@@ -111,6 +115,7 @@ export function createChatEntryState(
     history,
     hiddenHistoryIds: new Set<string>(),
     voiceRequest: null as VoiceRequest | null,
+    deletedVoiceUploads: new Set<string>(),
     streams,
     disposeStreams,
     getSnapshot: () => snapshot,
@@ -157,7 +162,7 @@ export function ChatScreen({
     localState.current = { api, value: createChatEntryState(conversationId, prompt) };
   }
   const state = entryState ?? localState.current.value;
-  const { id, reasoningEffort, messages, messageVersion, draft, attachment, voice, voicePhase, voiceError, voiceBusy, sending, editing, quoting, sendError } =
+  const { id, reasoningEffort, messages, messageVersion, draft, attachment, voice, voicePhase, voiceError, voiceFailure: pendingVoiceFailure, voiceBusy, sending, editing, quoting, sendError } =
     useSyncExternalStore(state.subscribe, state.getSnapshot, state.getSnapshot);
   const setDraft = useCallback((next: React.SetStateAction<string>) => state.update(old => ({
     ...old,
@@ -433,7 +438,7 @@ export function ChatScreen({
       throw new Error('文字已识别，请先缩短输入框中的内容，再点“填入文字”。');
     }
     state.update(old => ({ ...old, draft: `${previous}${separator}${text}`,
-      voice: null, voicePhase: '', voiceError: null, voiceBusy: false }));
+      voice: null, voicePhase: '', voiceError: null, voiceFailure: null, voiceBusy: false }));
   };
   const makeVoiceSendIntent = (): VoiceSendIntent => ({
     draft: state.getSnapshot().draft,
@@ -485,7 +490,18 @@ export function ChatScreen({
       ? state.scope.isRetained()
       : mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state;
     if (retained && state.getSnapshot().voice?.upload?.id === uploadId) return;
+    if (state.deletedVoiceUploads.has(uploadId)) return;
+    state.deletedVoiceUploads.add(uploadId);
     api.deleteUpload(uploadId).catch(() => {});
+  };
+  const discardVoice = (input: VoiceInput) => {
+    if (!mounted.current || voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
+        state.getSnapshot().voice?.key !== input.key) return;
+    const upload = state.getSnapshot().voice?.upload;
+    state.voiceRequest?.cancel();
+    state.update(old => ({ ...old, voice: null, voicePhase: '', voiceError: null, voiceFailure: null, voiceBusy: false }));
+    if (upload) deleteUnreferencedVoiceUpload(upload.id);
+    fileAction.setError(null);
   };
   const convertVoice = async (input: VoiceInput) => {
     const existing = state.getSnapshot();
@@ -508,7 +524,7 @@ export function ChatScreen({
         controller.abort();
         const pending = state.getSnapshot().voice;
         if (pending?.key === input.key) {
-          state.update(old => ({ ...old, voice: null, voicePhase: '', voiceError: null, voiceBusy: false }));
+          state.update(old => ({ ...old, voice: null, voicePhase: '', voiceError: null, voiceFailure: null, voiceBusy: false }));
           if (pending.upload) deleteUnreferencedVoiceUpload(pending.upload.id);
         }
       },
@@ -520,7 +536,7 @@ export function ChatScreen({
         mounted.current && voiceOwner.current.api === api && voiceOwner.current.state === state);
     let upload = input.upload;
     let recognized = input.text;
-    state.update(old => ({ ...old, voice: input, voiceError: null, voiceBusy: true }));
+    state.update(old => ({ ...old, voice: input, voiceError: null, voiceFailure: null, voiceBusy: true }));
     detach = state.scope?.onDispose(operation.cancel) ?? (() => {});
     fileAction.setError(null);
     if (!current()) return;
@@ -578,9 +594,11 @@ export function ChatScreen({
             ? '语音已识别，文字和附件已保留，可重试发送。'
             : '转写未完成，录音已保留，可重试或重新录制。',
         );
-        state.update(old => ({ ...old, voiceError: errorMessage(error) }));
+        const failure = recognized ? { kind: 'other' as const, message: errorMessage(error) } : voiceFailure(error);
+        state.update(old => ({ ...old, voiceError: failure.message, voiceFailure: failure }));
         if (input.sendIntent && input.sendIntent.isVisible()) setVoiceMode(false);
-        throw error;
+        // The retained voice card owns this failure and its explicit retry.
+        // Do not also emit a clipped generic file-action error or resubmit POST.
       }
     } finally {
       if (current()) state.update(old => ({ ...old, voiceBusy: false }));
@@ -641,7 +659,7 @@ export function ChatScreen({
       sendIntent: makeVoiceSendIntent() };
     holdOwner.gesture = gesture;
     setHoldActive(true); setHoldCancelled(false); setCaptureBusy(true);
-    state.update(old => ({ ...old, voiceError: null }));
+    state.update(old => ({ ...old, voiceError: null, voiceFailure: null }));
     void (async () => {
       try {
         await platform.startRecording();
@@ -997,14 +1015,15 @@ export function ChatScreen({
           revealFocusedInput();
         }}
       >
-        {!recording && (fileAction.error || voiceError || attachment || voice || (editing && sendError)) && (
+        {!recording && (fileAction.error || (!voice && voiceError) || attachment || (editing && sendError)) && (
           <ScrollView
+            testID="chat-composer-support"
             style={[chat.composerSupport, { maxHeight: supportMaxHeight }]}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
             bounces={false}
           >
-            <ErrorNotice message={voiceError ?? fileAction.error} />
+            <ErrorNotice message={(!voice ? voiceError : null) ?? fileAction.error} />
             {editing && <ErrorNotice message={sendError} />}
             {editing?.retry && draft === editing.retryDraft && attachment === editing.retryAttachment && <Button variant="ghost"
               onPress={() => { if (actionOwnerCurrent(shareOwner) && !mutationBlocked()) return submitPrepared(); }}>重试修改</Button>}
@@ -1013,51 +1032,6 @@ export function ChatScreen({
               <Text style={[s.small, { fontSize: 10, marginBottom: 6 }]}>
                 附件最多 25 MB。录音会自动转成文字。
               </Text>
-            )}
-            {voice && (
-              <Card style={chat.attachmentCard}>
-                <View style={[s.row, { gap: 10 }]}>
-                  {voiceBusy ? (
-                    <ActivityIndicator color={appearance.accent} />
-                  ) : (
-                    <Icon name="mic" size={20} color={appearance.accent} />
-                  )}
-                  <Text style={[s.body, s.fill, { fontSize: 12 }]}>
-                    {voicePhase}
-                  </Text>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="取消语音转写"
-                    onPress={() => {
-                      if (!mounted.current || voiceOwner.current.api !== api ||
-                        voiceOwner.current.state !== state ||
-                        state.getSnapshot().voice?.key !== voice.key) return;
-                      state.voiceRequest?.cancel();
-                      state.update(old => ({ ...old, voice: null, voicePhase: '', voiceError: null, voiceBusy: false }));
-                      fileAction.setError(null);
-                    }}
-                    style={chat.removeButton}
-                  >
-                    <Icon name="close" size={18} color={appearance.secondary} />
-                  </Pressable>
-                </View>
-                {voice.text && <Text style={[s.small, { marginTop: 6 }]} numberOfLines={3}>已识别：{voice.text}</Text>}
-                {!voiceBusy && !fileAction.busy && (
-                  <Button
-                    variant="ghost"
-                    onPress={() => fileAction.run(() => convertVoice({ ...voice,
-                      sendIntent: voice.sendIntent ? makeVoiceSendIntent() : undefined }))}
-                  >
-                    {voice.sendIntent ? voice.text ? '重试发送' : '重试识别并发送' : voice.text ? '填入文字' : '重试转写'}
-                  </Button>
-                )}
-                {!voiceBusy && !fileAction.busy && voice.sendIntent && voice.text && <Button variant="ghost" onPress={() => fileAction.run(async () => {
-                  state.voiceRequest?.release();
-                  insertVoiceText(voice.text!);
-                  if (voice.upload) deleteUnreferencedVoiceUpload(voice.upload.id);
-                  setVoiceMode(false);
-                })}>填入文字</Button>}
-              </Card>
             )}
             {attachment && (
               <Card style={chat.attachmentCard}>
@@ -1219,6 +1193,13 @@ export function ChatScreen({
             revealFocusedInput();
           }}
         >
+          {!recording && voice && <ChatVoiceRecovery phase={voicePhase} failure={pendingVoiceFailure ?? undefined}
+            transcript={voice.text} busy={voiceBusy} blocked={fileAction.busy || sending || deleting}
+            retryLabel={voice.sendIntent ? voice.text ? '重试发送' : '重试识别并发送' : voice.text ? '填入文字' : '重试转写'}
+            onRetry={() => fileAction.run(() => convertVoice({ ...voice,
+              sendIntent: voice.sendIntent ? makeVoiceSendIntent() : undefined }))}
+            onCancel={() => discardVoice(voice)}
+            onInsertText={voice.sendIntent && voice.text ? () => fileAction.run(() => convertVoice({ ...voice, sendIntent: undefined })) : undefined} />}
           <View style={recording && chat.recordingSecondaryHidden} testID="chat-composer-secondary">
             {navigationActions}
             <ChatReasoningSelector owner={state} value={reasoningEffort}

@@ -670,6 +670,7 @@ fn validate(name: &str, value: &str) -> Result<()> {
             let value = value.parse::<i64>().map_err(|_| ConfigError::Validation)?;
             let (min, max) = match name {
                 "SMS_DAILY_LIMIT" => (1, 10000),
+                "ASR_USER_DAILY_LIMIT" | "ASR_GLOBAL_DAILY_LIMIT" => (1, 1000000),
                 "AGENT_MAX_WEB_SEARCHES" | "AGENT_MAX_WEB_FETCHES" => (1, 100),
                 "AGENT_MAX_CONCURRENT" => (1, 32),
                 "AGENT_MAX_TURNS" => (1, 256),

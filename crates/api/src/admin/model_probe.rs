@@ -26,7 +26,7 @@ pub(super) async fn test_speech(
     State(state): State<AdminState>, session: AdminSession, Json(input): Json<ConfigInput>,
 ) -> Result<Json<Value>> {
     require_owner(&session)?;
-    let keys = ["ASR_BASE_URL", "ASR_MODEL", "ASR_API_KEY", "ASR_PROTOCOL"];
+    let keys = ["ASR_BASE_URL", "ASR_MODEL", "ASR_API_KEY", "ASR_PROTOCOL", "ASR_USER_DAILY_LIMIT", "ASR_GLOBAL_DAILY_LIMIT"];
     if input.changes.keys().any(|key| !keys.contains(&key.as_str())) { return Err(invalid()); }
     let _permit = state.model_probe_jobs.clone().try_acquire_owned().map_err(|_| busy())?;
     rate_limit(&state, &format!("provider-probe:{}", session.user_id), 5).await?;

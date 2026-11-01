@@ -130,7 +130,9 @@ export class ApiClient {
         ? 50000 // Includes MCP initialization, tool discovery and the bounded provider call.
         : path === '/chat'
         ? CHAT_REQUEST_TIMEOUT_MS
-        : path === '/todos/extract' || path.endsWith('/transcribe') || /^\/uploads\/[^/]+\/analyze$/.test(path)
+        : path.endsWith('/transcribe')
+        ? 170000 // Server-side ASR queue + provider/read deadline + return-path margin.
+        : path === '/todos/extract' || /^\/uploads\/[^/]+\/analyze$/.test(path)
         ? 120000
         : multipart
         ? 60000

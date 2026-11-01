@@ -8,6 +8,8 @@ import { AppProvider, AppContextValue } from '../src/app/context';
 import { useRouteStack } from '../src/app/navigation';
 import { platform } from '../src/platform/ports';
 import { Button } from '../src/ui/components';
+import { ApiError } from '../src/api/client';
+import { ChatVoiceRecovery } from '../src/ui/ChatVoiceRecovery';
 
 jest.mock('../src/platform/ports', () => ({
   platform: {
@@ -317,6 +319,90 @@ test('ASR failure keeps the picture and typed draft; explicit retry reuses recor
   expect(app.api.upload).toHaveBeenCalledTimes(2); expect(app.api.transcribe).toHaveBeenCalledTimes(2);
   expect(app.api.chat).toHaveBeenCalledTimes(1);
   expect(app.api.chat).toHaveBeenCalledWith('已有文字\n明天下午提醒我开会。', undefined, expect.any(String), ['image-upload']);
+  await app.unmount();
+});
+
+test('ASR quota recovery stays outside clipped support and allows an explicit quota recheck after admin changes', async () => {
+  const app = await setup(); useImageUploads(app);
+  jest.setSystemTime(new Date('2026-11-01T14:20:00Z'));
+  app.api.transcribe.mockRejectedValueOnce(new ApiError('asr_user_daily_limit', 'quota message from server', 429, 3600));
+  await app.input('已有文字'); await app.press('选择附件'); await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  const card = app.tree().root.findByType(ChatVoiceRecovery);
+  const ancestors: string[] = [];
+  let ancestor = card.parent;
+  while (ancestor) { if (ancestor.props.testID) ancestors.push(ancestor.props.testID); ancestor = ancestor.parent; }
+  expect(ancestors).toContain('chat-composer-content');
+  expect(ancestors).not.toContain('chat-composer-support');
+  expect(card.findAllByType(Button)).toHaveLength(1);
+  expect(app.text()).toContain('你的语音识别额度暂时用完了');
+  expect(app.text()).toContain('预计额度恢复');
+  expect(app.text()).not.toContain('quota message from server');
+  expect(app.state().getSnapshot().draft).toBe('已有文字');
+  expect(app.state().getSnapshot().attachment?.file.name).toBe('receipt.png');
+  expect(app.state().getSnapshot().voice?.upload?.id).toBe('voice-upload');
+  expect(app.api.transcribe).toHaveBeenCalledTimes(1);
+  await act(async () => jest.advanceTimersByTime(120000));
+  expect(app.api.transcribe).toHaveBeenCalledTimes(1);
+  expect(app.api.chat).not.toHaveBeenCalled();
+  // Advisory reset time does not block an administrator's immediate quota fix.
+  await app.button('重新检查额度');
+  expect(app.api.transcribe).toHaveBeenCalledTimes(2);
+  expect(app.api.transcribe.mock.calls.every(call => call[0] === 'voice-upload')).toBe(true);
+  expect(app.api.upload).toHaveBeenCalledTimes(2); // Original recording plus image, not another recording.
+  expect(app.api.chat).toHaveBeenCalledTimes(1);
+  expect(app.tree().root.findAllByType(ChatVoiceRecovery)).toHaveLength(0);
+  await app.unmount();
+});
+
+test.each([
+  ['asr_busy', 503], ['asr_in_progress', 429], ['asr_retry_required', 409],
+  ['asr_provider_auth', 502], ['asr_provider_quota', 502], ['asr_provider_rate_limited', 503],
+  ['asr_provider_unavailable', 503], ['asr_timeout', 504], ['network', 0], ['rate_limited', 429],
+])('ASR %s never automatically posts again and preserves the uploaded recording', async (code, status) => {
+  const app = await setup();
+  app.api.transcribe.mockRejectedValueOnce(new ApiError(String(code), 'provider response must not be repeated', Number(status), 2));
+  await hold(app); await act(async () => gestureNode(app).props.onResponderRelease());
+  await act(async () => jest.advanceTimersByTime(180000));
+  expect(app.api.transcribe).toHaveBeenCalledTimes(1);
+  expect(app.api.upload).toHaveBeenCalledTimes(1);
+  expect(app.state().getSnapshot().voice?.upload?.id).toBe('voice-upload');
+  expect(app.api.chat).not.toHaveBeenCalled();
+  expect(app.text()).not.toContain('provider response must not be repeated');
+  expect(app.tree().root.findByType(ChatVoiceRecovery).findAllByType(Button)).toHaveLength(1);
+  await app.unmount();
+});
+
+test('discard after an ASR failure deletes only its recording once and immediately unblocks typed text plus the image', async () => {
+  const app = await setup(); useImageUploads(app);
+  app.api.transcribe.mockRejectedValueOnce(new ApiError('asr_global_daily_limit', 'global quota', 429, 3600));
+  await app.input('继续发这段文字'); await app.press('选择附件'); await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  await app.press('取消语音转写');
+  expect(app.api.deleteUpload).toHaveBeenCalledTimes(1);
+  expect(app.api.deleteUpload).toHaveBeenCalledWith('voice-upload');
+  expect(app.state().getSnapshot().voice).toBeNull();
+  expect(app.value()).toBe('继续发这段文字');
+  expect(app.state().getSnapshot().attachment?.file.name).toBe('receipt.png');
+  await app.press('发送消息');
+  expect(app.api.chat).toHaveBeenCalledTimes(1);
+  expect(app.api.chat).toHaveBeenCalledWith('继续发这段文字', undefined, expect.any(String), ['image-upload']);
+  expect(app.api.transcribe).toHaveBeenCalledTimes(1);
+  await app.unmount();
+});
+
+test('quota recovery survives History without a new upload or an automatic retry', async () => {
+  const app = await setup();
+  app.api.transcribe.mockRejectedValueOnce(new ApiError('asr_user_daily_limit', 'quota', 429, 60));
+  await app.input('保留草稿'); await hold(app);
+  await act(async () => gestureNode(app).props.onResponderRelease());
+  const retryAt = app.state().getSnapshot().voiceFailure?.retryAt;
+  await app.history(); await act(async () => jest.advanceTimersByTime(30000)); await app.back();
+  expect(app.state().getSnapshot().voiceFailure?.retryAt).toBe(retryAt);
+  expect(app.value()).toBe('保留草稿');
+  expect(app.api.upload).toHaveBeenCalledTimes(1);
+  expect(app.api.transcribe).toHaveBeenCalledTimes(1);
+  expect(app.tree().root.findAllByType(ChatVoiceRecovery)).toHaveLength(1);
   await app.unmount();
 });
 

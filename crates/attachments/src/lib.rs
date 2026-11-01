@@ -88,6 +88,7 @@ struct AsrConfig {
     api_key: Option<String>,
     model: String,
     protocol: asr::Protocol,
+    limits: asr::Limits,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -154,7 +155,7 @@ impl IntoResponse for AttachmentError {
     fn into_response(self) -> Response {
         let mut response = (
             self.status,
-            Json(serde_json::json!({"error":{"code":self.code,"message":self.message}})),
+            Json(serde_json::json!({"error":{"code":self.code,"message":self.message,"retry_after_seconds":self.retry_after}})),
         )
             .into_response();
         if let Some(seconds) = self.retry_after {
@@ -1040,21 +1041,21 @@ async fn transcribe(
             "语音文件过大，请分段录制",
         ));
     }
-    let _permit = asr::ACTIVE.try_acquire().map_err(|_| asr::limited(2))?;
-    if let Some(text) = asr::reserve(&state, &user_id, &id).await? {
+    let observed_attempts = asr::observe(&state, &user_id, &id).await?;
+    let _permit = asr::acquire(&asr::ACTIVE, Duration::from_secs(asr::QUEUE_WAIT_SECONDS)).await?;
+    if let Some(text) = asr::reserve(&state, &user_id, &id, config.limits, observed_attempts).await? {
         return Ok(Json(Transcription {
             upload_id: id,
             text,
             model: config.model.clone(),
         }));
     }
-    let result = async {
+    let result = tokio::time::timeout(Duration::from_secs(asr::OPERATION_TIMEOUT_SECONDS), async {
         let bytes = state
             .read_bytes(&user_id, &id, asr::MAX_AUDIO_BYTES)
             .await?;
         asr::perform(&state, config, &upload, bytes).await
-    }
-    .await;
+    }).await.unwrap_or_else(|_| Err(asr::timed_out()));
     let text = match result {
         Ok(text) => text,
         Err(error) => {
@@ -1235,6 +1236,7 @@ fn asr_from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<AsrCon
                 api_key,
                 model: model.trim().to_owned(),
                 protocol,
+                limits: asr::Limits::from_lookup(&get)?,
             }))
         }
         _ => Err(AttachmentError::validation(

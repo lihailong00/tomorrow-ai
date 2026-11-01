@@ -1552,12 +1552,14 @@ mod tests {
         assert_eq!(voice["code"], "not_configured");
         let (status, _, voice) = call(&f.state, Method::POST, "/admin/api/config/test-speech", Some(json!({
             "expected_revision":revision,"changes":{"ASR_PROTOCOL":"qwen_asr","ASR_MODEL":"unsupported-model",
-            "ASR_BASE_URL":"http://127.0.0.1:9/v1","ASR_API_KEY":"fixture-temporary-private-key"}
+            "ASR_BASE_URL":"http://127.0.0.1:9/v1","ASR_API_KEY":"fixture-temporary-private-key",
+            "ASR_USER_DAILY_LIMIT":"12","ASR_GLOBAL_DAILY_LIMIT":"100"}
         })), Some(&cookie), Some(&csrf), "https://unit.test").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(voice["code"], "unsupported_model");
         assert!(!voice.to_string().contains("fixture-temporary-private-key"));
         assert!(!f.state.settings.effective_values().await.unwrap().contains_key("ASR_API_KEY"));
+        assert_eq!(f.state.settings.effective_values().await.unwrap().get("ASR_USER_DAILY_LIMIT").map(String::as_str), Some("1000"));
         assert_eq!(f.state.settings.revision().await.unwrap(), revision);
         let held = f.state.model_probe_jobs.clone().acquire_owned().await.unwrap();
         let (status, _, _) = call(&f.state, Method::POST, path, Some(input.clone()), Some(&cookie), Some(&csrf), "https://unit.test").await;

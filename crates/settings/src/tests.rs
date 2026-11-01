@@ -559,6 +559,30 @@ async fn deletion_restores_default_and_empty_explicitly_clears_optional_value() 
 }
 
 #[test]
+fn asr_limits_are_positive_bounded_and_default_to_normal_daily_usage() {
+    for (key, default) in [("ASR_USER_DAILY_LIMIT", "1000"), ("ASR_GLOBAL_DAILY_LIMIT", "5000")] {
+        assert_eq!(definition(key).unwrap().default_value, default);
+        for value in ["0", "-1", "1000001", "1.5", "unlimited"] { assert!(validate(key, value).is_err(), "{key} accepted {value}"); }
+        for value in ["1", default, "1000000"] { assert!(validate(key, value).is_ok(), "{key} rejected {value}"); }
+    }
+}
+
+#[tokio::test]
+async fn asr_limits_are_editable_and_do_not_configure_a_provider_on_their_own() {
+    let fixture = Fixture::new().await;
+    let store = fixture.store().await;
+    let defaults = store.effective_values().await.unwrap();
+    assert_eq!(defaults.get("ASR_USER_DAILY_LIMIT").map(String::as_str), Some("1000"));
+    assert_eq!(defaults.get("ASR_GLOBAL_DAILY_LIMIT").map(String::as_str), Some("5000"));
+    store.update(0, changes(&[("ASR_USER_DAILY_LIMIT", Some("12")), ("ASR_GLOBAL_DAILY_LIMIT", Some("100"))])).await.unwrap();
+    let values = store.effective_values().await.unwrap();
+    assert_eq!(values.get("ASR_USER_DAILY_LIMIT").map(String::as_str), Some("12"));
+    assert_eq!(values.get("ASR_GLOBAL_DAILY_LIMIT").map(String::as_str), Some("100"));
+    assert_eq!(store.readiness().await.unwrap().groups.iter().find(|group| group.id == "speech").unwrap().status, "not_configured");
+    assert!(matches!(store.update(1, changes(&[("ASR_USER_DAILY_LIMIT", Some("0"))])).await, Err(ConfigError::Validation)));
+}
+
+#[test]
 fn validators_bound_inputs_and_disallow_credentials_in_urls() {
     for (key, value) in [
         ("MODEL_BASE_URL", "https://user:password@example.test/v1"),
