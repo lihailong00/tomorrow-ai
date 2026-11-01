@@ -92,6 +92,7 @@ function ConnectionsSession({
   const [notice, setNotice] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
   const [token, setToken] = useState('');
+  const [serverUrl, setServerUrl] = useState('');
   const [environment, setEnvironment] = useState<McpEnvironment>('production');
   const [toolOwner, setToolOwner] = useState<string | null>(null);
   const [tools, setTools] = useState<PersonalMcpTool[]>([]);
@@ -115,6 +116,7 @@ function ConnectionsSession({
         scope.selectedId = null;
         setSelected(null);
         setToken('');
+        setServerUrl('');
         setToolOwner(null);
         setTools([]);
       }
@@ -210,6 +212,7 @@ function ConnectionsSession({
     )
       return;
     setToken('');
+    setServerUrl(item.server_url || '');
     setEnvironment(item.environment || 'production');
     setSelected(item.id);
     scope.selectedId = item.id;
@@ -223,6 +226,7 @@ function ConnectionsSession({
     setSelected(null);
     scope.selectedId = null;
     setToken('');
+    setServerUrl('');
   };
   const connect = (item: PersonalMcpConnection) =>
     run(item.id, async () => {
@@ -232,10 +236,19 @@ function ConnectionsSession({
       const credential = token.trim();
       if (!credential)
         throw new Error('请先填写你本人的' + item.credential_label + '。');
-      const result = await client.connect(item.id, credential, environment);
+      const address = item.requires_server_url ? serverUrl.trim() : undefined;
+      if (item.requires_server_url && !address)
+        throw new Error('请先填写 Memos 服务地址。');
+      const result = await client.connect(
+        item.id,
+        credential,
+        environment,
+        address,
+      );
       if (!scope.active) return;
       updateConnection(result);
       setToken('');
+      setServerUrl('');
       setSelected(null);
       scope.selectedId = null;
       setNotice(item.name + '已通过实际连接校验，现在可以在对话中使用。');
@@ -533,6 +546,18 @@ function ConnectionsSession({
               <Text style={s.small}>
                 请在官方页面获取你本人的凭证。凭证仅提交给当前连接的服务器，加密保存，不会在这里回显。
               </Text>
+              {item.requires_server_url && (
+                <Field
+                  label="Memos 服务地址"
+                  value={serverUrl}
+                  onChangeText={setServerUrl}
+                  placeholder="https://notes.example.com"
+                  keyboardType="url"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  editable={busy === null}
+                />
+              )}
               <Field
                 label={item.credential_label}
                 value={token}
@@ -585,7 +610,11 @@ function ConnectionsSession({
                 </View>
               )}
               <Button
-                disabled={busy !== null || !token.trim()}
+                disabled={
+                  busy !== null ||
+                  !token.trim() ||
+                  (item.requires_server_url === true && !serverUrl.trim())
+                }
                 loading={busy === item.id}
                 onPress={() => {
                   void connect(item);

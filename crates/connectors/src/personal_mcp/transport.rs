@@ -1,5 +1,5 @@
-//! Bounded MCP transports. The account owner supplies only a personal token;
-//! endpoints, authentication headers and executable selection are server-owned.
+//! Bounded personal-account transports. Preset endpoints and executable
+//! selection are server-owned; Memos separately validates user instance URLs.
 use std::{path::PathBuf, process::Stdio, time::Duration};
 
 use axum::http::StatusCode;
@@ -57,7 +57,7 @@ impl Credentials {
                 .token
                 .bytes()
                 .any(|value| value <= 0x20 || value == 0x7f)
-            || self.server_url.is_some()
+            || (provider != "memos" && self.server_url.is_some())
             || !(if provider == "baidu_netdisk" {
                 self.environment == "experience"
             } else {
@@ -67,6 +67,7 @@ impl Credentials {
         {
             return Err(invalid());
         }
+        if provider == "memos" { super::memos::validate(self)?; }
         Ok(())
     }
 }
@@ -123,6 +124,9 @@ fn unauthorized() -> ConnectorError {
 
 pub async fn discover(provider: &str, credentials: &Credentials) -> Result<Vec<Value>> {
     credentials.validate(provider)?;
+    if provider == "notion" {
+        return timeout(DEADLINE, super::notion::discover(credentials)).await.map_err(|_| timed_out())?;
+    }
     if provider == "yinxiang" {
         return timeout(DEADLINE, super::yinxiang::discover(credentials))
             .await
@@ -131,7 +135,10 @@ pub async fn discover(provider: &str, credentials: &Credentials) -> Result<Vec<V
     timeout(DEADLINE, async {
         let mut connection = Connection::open(provider, credentials).await?;
         let result = async {
-            let tools = discover_on(&mut connection).await?;
+            let mut tools = discover_on(&mut connection).await?;
+            if provider == "memos" {
+                tools.retain(|tool| tool["name"].as_str().is_some_and(super::memos::enabled_tool));
+            }
             // The official stdio server can list its tools entirely offline.
             // A real account read is therefore required before claiming that a
             // personal Yuque token has been validated.
@@ -142,12 +149,7 @@ pub async fn discover(provider: &str, credentials: &Credentials) -> Result<Vec<V
                         json!({"name":"yuque_get_user","arguments":{}}),
                     )
                     .await?;
-                if identity.get("isError").and_then(Value::as_bool) == Some(true) {
-                    return Err(unauthorized());
-                }
-                if !identity.get("content").is_some_and(Value::is_array) {
-                    return Err(protocol_error());
-                }
+                validate_yuque_identity(&identity)?;
             }
             if provider == "baidu_netdisk" {
                 if !tools.iter().any(|tool| tool["name"] == "user_info") {
@@ -158,6 +160,11 @@ pub async fn discover(provider: &str, credentials: &Credentials) -> Result<Vec<V
                     .await?;
                 baidu_sse::validate_identity(&identity)?;
             }
+            if provider == "memos" {
+                if !tools.iter().any(|tool| tool["name"] == "auth_get_current_user") { return Err(protocol_error()); }
+                let identity = connection.rpc("tools/call", json!({"name":"auth_get_current_user","arguments":{}})).await?;
+                super::memos::validate_identity(&identity)?;
+            }
             Ok(tools)
         }
         .await;
@@ -166,6 +173,17 @@ pub async fn discover(provider: &str, credentials: &Credentials) -> Result<Vec<V
     })
     .await
     .map_err(|_| timed_out())?
+}
+
+fn validate_yuque_identity(value: &Value) -> Result<()> {
+    if value["isError"] == true { return Err(unauthorized()); }
+    let identity = value["content"].as_array().into_iter().flatten()
+        .filter_map(|part| part["text"].as_str())
+        .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+        .find(|user| user["id"].as_u64().is_some_and(|id|id>0)
+            && user["login"].as_str().is_some_and(|login|!login.trim().is_empty()));
+    if identity.is_none() { return Err(unauthorized()); }
+    Ok(())
 }
 
 pub async fn call(
@@ -186,6 +204,9 @@ pub async fn call(
         return Err(invalid());
     }
     let arguments = call_arguments(provider, arguments);
+    if provider == "notion" {
+        return timeout(DEADLINE, super::notion::call(credentials, tool, arguments)).await.map_err(|_| timed_out())?;
+    }
     if provider == "yinxiang" {
         return timeout(
             DEADLINE,
@@ -284,6 +305,8 @@ impl Connection {
             Self::Baidu(baidu_sse::LegacySse::official(credentials).await?)
         } else if provider == "yuque" {
             Self::Stdio(StdioConnection::open(credentials)?)
+        } else if provider == "memos" {
+            Self::Http(HttpConnection::memos(credentials).await?)
         } else {
             Self::Http(HttpConnection::official(provider, credentials)?)
         };
@@ -351,6 +374,14 @@ struct HttpConnection {
 }
 
 impl HttpConnection {
+    async fn memos(credentials: &Credentials) -> Result<Self> {
+        let (url, client) = super::memos::endpoint(credentials).await?;
+        let mut headers = HeaderMap::new();
+        let mut auth = HeaderValue::from_str(&format!("Bearer {}", credentials.token)).map_err(|_| invalid())?;
+        auth.set_sensitive(true);
+        headers.insert(AUTHORIZATION, auth);
+        Ok(Self { client, url, headers, session: None, version: PROTOCOL.into(), next_id: 1 })
+    }
     fn official(provider: &str, credentials: &Credentials) -> Result<Self> {
         let mut headers = HeaderMap::new();
         let address = match provider {

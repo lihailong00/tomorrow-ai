@@ -1,4 +1,4 @@
-//! Official personal-account MCP providers. Public service developer keys do not
+//! Personal-account MCP providers and official API adapters. Developer keys do not
 //! belong here, and provider claims alone never grant a tool write permission.
 use serde::Serialize;
 
@@ -50,10 +50,30 @@ const PROVIDERS: &[Provider] = &[
     Provider {
         id: "yuque",
         name: "语雀",
-        description: "使用个人访问令牌连接语雀官方 MCP，读取知识库、文档与小记；创建和修改需单独确认。",
+        description: "使用语雀超级会员的个人访问令牌连接官方 MCP，读取知识库、文档与小记；创建和修改需单独确认。普通账号不能生成此 Token。",
         help_url: "https://www.yuque.com/settings/tokens",
         credential_label: "个人访问令牌",
         transport: "stdio",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
+        id: "notion",
+        name: "Notion",
+        description: "使用本人 Notion 连接 Token 或个人访问令牌访问授权页面。免费版可使用基础 API；支持标题检索、读取正文、新建、修改及移入回收站，写入需本人确认。请先在 Notion 中授权目标页面和读写能力。",
+        help_url: "https://www.notion.com/help/create-integrations-with-the-notion-api",
+        credential_label: "Notion Token",
+        transport: "official_api",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
+        id: "memos",
+        name: "Memos",
+        description: "连接本人使用的 Memos 实例，支持搜索、读取、新建、修改和删除笔记；写入需本人确认。Memos 软件和 API 无需会员，实例需提供服务地址和个人 Token。",
+        help_url: "https://usememos.com/docs/integrations/api-access",
+        credential_label: "Memos 个人 Token",
+        transport: "streamable_http",
         supported: true,
         unsupported_reason: None,
     },
@@ -171,6 +191,8 @@ pub fn is_read_only(provider: &str, tool: &str) -> bool {
                 | "maps_direction_walking"
                 | "maps_direction_bicycling"
         ),
+        "notion" => super::notion::is_read_only(tool),
+        "memos" => super::memos::is_read_only(tool),
         "yuque" => matches!(
             tool,
             "yuque_get_user"

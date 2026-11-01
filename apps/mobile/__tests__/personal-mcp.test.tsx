@@ -209,6 +209,137 @@ it('retains the current failed draft for correction and clears it when cancelled
   await view.unmount();
 });
 
+it('requires a Memos instance and keeps its personal token transient until actual validation', async () => {
+  const view = await setup(
+    connection({
+      id: 'memos',
+      name: 'Memos',
+      requires_server_url: true,
+      supports_sandbox: false,
+      credential_label: 'Memos 个人 Token',
+    }),
+  );
+  await view.button('连接Memos账号');
+  const inputs = () => view.tree.root.findAllByType(TextInput);
+  expect(inputs()).toHaveLength(2);
+  await act(async () => {
+    inputs()
+      .find(node => node.props.secureTextEntry)!
+      .props.onChangeText(' memos_pat_test-only ');
+  });
+  const save = () =>
+    view.tree.root
+      .findAllByType(Button)
+      .find(node => node.props.accessibilityLabel === '校验并连接Memos')!;
+  expect(save().props.disabled).toBe(true);
+  await act(async () => {
+    inputs()
+      .find(node => node.props.keyboardType === 'url')!
+      .props.onChangeText(' https://notes.example.com ');
+  });
+  expect(save().props.disabled).toBe(false);
+  await view.button('校验并连接Memos');
+  expect(view.request).toHaveBeenCalledWith(
+    '/personal-mcp/memos/connect',
+    'POST',
+    {
+      token: 'memos_pat_test-only',
+      environment: 'production',
+      server_url: 'https://notes.example.com',
+    },
+    expect.anything(),
+  );
+  expect(inputs()).toHaveLength(0);
+  expect(view.text()).toContain('Memos已通过实际连接校验');
+  expect(view.text()).not.toContain('memos_pat_test-only');
+  await view.unmount();
+});
+
+it('retains a rejected Memos address for correction, then clears the token and draft on cancel', async () => {
+  const view = await setup(
+    connection({
+      id: 'memos',
+      name: 'Memos',
+      requires_server_url: true,
+      supports_sandbox: false,
+    }),
+  );
+  await view.button('连接Memos账号');
+  const inputs = () => view.tree.root.findAllByType(TextInput);
+  await act(async () => {
+    inputs()
+      .find(node => node.props.secureTextEntry)!
+      .props.onChangeText('bad-personal-token');
+    inputs()
+      .find(node => node.props.keyboardType === 'url')!
+      .props.onChangeText('https://wrong.example.com');
+  });
+  view.request.mockRejectedValueOnce(new Error('Memos 身份校验未通过'));
+  await view.button('校验并连接Memos');
+  expect(view.text()).toContain('Memos 身份校验未通过');
+  expect(
+    inputs().find(node => node.props.keyboardType === 'url')!.props.value,
+  ).toBe('https://wrong.example.com');
+  expect(inputs().find(node => node.props.secureTextEntry)!.props.value).toBe(
+    'bad-personal-token',
+  );
+  await view.button('取消填写');
+  await view.button('连接Memos账号');
+  expect(inputs().every(node => node.props.value === '')).toBe(true);
+  await view.unmount();
+});
+
+it('prefills only the saved Memos instance address while Notion needs just its own token', async () => {
+  const memos = await setup(
+    connection({
+      id: 'memos',
+      name: 'Memos',
+      requires_server_url: true,
+      server_url: 'https://mine.example.com/',
+      status: 'connected',
+      supports_sandbox: false,
+    }),
+  );
+  await memos.button('更换凭证');
+  expect(
+    memos.tree.root
+      .findAllByType(TextInput)
+      .find(node => node.props.keyboardType === 'url')!.props.value,
+  ).toBe('https://mine.example.com/');
+  expect(
+    memos.tree.root
+      .findAllByType(TextInput)
+      .find(node => node.props.secureTextEntry)!.props.value,
+  ).toBe('');
+  await memos.unmount();
+  const notion = await setup(
+    connection({
+      id: 'notion',
+      name: 'Notion',
+      credential_label: 'Notion Token',
+      supports_sandbox: false,
+    }),
+  );
+  await notion.button('连接Notion账号');
+  expect(notion.tree.root.findAllByType(TextInput)).toHaveLength(1);
+  await notion.type('ntn_personal-test-only');
+  await notion.button('校验并连接Notion');
+  expect(notion.request).toHaveBeenCalledWith(
+    '/personal-mcp/notion/connect',
+    'POST',
+    { token: 'ntn_personal-test-only', environment: 'production' },
+    expect.anything(),
+  );
+  await notion.button('校验Notion连接');
+  expect(notion.request).toHaveBeenLastCalledWith(
+    '/personal-mcp/notion/test',
+    'POST',
+    {},
+    expect.anything(),
+  );
+  await notion.unmount();
+});
+
 it('supports explicit sandbox choice and never sends a credential during saved-connection tests', async () => {
   const view = await setup();
   await view.button('连接滴滴出行账号');

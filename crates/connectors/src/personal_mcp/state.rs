@@ -24,6 +24,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(40);
 const TOOL_BYTES: usize = 256 * 1024;
 const RESULT_BYTES: usize = 96 * 1024;
 const ARGUMENT_BYTES: usize = 16 * 1024;
+const NOTE_ARGUMENT_BYTES: usize = 48 * 1024;
 const ACTION_TTL: i64 = 600;
 
 type RequestFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
@@ -315,7 +316,7 @@ impl PersonalMcpState {
             !a.encrypted.is_empty()
                 && self
                     .decode::<Credentials>(user, id, "personal_mcp_credentials", &a.encrypted)
-                    .is_ok()
+                    .is_ok_and(|credentials| credentials.validate(id).is_ok())
         });
         let status = if !configured {
             "not_configured"
@@ -353,6 +354,12 @@ impl PersonalMcpState {
         ) };
         value["experience_only"] = json!(id == "baidu_netdisk");
         value["credential_kind"] = json!("token");
+        value["requires_server_url"] = json!(id == "memos");
+        if id == "memos" {
+            let address = account.as_ref().and_then(|account| self.decode::<Credentials>(user, id, "personal_mcp_credentials", &account.encrypted).ok())
+                .and_then(|credentials| credentials.server_url).or_else(super::memos::default_server_url);
+            value["server_url"] = json!(address);
+        }
         value["supports_sandbox"] = json!(id == "didi");
         value["unavailable_reason"] = if self.0.crypto.is_none() {
             json!("服务器尚未配置账号凭证加密，请管理员在后台完成设置")
@@ -476,8 +483,10 @@ impl PersonalMcpState {
         arguments: Value,
         operation_key: &str,
     ) -> Result<Value> {
+        let arguments = if provider == "memos" { super::memos::prepare_arguments(tool, arguments)? } else { arguments };
+        let argument_limit = if matches!(provider, "notion" | "memos" | "yuque") { NOTE_ARGUMENT_BYTES } else { ARGUMENT_BYTES };
         if !arguments.is_object()
-            || arguments.to_string().len() > ARGUMENT_BYTES
+            || arguments.to_string().len() > argument_limit
             || tool.is_empty()
             || tool.len() > 160
             || tool.chars().any(char::is_control)
@@ -499,6 +508,7 @@ impl PersonalMcpState {
             return Err(missing());
         }
         reject_secrets(&arguments, &credentials)?;
+        if provider == "notion" { super::notion::validate_arguments(tool, &arguments)?; }
         if !catalog::is_read_only(provider, tool) {
             return self
                 .pending_action(
@@ -722,14 +732,9 @@ fn reject_secrets(value: &Value, credentials: &Credentials) -> Result<()> {
             _ => false,
         }
     }
-    for secret in [
-        Some(credentials.token.as_str()),
-        credentials.server_url.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|s| !s.is_empty())
-    {
+    // Memos instance URLs cannot contain credentials or query strings. They are
+    // public connection metadata and can legitimately occur in note links.
+    for secret in [credentials.token.as_str()].into_iter().filter(|s| !s.is_empty()) {
         let encoded: String = reqwest::Url::parse("https://example.invalid")
             .expect("static url")
             .query_pairs_mut()
@@ -816,7 +821,7 @@ pub fn router(state: PersonalMcpState) -> Router {
         .route("/v1/personal-mcp/{id}/tools", get(tools))
         .route("/v1/personal-mcp/{id}/call", post(call))
         .with_state(state)
-        .layer(axum::extract::DefaultBodyLimit::max(32 * 1024))
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .layer(axum::middleware::map_response(
             |mut response: Response| async move {
                 response.headers_mut().insert(
@@ -884,3 +889,7 @@ async fn cancel(
 ) -> Result<Json<Value>> {
     Ok(Json(s.cancel(&u, &id).await?))
 }
+
+#[cfg(test)]
+#[path = "notes_live_tests.rs"]
+mod notes_live_tests;

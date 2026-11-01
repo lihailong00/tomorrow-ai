@@ -1,5 +1,7 @@
 //! User-owned MCP accounts. Provider application keys remain in server settings.
 pub(crate) mod catalog;
+pub(crate) mod memos;
+pub(crate) mod notion;
 pub(crate) mod transport;
 pub(crate) mod yinxiang;
 pub(super) mod state;

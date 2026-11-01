@@ -328,6 +328,18 @@ async fn official_yuque_stdio_catalog_smoke_without_network_or_credentials() {
     assert!(tools.iter().any(|tool| tool["name"] == "yuque_update_doc"));
 }
 
+#[test]
+fn yuque_identity_requires_positive_account_data_not_just_a_text_response() {
+    assert!(validate_yuque_identity(&json!({"content":[{"type":"text","text":"{\"id\":123,\"login\":\"test-owner\"}"}]})).is_ok());
+    for value in [
+        json!({"content":[]}),
+        json!({"content":[{"type":"text","text":"authentication failed"}]}),
+        json!({"content":[{"type":"text","text":"{\"status\":401}"}]}),
+        json!({"content":[{"type":"text","text":"{\"id\":0,\"login\":\"test-owner\"}"}]}),
+        json!({"isError":true,"content":[{"type":"text","text":"{\"id\":123,\"login\":\"test-owner\"}"}]}),
+    ] { assert!(validate_yuque_identity(&value).is_err()); }
+}
+
 #[tokio::test]
 async fn stdio_bounds_output_and_does_not_pass_parent_secrets_to_child() {
     let temporary = tempfile::tempdir().unwrap();

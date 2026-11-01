@@ -7,6 +7,8 @@ export interface PersonalMcpConnection {
   help_url: string;
   credential_label: string;
   credential_kind?: 'token';
+  requires_server_url?: boolean;
+  server_url?: string | null;
   transport: string;
   status: 'not_configured' | 'not_connected' | 'connected' | 'needs_reconnect';
   unavailable_reason?: string | null;

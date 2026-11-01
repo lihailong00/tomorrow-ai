@@ -12,10 +12,16 @@ export function personalMcpApi(api: ApiClient, signal: () => AbortSignal) {
   const provider = (id: string) => '/' + encodeURIComponent(id);
   return {
     list: () => request<{ items: PersonalMcpConnection[] }>(''),
-    connect: (id: string, token: string, environment: McpEnvironment) =>
+    connect: (
+      id: string,
+      token: string,
+      environment: McpEnvironment,
+      serverUrl?: string,
+    ) =>
       request<PersonalMcpConnection>(provider(id) + '/connect', 'POST', {
         token,
         environment,
+        ...(serverUrl ? { server_url: serverUrl } : {}),
       }),
     test: (id: string) =>
       request<PersonalMcpConnection>(provider(id) + '/test', 'POST', {}),
