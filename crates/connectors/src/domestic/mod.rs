@@ -2,6 +2,7 @@
 //! the user reviews them; only explicit imports reach this service.
 mod catalog;
 mod mail;
+mod mail_send;
 mod oauth;
 mod providers;
 
@@ -34,6 +35,8 @@ struct Inner {
     runtime_values: Option<std::collections::HashMap<String, String>>,
     #[cfg(test)]
     oauth_test_providers: std::collections::HashMap<String, oauth::OAuthProvider>,
+    #[cfg(test)]
+    mail_test_transport: Option<lettre::AsyncSmtpTransport<lettre::Tokio1Executor>>,
 }
 
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
@@ -86,6 +89,8 @@ impl IntegrationState {
             "CREATE TABLE IF NOT EXISTS integration_rate_limits (user_id TEXT NOT NULL,bucket BIGINT NOT NULL,attempts BIGINT NOT NULL,PRIMARY KEY(user_id,bucket))",
             "CREATE TABLE IF NOT EXISTS integration_account_read_leases (user_id TEXT NOT NULL,provider TEXT NOT NULL,generation BIGINT NOT NULL,lease_token TEXT NOT NULL,expires_at BIGINT NOT NULL,PRIMARY KEY(user_id,provider))",
             "CREATE TABLE IF NOT EXISTS integration_import_counters (user_id TEXT PRIMARY KEY,item_count BIGINT NOT NULL CHECK(item_count>=0))",
+            "CREATE TABLE IF NOT EXISTS integration_mail_sends (user_id TEXT NOT NULL,provider TEXT NOT NULL,request_id TEXT NOT NULL,content_hash TEXT NOT NULL,status TEXT NOT NULL,created_at BIGINT NOT NULL,PRIMARY KEY(user_id,provider,request_id))",
+            "CREATE INDEX IF NOT EXISTS integration_mail_sends_owner ON integration_mail_sends(user_id,created_at)",
         ] {
             sqlx::query(statement).execute(&pool).await?;
         }
@@ -97,6 +102,8 @@ impl IntegrationState {
             runtime_values: None,
             #[cfg(test)]
             oauth_test_providers: std::collections::HashMap::new(),
+            #[cfg(test)]
+            mail_test_transport: None,
         })))
     }
     pub fn reconfigured(&self, values: &std::collections::HashMap<String, String>) -> Self {
@@ -173,7 +180,7 @@ impl IntegrationState {
                 id: item["id"].as_str().unwrap_or_default().into(),
                 name: item["name"].as_str().unwrap_or_default().into(),
                 category: "china_integration".into(),
-                description: "手机资料导入与可选云端只读连接".into(),
+                description: "手机资料导入与可选账号连接；邮件发送需由你确认".into(),
                 status: if matches!(item["status"].as_str(), Some("connected" | "available")) {
                     "available"
                 } else {
@@ -371,7 +378,7 @@ impl IntegrationState {
             providers::verify(id, &value).await?
         };
         self.save(user, id, generation, &credentials).await?;
-        Ok(json!({"id":id,"status":"connected","detail":"已验证只读连接"}))
+        Ok(json!({"id":id,"status":"connected","detail":if item.mode == "mail" {"已验证收信和发信服务"} else {"已验证只读连接"}}))
     }
     async fn authorize(&self, user: &str, id: &str) -> Result<String> {
         if catalog::find(id)?.mode != "oauth" {
@@ -709,6 +716,7 @@ pub fn router(state: IntegrationState) -> Router {
         .route("/v1/integrations/{id}/authorize", post(authorize))
         .route("/v1/integrations/{id}/callback", get(callback))
         .route("/v1/integrations/{id}/read", post(read))
+        .route("/v1/integrations/{id}/send", post(send_mail))
         .with_state(state)
         .layer(axum::extract::DefaultBodyLimit::max(128 * 1024))
         .layer(axum::middleware::map_response(
@@ -776,6 +784,14 @@ async fn read(
     Json(value): Json<Value>,
 ) -> Result<Json<Value>> {
     Ok(Json(state.read(&user, &id, value).await?))
+}
+async fn send_mail(
+    State(state): State<IntegrationState>,
+    User(user): User,
+    Path(id): Path<String>,
+    Json(value): Json<mail_send::SendMail>,
+) -> Result<Json<Value>> {
+    Ok(Json(state.send_mail(&user, &id, value).await?))
 }
 async fn callback(
     State(state): State<IntegrationState>,

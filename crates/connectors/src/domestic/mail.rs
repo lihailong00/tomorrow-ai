@@ -1,4 +1,4 @@
-//! Bounded, read-only IMAP adapters for domestic personal mailboxes.
+//! Bounded, read-only IMAP adapters; outgoing mail is handled by mail_send.
 //! Credentials are supplied by the encrypted per-user connection store.
 
 use std::{
@@ -158,6 +158,7 @@ pub async fn verify(provider_id: &str, email: &str, authorization_code: &str) ->
         session.examine("INBOX").await.map_err(|_| unavailable())?;
         // LOGOUT does not expunge messages; do not use CLOSE or SELECT.
         let _ = timeout(Duration::from_secs(2), session.logout()).await;
+        super::mail_send::verify(provider_id, email, code).await?;
         Ok(())
     })
     .await

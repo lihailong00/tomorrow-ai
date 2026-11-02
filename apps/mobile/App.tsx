@@ -47,6 +47,7 @@ import { GrowthSettingsScreen } from './src/features/growth/GrowthSettings';
 import { HealthScreen } from './src/features/health/HealthScreen';
 import { AiHistoryScreen } from './src/features/ai-history/AiHistoryScreen';
 import { UsageScreen } from './src/features/usage/UsageScreen';
+import { PrivateVaultScreen } from './src/features/private-vault/PrivateVaultScreen';
 import { appInputs } from './src/platform/appInputs';
 import { phoneSources } from './src/platform/phoneSources';
 import { PhoneSourcesEntry } from './src/features/phone-sources/PhoneSourcesEntry';
@@ -435,6 +436,9 @@ function Application() {
       case 'memory':
         page = <MemoryEditor memory={route.memory} />;
         break;
+      case 'privateVault':
+        page = <PrivateVaultScreen key={session.user.id + preferences.serverUrl} />;
+        break;
       case 'schedule':
         page = <ScheduleEditor schedule={route.schedule} />;
         break;
@@ -554,7 +558,7 @@ function Application() {
             barStyle="dark-content"
             backgroundColor={capabilitiesSurface ? capabilityAppearance.background : colors.background}
           />
-          {route.name !== 'health' && route.name !== 'integrations' && route.name !== 'usage' && <View
+          {route.name !== 'health' && route.name !== 'integrations' && route.name !== 'usage' && route.name !== 'privateVault' && <View
             testID="application-header"
             style={[s.header, chatSurface && shell.chatHeader, compactChatHeader && shell.hiddenHeader]}
           >

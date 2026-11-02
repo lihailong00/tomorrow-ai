@@ -57,6 +57,7 @@ async fn checks(repo: &Repository) -> (String, String) {
         created_at: timestamp(now()),
         updated_at: timestamp(now()),
         version: 1,
+        confirmation: None,
     };
     attempt.memory = Some(memory.clone());
     let request_id = attempt.request_id.as_ref().unwrap();

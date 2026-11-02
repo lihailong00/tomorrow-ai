@@ -20,6 +20,7 @@ import {
 } from '../../ui/components';
 import { Text } from '../../ui/Text';
 import { colors, styles as s } from '../../ui/theme';
+import { connectionGuide } from '../integrations/connectionGuides';
 import { personalMcpApi } from './api';
 import { AlipayWalletConnection } from './AlipayWalletConnection';
 import type {
@@ -41,7 +42,7 @@ export function PersonalMcpConnections({
 } = {}) {
   const { api, user } = useApp();
   const session = useMemo(
-    () => ({ id: ++nextSession, api, userId: user?.id }),
+    () => ({ id: ++nextSession, api, userId: user?.id, providerId }),
     [api, user?.id, providerId],
   );
   return user ? (
@@ -400,12 +401,34 @@ function ConnectionsSession({
           : '操作状态已更新，请查看下方详情。',
       );
     });
-  const openHelp = (item: PersonalMcpConnection) =>
+  const openHelp = (item: PersonalMcpConnection, url = item.help_url) =>
     run(item.id, async () => {
-      if (!/^https:\/\/[^\s/@]+(?:\/|$)/i.test(item.help_url))
+      if (!/^https:\/\/[^\s/@]+(?:\/|$)/i.test(url))
         throw new Error('官方说明链接暂不可用。');
-      await platform.openUrl(item.help_url);
+      await platform.openUrl(url);
     });
+  const renderGuide = (item: PersonalMcpConnection) => {
+    const guide = connectionGuide(item.id);
+    return guide ? (
+      <Text style={s.body} testID={'connection-guide-' + item.id}>
+        {guide.before}
+        <Text
+          accessibilityRole="link"
+          accessibilityLabel={item.name + '授权获取教程'}
+          accessibilityHint="在浏览器中打开官方授权入口或教程"
+          accessibilityState={{ disabled: busy !== null }}
+          disabled={busy !== null}
+          style={v.helpLink}
+          onPress={() => {
+            void openHelp(item, guide.url);
+          }}
+        >
+          {guide.linkText}
+        </Text>
+        {guide.after}
+      </Text>
+    ) : null;
+  };
 
   return (
     <View testID="personal-mcp-connections">
@@ -543,6 +566,7 @@ function ConnectionsSession({
           </View>
           {selected === item.id && item.status !== 'not_configured' && (
             <View style={v.form}>
+              {renderGuide(item)}
               <Text style={s.small}>
                 请在官方页面获取你本人的凭证。凭证仅提交给当前连接的服务器，加密保存，不会在这里回显。
               </Text>
@@ -745,6 +769,7 @@ function ConnectionsSession({
 
 const v = StyleSheet.create({
   intro: { marginBottom: 16 },
+  helpLink: { color: '#36A7CB', textDecorationLine: 'underline' },
   description: { marginTop: 10 },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 12 },
   form: {

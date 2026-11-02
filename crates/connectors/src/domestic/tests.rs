@@ -81,6 +81,7 @@ async fn every_data_route_requires_authentication() {
         ("GET", "/v1/integrations/imports"),
         ("POST", "/v1/integrations/imports"),
         ("POST", "/v1/integrations/qq_mail/connect"),
+        ("POST", "/v1/integrations/qq_mail/send"),
         ("POST", "/v1/integrations/amap/read"),
         ("DELETE", "/v1/integrations/yuque"),
     ] {

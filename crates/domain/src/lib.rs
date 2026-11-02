@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod automatic_memory;
+pub mod memory_quality;
 pub mod auth;
 pub mod chat_stream;
 pub mod chat_messages;
@@ -9,6 +10,7 @@ pub mod model;
 pub mod phone;
 pub mod phone_password;
 pub mod repository;
+pub mod private_vault;
 pub mod sms;
 pub mod todos;
 pub mod growth;

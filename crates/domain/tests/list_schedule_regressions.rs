@@ -29,6 +29,7 @@ async fn check_paging(repository: &Repository) {
             created_at: timestamp(1000 + index),
             updated_at: timestamp(1000 + index),
             version: 1,
+            confirmation: None,
         };
         sqlx::query("INSERT INTO resources(id,user_id,kind,body,created_at,updated_at) VALUES($1,$2,'memory',$3,$4,$4)")
             .bind(id).bind(&user.id).bind(serde_json::to_string(&memory).unwrap()).bind(1000 + index / 5)

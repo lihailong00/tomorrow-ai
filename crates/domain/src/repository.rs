@@ -157,6 +157,7 @@ impl Repository {
             serde_json::from_str(row.get::<&str, _>("body"))
                 .map_err(|e| DomainError::Internal(e.to_string()))
         }).collect::<Result<Vec<Memory>, _>>()?;
+        let items = items.into_iter().map(crate::memory_quality::decorate).collect();
         Ok(finish_page(items, offset, limit))
     }
     pub async fn create_memory(
@@ -192,7 +193,9 @@ impl Repository {
             created_at: time.clone(),
             updated_at: time,
             version: 1,
+            confirmation: None,
         };
+        let memory = crate::memory_quality::decorate(memory);
         let mut transaction = self.pool.begin().await?;
         let (id, created) = reserve_creation(
             &mut transaction,
@@ -228,7 +231,11 @@ impl Repository {
         id: &str,
         input: UpdateMemory,
     ) -> Result<Memory, DomainError> {
-        let old: Memory = self.resource(user_id, "memory", id).await?;
+        // Compare against the actual stored JSON. Legacy/Agent records may use
+        // another key order or omit fields introduced by later versions.
+        let old_json: String = sqlx::query_scalar("SELECT body FROM resources WHERE user_id=$1 AND id=$2 AND kind='memory'")
+            .bind(user_id).bind(id).fetch_optional(&self.pool).await?.ok_or(DomainError::NotFound)?;
+        let old: Memory = serde_json::from_str(&old_json).map_err(|e| DomainError::Internal(e.to_string()))?;
         if input.version.is_some_and(|v| v != old.version) {
             return Err(DomainError::Conflict("记忆已被更新，请刷新后再修改".into()));
         }
@@ -242,6 +249,9 @@ impl Repository {
             if value != old.content {
                 memory.content = validate_text(&value, "记忆内容", 10000)?;
             }
+            // Saving content is an explicit user edit/confirmation. Retain an
+            // unresolved marker if the replacement still contains an invalid number.
+            memory.confirmation = crate::memory_quality::confirmation(&memory.content, "");
         }
         if let Some(value) = input.kind {
             memory_kind(&value)?;
@@ -249,8 +259,6 @@ impl Repository {
         }
         memory.updated_at = timestamp(now());
         memory.version += 1;
-        let old_json =
-            serde_json::to_string(&old).map_err(|e| DomainError::Internal(e.to_string()))?;
         let new_json =
             serde_json::to_string(&memory).map_err(|e| DomainError::Internal(e.to_string()))?;
         let mut tx = self.pool.begin().await?;
@@ -1146,6 +1154,7 @@ impl Repository {
         crate::usage::initialize(&pool).await?;
         crate::chat_messages::initialize(&pool).await?;
         sqlx::raw_sql(crate::automatic_memory::SCHEMA).execute(&pool).await?;
+        sqlx::raw_sql(crate::private_vault::SCHEMA).execute(&pool).await?;
         // Authentication checks this table even in non-admin processes such as
         // attachment and connector services; it must exist before any login.
         sqlx::query("CREATE TABLE IF NOT EXISTS admin_user_controls(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,disabled BIGINT NOT NULL DEFAULT 0,updated_at BIGINT NOT NULL)")

@@ -597,7 +597,7 @@ impl Repository {
                 let (items, next) = self.search_memories_page(&user_id,
                     read_text(&args, "kind", 32)?, read_text(&args, "query", 200)?, offset, limit).await?;
                 let items = items.into_iter().map(|item| {
-                    let mut value = json!(item);
+                    let mut value = crate::memory_quality::assistant_value(item);
                     preview_field(&mut value, "title", 120);
                     preview_field(&mut value, "content", 400);
                     preview_field(&mut value, "source", 160);
@@ -609,7 +609,7 @@ impl Repository {
                 read_keys(&args, &["id", "content_offset", "content_limit"])?;
                 let id = validate_text(required(&args, "id")?, "记忆编号", 160)?;
                 let memory: crate::Memory = self.resource(&user_id, "memory", &id).await?;
-                let mut value = json!(memory);
+                let mut value = crate::memory_quality::assistant_value(memory);
                 preview_field(&mut value, "title", 120);
                 preview_field(&mut value, "source", 160);
                 read_content(&mut value, "content", &args)?;
@@ -772,16 +772,20 @@ impl Repository {
                     .await?;
                     json!({"id":id,"deleted":true})
                 } else {
+                    if !crate::memory_quality::ready(&memory) {
+                        return Err(DomainError::Validation("这条记忆需要用户选择确认，请到记忆页处理".into()));
+                    }
                     sqlx::query("UPDATE memory_preferences SET epoch=epoch+1 WHERE user_id=$1").bind(&user_id).execute(&mut *tx).await?;
                     sqlx::query("DELETE FROM memory_receipts WHERE user_id=$1 AND memory_id=$2").bind(&user_id).bind(id).execute(&mut *tx).await?;
                     sqlx::query("UPDATE memory_provenance SET expires_at=0 WHERE user_id=$1 AND memory_id=$2").bind(&user_id).bind(id).execute(&mut *tx).await?;
                     memory.content = validate_text(required(&args, "content")?, "记忆内容", 10000)?;
+                    memory.confirmation = crate::memory_quality::confirmation(&memory.content, "");
                     memory.version += 1;
                     memory.updated_at = timestamp(now());
-                    let value = json!(memory);
+                    let value = json!(&memory);
                     sqlx::query("UPDATE resources SET body=$1,updated_at=$2 WHERE id=$3 AND user_id=$4 AND kind='memory'")
                         .bind(value.to_string()).bind(now()).bind(id).bind(&user_id).execute(&mut *tx).await?;
-                    value
+                    crate::memory_quality::assistant_value(memory)
                 }
             }
             "create_task" => {

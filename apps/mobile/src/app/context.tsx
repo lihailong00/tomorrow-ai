@@ -28,6 +28,7 @@ export type Route =
   | { name: 'growthWeek' }
   | { name: 'assistantTasks'; view?: 'tasks' | 'schedules' }
   | { name: 'memory'; memory?: Memory }
+  | { name: 'privateVault' }
   | { name: 'schedule'; schedule?: Schedule }
   | { name: 'notifications' }
   | { name: 'artifacts' }

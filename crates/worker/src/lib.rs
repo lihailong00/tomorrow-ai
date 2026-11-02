@@ -245,9 +245,11 @@ fn local_context(
 ) -> String {
     let mut lines = vec![format!("已保存记忆：{} 条", memories.len())];
     for memory in memories.iter().take(100) {
+        let visible = tomorrow_domain::memory_quality::assistant_value(memory.clone());
         lines.push(format!(
             "- [{}] {}：{}",
-            memory.kind, memory.title, memory.content
+            memory.kind, visible["title"].as_str().unwrap_or_default(),
+            visible["content"].as_str().unwrap_or_default()
         ));
     }
     lines.push(format!("任务：{} 条", tasks.len()));
@@ -328,7 +330,11 @@ pub fn local_document(
             memories
                 .iter()
                 .take(100)
-                .map(|memory| format!("- **{}**：{}", memory.title, memory.content))
+                .map(|memory| {
+                    let visible = tomorrow_domain::memory_quality::assistant_value(memory.clone());
+                    format!("- **{}**：{}", visible["title"].as_str().unwrap_or_default(),
+                        visible["content"].as_str().unwrap_or_default())
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
@@ -346,5 +352,42 @@ fn status_label(status: &str) -> &str {
         "waiting_approval" => "等待确认",
         "failed" => "执行失败",
         _ => status,
+    }
+}
+
+#[cfg(test)]
+mod memory_quality_tests {
+    use super::*;
+    use tomorrow_domain::memory_quality::MemoryConfirmation;
+
+    #[test]
+    fn pending_values_never_enter_background_context_or_local_documents() {
+        let pending = Memory { id:"pending".into(), title:"体重95kg".into(),
+            content:"体重-95kg".into(), kind:"fact".into(), source:"用户保存".into(),
+            created_at:String::new(), updated_at:String::new(), version:1, confirmation:None };
+        let proposal = Memory { id:"proposal".into(), content:"体重100公斤".into(),
+            confirmation:Some(MemoryConfirmation {field:"weight".into(), options:vec![95.0,195.0],
+                proposed_content:"体重195公斤".into()}), ..pending.clone() };
+        let confirmed = Memory { id:"confirmed".into(), title:"运动偏好".into(),
+            content:"喜欢散步".into(), ..pending.clone() };
+        let memories = vec![pending,proposal,confirmed];
+        let context = local_context(&memories,&[],&[]);
+        assert!(context.contains("喜欢散步"));
+        assert!(context.contains("待确认的体重信息"));
+        assert!(!context.contains("95"));
+        assert!(!context.contains("100"));
+        let mut task = Task { id:"task".into(), title:"整理关注点".into(), instruction:"整理已保存资料".into(),
+            kind:"briefing".into(), status:"running".into(), progress:0, summary:None, result:None,
+            error:None, created_at:String::new(), updated_at:String::new(), steps:vec![],
+            model_mode:"local".into(), approval_required:false, approved_at:None, artifact_id:None };
+        for kind in ["briefing","draft"] {
+            task.kind = kind.into();
+            let document = local_document(&task,&memories,&[],&[]);
+            assert!(document.contains("喜欢散步"));
+            assert!(document.contains("待确认的体重信息"));
+            assert!(document.contains("暂不可作为事实"));
+            assert!(!document.contains("95"));
+            assert!(!document.contains("100"));
+        }
     }
 }

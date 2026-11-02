@@ -161,11 +161,14 @@ impl Repository {
         }
         // Source equality hides stale indexes even when edits/deletes came from another API/tool.
         // The 256-source / 24-fact ingestion limits bound this first-version in-process ranking.
-        let rows = sqlx::query("SELECT f.id,f.subject_id,f.object_id,f.relation,f.status,f.quote,f.occurred_on,e.memory_id,e.source_version,e.title,e.scope,s.name AS subject_name,s.kind AS subject_kind,o.name AS object_name,o.kind AS object_kind FROM knowledge_facts f JOIN knowledge_episodes e ON e.id=f.episode_id AND e.user_id=f.user_id JOIN resources r ON r.id=e.memory_id AND r.user_id=e.user_id AND r.kind='memory' AND r.body=e.source_body JOIN knowledge_entities s ON s.id=f.subject_id AND s.user_id=f.user_id JOIN knowledge_entities o ON o.id=f.object_id AND o.user_id=f.user_id WHERE f.user_id=$1 ORDER BY f.created_at DESC,f.id")
+        let rows = sqlx::query("SELECT f.id,f.subject_id,f.object_id,f.relation,f.status,f.quote,f.occurred_on,e.memory_id,e.source_version,e.title,e.scope,r.body AS memory_body,s.name AS subject_name,s.kind AS subject_kind,o.name AS object_name,o.kind AS object_kind FROM knowledge_facts f JOIN knowledge_episodes e ON e.id=f.episode_id AND e.user_id=f.user_id JOIN resources r ON r.id=e.memory_id AND r.user_id=e.user_id AND r.kind='memory' AND r.body=e.source_body JOIN knowledge_entities s ON s.id=f.subject_id AND s.user_id=f.user_id JOIN knowledge_entities o ON o.id=f.object_id AND o.user_id=f.user_id WHERE f.user_id=$1 ORDER BY f.created_at DESC,f.id")
             .bind(user_id).fetch_all(&self.pool).await?;
         let terms = search_terms(&input.query);
         let mut candidates = Vec::new();
         for row in rows {
+            let memory: Memory = serde_json::from_str(row.get::<&str, _>("memory_body"))
+                .map_err(|_| DomainError::Internal("记忆格式无效".into()))?;
+            if !crate::memory_quality::ready(&memory) { continue; }
             let scope: String = row.get("scope");
             if input
                 .scope
@@ -298,6 +301,9 @@ pub(crate) async fn index_memory_graph_tx(
     .await?;
     let memory: Memory =
         serde_json::from_str(&body).map_err(|_| DomainError::Internal("记忆格式无效".into()))?;
+    if !crate::memory_quality::ready(&memory) {
+        return Err(DomainError::Validation("请先确认这条记忆，再整理关系".into()));
+    }
     if input.version != memory.version {
         return Err(DomainError::Conflict(
             "原记忆已更新，请重新读取后提取关系".into(),

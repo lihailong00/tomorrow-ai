@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -279,6 +279,19 @@ export function MemoryHome() {
           </Pressable>
         </View>
         <AutomaticMemorySettings />
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="私密资料：地址、银行卡、身份证"
+          onPress={() => navigate({ name: 'privateVault' })}
+          style={({ pressed }) => [m.tryCard, pressed && m.pressed]}
+        >
+          <Icon name="shield" size={22} color={appearance.accent} />
+          <View style={m.flex}>
+            <Text style={m.tryTitle}>私密资料</Text>
+            <Text style={m.tryDescription}>地址、银行卡、身份证 · 本机加密保存</Text>
+          </View>
+          <Icon name="chevronRight" size={17} color={appearance.muted} />
+        </Pressable>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="从对话里整理记忆，先列出候选供你确认"

@@ -14,9 +14,9 @@ pub struct Integration {
 pub const CATALOG: &[Integration] = &[
     Integration { id: "wechat", name: "微信", category: "聊天", mode: "import", detail: "选定通知、手工粘贴和分享导入；不能读取完整聊天记录", import_supported: true, notification_supported: true },
     Integration { id: "qq", name: "QQ", category: "聊天", mode: "import", detail: "选定通知、手工粘贴和分享导入；回复由你在原应用发送", import_supported: true, notification_supported: true },
-    Integration { id: "qq_mail", name: "QQ 邮箱", category: "邮件", mode: "mail", detail: "用邮箱客户端授权码只读最近邮件，不发送或删除邮件", import_supported: true, notification_supported: false },
-    Integration { id: "netease163", name: "163 邮箱", category: "邮件", mode: "mail", detail: "用邮箱客户端授权码只读最近邮件，不发送或删除邮件", import_supported: true, notification_supported: false },
-    Integration { id: "netease126", name: "126 邮箱", category: "邮件", mode: "mail", detail: "用邮箱客户端授权码只读最近邮件，不发送或删除邮件", import_supported: true, notification_supported: false },
+    Integration { id: "qq_mail", name: "QQ 邮箱", category: "邮件", mode: "mail", detail: "查找邮件，梳理重点；写好邮件后由你确认发送", import_supported: true, notification_supported: false },
+    Integration { id: "netease163", name: "163 邮箱", category: "邮件", mode: "mail", detail: "查找邮件，梳理重点；写好邮件后由你确认发送", import_supported: true, notification_supported: false },
+    Integration { id: "netease126", name: "126 邮箱", category: "邮件", mode: "mail", detail: "查找邮件，梳理重点；写好邮件后由你确认发送", import_supported: true, notification_supported: false },
     Integration { id: "tencent_docs", name: "腾讯文档", category: "办公", mode: "oauth", detail: "授权范围内读取文件；也可导入导出的文件与分享文字", import_supported: true, notification_supported: true },
     Integration { id: "wps", name: "WPS / 金山文档", category: "办公", mode: "oauth", detail: "授权范围内读取文件；支持选取本机文档导入", import_supported: true, notification_supported: true },
     Integration { id: "amap", name: "高德地图", category: "出行", mode: "map", detail: "地点搜索、路线查询，并在你点击后打开导航；不读取私人搜索记录", import_supported: true, notification_supported: false },

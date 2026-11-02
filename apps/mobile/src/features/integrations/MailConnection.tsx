@@ -19,9 +19,10 @@ import { Button, ErrorNotice, Field, Notice } from '../../ui/components';
 import { colors } from '../../ui/theme';
 import { Icon } from '../../ui/visuals';
 import { integrationsApi } from './api';
+import { connectionGuide } from './connectionGuides';
 import type { Integration, MailDraft, MailReceipt } from './types';
 
-export const QQ_MAIL_HELP = 'https://help.mail.qq.com/detail/0/1087';
+export { QQ_MAIL_HELP } from './connectionGuides';
 const domains: Record<string, string[]> = {
   qq_mail: ['qq.com', 'foxmail.com'],
   netease163: ['163.com'],
@@ -71,6 +72,7 @@ export function MailConnectionForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const working = useRef(false);
+  const guide = connectionGuide(item.id);
   useEffect(() => {
     setEmail('');
     setCode('');
@@ -119,24 +121,26 @@ export function MailConnectionForm({
   return (
     <View>
       <Text style={v.instructions}>
-        请先在 {item.name}设置中
-        {item.id === 'qq_mail' ? (
+        {guide?.before || `请先在 ${item.name}设置中`}
+        {guide ? (
           <Text
             accessibilityRole="link"
-            accessibilityLabel="开启 IMAP"
+            accessibilityLabel={guide.linkText}
+            accessibilityHint={`在浏览器中打开${item.name}官方设置教程`}
             style={v.link}
             onPress={() => {
-              void platform.openUrl(QQ_MAIL_HELP).catch(failure => {
+              if (!scope.active) return;
+              void platform.openUrl(guide.url).catch(failure => {
                 if (scope.active) setError(errorMessage(failure));
               });
             }}
           >
-            开启 IMAP
+            {guide.linkText}
           </Text>
         ) : (
           '开启 IMAP'
         )}
-        ，然后填写完整邮箱地址和客户端授权码。
+        {guide?.after || '，然后填写完整邮箱地址和客户端授权码。'}
       </Text>
       <TextInput
         accessibilityLabel="邮箱地址"

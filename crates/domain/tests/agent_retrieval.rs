@@ -49,6 +49,7 @@ async fn retrieval_contract(repo: Repository) {
             created_at: timestamp(1000 + index),
             updated_at: timestamp(1000 + index),
             version: 1,
+            confirmation: None,
         };
         sqlx::query("INSERT INTO resources(id,user_id,kind,body,created_at,updated_at)VALUES($1,$2,'memory',$3,$4,$4)")
             .bind(&memory.id).bind(&owner.id).bind(serde_json::to_string(&memory).unwrap()).bind(1000 + index).execute(&mut *tx).await.unwrap();
@@ -74,6 +75,7 @@ async fn retrieval_contract(repo: Repository) {
         created_at: timestamp(1),
         updated_at: timestamp(1),
         version: 1,
+        confirmation: None,
     };
     sqlx::query("INSERT INTO resources(id,user_id,kind,body,created_at,updated_at)VALUES($1,$2,'memory',$3,1,1)")
         .bind(&foreign.id).bind(&other.id).bind(serde_json::to_string(&foreign).unwrap()).execute(&pool).await.unwrap();

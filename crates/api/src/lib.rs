@@ -21,6 +21,7 @@ mod agent_api;
 mod chat_stream;
 mod knowledge_api;
 mod memory_api;
+mod private_vault_api;
 mod phone_api;
 mod todo_api;
 mod growth_api;
@@ -228,7 +229,8 @@ pub fn app(state: AppState) -> Router {
         .route("/artifacts/{id}/download", get(download_artifact))
         .merge(agent_api::public_router())
         .merge(knowledge_api::router())
-        .merge(usage::router());
+        .merge(usage::router())
+        .merge(private_vault_api::router());
     Router::new().nest("/v1",api).merge(agent_api::internal_router()).merge(usage_internal::router()).fallback(||async{(StatusCode::NOT_FOUND,Json(json!({"error":{"code":"not_found","message":"接口不存在"}})))})
         .with_state(Arc::new(state)).layer(axum::extract::DefaultBodyLimit::max(1024*1024)).merge(attachment_router).merge(connector_router).merge(integration_router).merge(personal_mcp_router).merge(personal_wallet_router).merge(health_router).layer(CorsLayer::permissive()).layer(TraceLayer::new_for_http().make_span_with(|request:&axum::http::Request<axum::body::Body>|tracing::info_span!("http_request",method=%request.method(),path=%request.uri().path()))).layer(axum::middleware::map_response(normalize_error))
 }
@@ -866,6 +868,7 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
         created_at: timestamp(now()),
         updated_at: timestamp(now()),
         version: 1,
+        confirmation: None,
     });
     let user_message = Message {
         id: replacement.as_ref().map(|r|r.original.id.clone()).or_else(||resumed.and_then(|accepted|accepted.pointer("/user_message/id")).and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(new_id),
