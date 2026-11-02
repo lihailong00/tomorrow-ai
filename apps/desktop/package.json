@@ -1,0 +1,16 @@
+{
+  "name": "@tada/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.25.0",
+  "description": "妥啦 desktop shell for Windows, macOS and Linux",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:binary": "tauri build --no-bundle",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.0"
+  }
+}

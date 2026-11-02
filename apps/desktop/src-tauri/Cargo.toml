@@ -1,0 +1,39 @@
+[package]
+name = "tada-desktop"
+version = "0.1.0"
+description = "妥啦 desktop client"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+
+# This application is intentionally isolated from the server workspace. Building
+# a desktop client must not compile the API/worker or change the server lockfile.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+tokio-util = "0.7"
+url = "2"
+open = "5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["linux-native-sync-persistent", "crypto-rust"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 8
