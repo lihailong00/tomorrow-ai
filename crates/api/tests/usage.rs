@@ -1,6 +1,6 @@
 use axum::{
     body::{to_bytes, Body},
-    http::{Request, StatusCode},
+    http::{header, Request, StatusCode},
 };
 use serde_json::{json, Value};
 use tomorrow_api::{app, AppState};
@@ -28,6 +28,10 @@ async fn request(
         .oneshot(request.body(Body::from(body.to_string())).unwrap())
         .await
         .unwrap();
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
     let status = response.status();
     let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
     (status, serde_json::from_slice(&body).unwrap())

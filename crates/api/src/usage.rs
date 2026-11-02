@@ -1,6 +1,9 @@
 use crate::{AppState, Auth, Result};
 use axum::{
     extract::{Query, State},
+    http::{header, HeaderValue},
+    middleware,
+    response::Response,
     routing::get,
     Json, Router,
 };
@@ -14,6 +17,15 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/usage", get(report))
         .route("/usage/reminder", get(reminder).patch(update_reminder))
+        .layer(middleware::map_response(no_store))
+}
+
+async fn no_store(mut response: Response) -> Response {
+    // Apply to extractor/authentication failures as well as financial data.
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 pub(crate) async fn report(
