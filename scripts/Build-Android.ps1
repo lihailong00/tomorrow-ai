@@ -11,6 +11,7 @@ param(
   [switch]$Compact,
   [switch]$Candidate,
   [switch]$RunNativeTests,
+  [switch]$PreserveRustTarget,
   [ValidateRange(0,100000000000)][long]$EstimatedBuildBytes = 2000000000,
   [switch]$DetailedLogs,
   [switch]$SkipInstall
@@ -60,7 +61,7 @@ try {
   $storageBefore = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
   Write-TadaStorageStatus -Usage $storageBefore -Phase 'before build' -EstimatedBuildBytes $EstimatedBuildBytes
   if (($storageBefore.TotalBytes + $EstimatedBuildBytes) -ge $storageBefore.WarningBytes) {
-    $preCleanup = Invoke-TadaBuildCacheCleanup -RepoPath $repoPath -Lease $packagingLease -Phase Preflight -NativeBuildDirectory $NativeBuildDirectory -IncludeRustTarget
+    $preCleanup = Invoke-TadaBuildCacheCleanup -RepoPath $repoPath -Lease $packagingLease -Phase Preflight -NativeBuildDirectory $NativeBuildDirectory -IncludeRustTarget:(-not $PreserveRustTarget)
     Write-TadaCleanupStatus $preCleanup
   }
   if ($NativeBuildDirectory) { Initialize-TadaNativeBuildDirectory -RepoPath $repoPath -NativeBuildDirectory $NativeBuildDirectory }
@@ -242,7 +243,7 @@ try {
       $postCleanup = Invoke-TadaBuildCacheCleanup -RepoPath $repoPath -Lease $packagingLease -Phase $phase -NativeBuildDirectory $NativeBuildDirectory
       Write-TadaCleanupStatus $postCleanup
       $storageAfter = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
-      if ($storageAfter.TotalBytes -ge $storageAfter.WarningBytes) {
+      if ($storageAfter.TotalBytes -ge $storageAfter.WarningBytes -and -not $PreserveRustTarget) {
         $rustCleanup = Invoke-TadaBuildCacheCleanup -RepoPath $repoPath -Lease $packagingLease -Phase $phase -IncludeRustTarget
         Write-TadaCleanupStatus $rustCleanup
         $storageAfter = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
@@ -250,7 +251,7 @@ try {
       Write-TadaStorageStatus -Usage $storageAfter -Phase 'after housekeeping'
       $report = [ordered]@{
         schema_version=1; finished_at=[DateTimeOffset]::UtcNow.ToString('o'); build_succeeded=$buildSucceeded
-        package_target=$packageTarget.Name; build_type=$BuildType; compact=[bool]$Compact; candidate=[bool]$Candidate; apk_path=$apkPath; mapping_path=$mappingPath; native_tests=$nativeTestSummary; package_contents=$packageContents
+        package_target=$packageTarget.Name; build_type=$BuildType; compact=[bool]$Compact; candidate=[bool]$Candidate; apk_path=$apkPath; mapping_path=$mappingPath; native_tests=$nativeTestSummary; package_contents=$packageContents; rust_target_preserved=[bool]$PreserveRustTarget
         budget_bytes=10000000000; warning_bytes=9000000000; estimated_build_bytes=$EstimatedBuildBytes
         actual_peak_bytes=$null; peak_note='Pre/post measurements only; temporary build peak is not continuously monitored.'
         before=$storageBefore; ready=$storageReady; after=$storageAfter
