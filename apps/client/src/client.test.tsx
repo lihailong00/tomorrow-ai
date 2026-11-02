@@ -176,6 +176,32 @@ describe('服务选择与账号隔离', () => {
 });
 
 describe('事项操作切换范围', () => {
+  it('编辑事项携带当前版本号，保留编辑后的内容', async () => {
+    const todo: Todo = {id: 'todo-edit', title: '原事项', description: '原说明', kind: 'general', status: 'pending', source_kind: 'manual', source_label: '手动添加', created_at: '', updated_at: '', version: 7};
+    const api = {todos: vi.fn(async () => ({items: [todo], next_offset: null})), updateTodo: vi.fn(async () => ({...todo, title: '更新后的事项', version: 8}))} as unknown as ApiClient;
+    render(<TodosView api={api}/>);
+    fireEvent.click(await screen.findByRole('button', {name: '查看事项：原事项'}));
+    fireEvent.click(screen.getByRole('button', {name: '编辑事项'}));
+    expect((screen.getByLabelText('事项标题') as HTMLInputElement).value).toBe('原事项');
+    fireEvent.change(screen.getByLabelText('事项标题'), {target: {value: '更新后的事项'}});
+    fireEvent.click(screen.getByRole('button', {name: '保存事项'}));
+    await waitFor(() => expect(api.updateTodo).toHaveBeenCalledWith('todo-edit', {title: '更新后的事项', description: '原说明', kind: 'general', version: 7}));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+  it('删除事项需要明确确认，点击保留不发送删除请求', async () => {
+    const todo: Todo = {id: 'todo-delete', title: '可以删除的合成事项', description: '', kind: 'general', status: 'pending', source_kind: 'manual', source_label: '手动添加', created_at: '', updated_at: '', version: 1};
+    const api = {todos: vi.fn(async () => ({items: [todo], next_offset: null})), deleteTodo: vi.fn(async () => ({ok: true}))} as unknown as ApiClient;
+    render(<TodosView api={api}/>);
+    fireEvent.click(await screen.findByRole('button', {name: '查看事项：可以删除的合成事项'}));
+    fireEvent.click(screen.getByRole('button', {name: '删除事项'}));
+    expect(api.deleteTodo).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', {name: '保留'}));
+    expect(api.deleteTodo).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', {name: '删除事项'}));
+    fireEvent.click(screen.getByRole('button', {name: '确认删除事项'}));
+    await waitFor(() => expect(api.deleteTodo).toHaveBeenCalledWith('todo-delete'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
   it('更新过程中切换筛选不会让其他事项永久不能完成', async () => {
     const todo: Todo = {id: 'todo-1', title: '合成事项', description: '', kind: 'general', status: 'pending', source_kind: 'manual', source_label: '手动添加', created_at: '', updated_at: '', version: 1};
     const update = deferred<Todo>();
