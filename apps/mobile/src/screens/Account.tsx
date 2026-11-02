@@ -535,7 +535,7 @@ function PhoneAuthScreen({
   );
 }
 
-export function SettingsScreen() {
+export function SettingsScreen({ initialSection }: { initialSection?: 'account' | 'server' } = {}) {
   const {
     api,
     user,
@@ -547,9 +547,12 @@ export function SettingsScreen() {
   const [timezone, setTimezone] = useState(user?.timezone ?? 'Asia/Shanghai');
   const [notice, setNotice] = useState('');
   const [showNotificationSettings, setShowNotificationSettings] = useState(false);
+  const settingsScroll = useRef<ScrollView>(null);
+  const jumpedToAccount = useRef(false);
   const action = useAction();
   return (
     <ScrollView
+      ref={settingsScroll}
       keyboardShouldPersistTaps="handled"
       contentContainerStyle={s.content}
     >
@@ -560,6 +563,12 @@ export function SettingsScreen() {
       {user && (
         <>
           <PhoneSourcesEntry onShowTodos={() => navigate({name: 'todos'})} />
+          <View onLayout={event => {
+            if (initialSection === 'account' && !jumpedToAccount.current) {
+              jumpedToAccount.current = true;
+              settingsScroll.current?.scrollTo({ y: Math.max(0, event.nativeEvent.layout.y - 12), animated: false });
+            }
+          }} />
           <Section title="个人资料" />
           <Card>
             <Text style={s.small}>{user.phone ?? user.email}</Text>
@@ -605,6 +614,22 @@ export function SettingsScreen() {
                 保存资料
               </Button>
             </View>
+          </Card>
+          <Section title="用量与费用" />
+          <Card>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="查看我的用量与费用"
+              onPress={() => navigate({ name: 'usage' })}
+              style={[s.row, { minHeight: 50, gap: 12 }]}
+            >
+              <Icon name="file" size={22} color="#647BB9" />
+              <View style={s.fill}>
+                <Text style={s.cardTitle}>用量与费用</Text>
+                <Text style={s.small}>查看各模型用量与个人预估费用</Text>
+              </View>
+              <Icon name="chevronRight" size={18} color="#8793AA" />
+            </Pressable>
           </Card>
           <PhotoIndexSettings key={api.baseUrl + user.id} />
           <Section title="我的资料" />

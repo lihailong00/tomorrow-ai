@@ -375,6 +375,7 @@ impl Repository {
             model_mode: None,
             attachments: vec![],
         };
+        let provider = provider.with_usage(crate::model::UsageContext::new(self.clone(), &user, "memory", format!("memory:{id}")));
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(25),
             provider.complete(&[request]),

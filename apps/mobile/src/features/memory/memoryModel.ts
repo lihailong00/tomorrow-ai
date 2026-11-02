@@ -1,5 +1,6 @@
 import type { Memory, MemoryKind } from '../../domain/types';
 import type { IconName } from '../../ui/visuals';
+import { getMemoryConfirmation } from './memoryPresentation';
 
 /** Presentation labels describe saved text; they never generate new personal facts. */
 export function describeMemory(memory: Memory): {
@@ -58,11 +59,13 @@ export function selectMemoryHighlights(items: readonly Memory[]): Memory[] {
   const selected: Memory[] = [];
   const labels = new Set<string>();
   // Prefer different aspects of the user, while preserving recency within each.
-  const ordered = [...items].sort((a, b) => {
-    const left = Date.parse(a.updated_at);
-    const right = Date.parse(b.updated_at);
-    return Number.isFinite(left) && Number.isFinite(right) ? right - left : 0;
-  });
+  const ordered = items
+    .filter(item => !getMemoryConfirmation(item))
+    .sort((a, b) => {
+      const left = Date.parse(a.updated_at);
+      const right = Date.parse(b.updated_at);
+      return Number.isFinite(left) && Number.isFinite(right) ? right - left : 0;
+    });
   for (const memory of ordered) {
     const label = describeMemory(memory).label;
     if (!labels.has(label)) {

@@ -534,9 +534,9 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
   );
 }
 
-export function TasksScreen() {
+export function TasksScreen({ initialView = 'tasks' }: { initialView?: 'tasks' | 'schedules' } = {}) {
   const { api, navigate, revision, invalidate, formatDate } = useApp();
-  const [view, setView] = useState<'tasks' | 'schedules'>('tasks');
+  const [view, setView] = useState<'tasks' | 'schedules'>(initialView);
   const [filter, setFilter] = useState('all');
   const taskData = usePagedList(
     offset => api.tasks({ status: filter, offset, limit: 50 }),
@@ -566,8 +566,8 @@ export function TasksScreen() {
       contentContainerStyle={v.pageContent}
     >
       <PageHeader
-        title="助手执行记录"
-        subtitle="查看妥啦准备内容的进度与结果。"
+        title={view === 'schedules' ? '定时安排' : '助手执行记录'}
+        subtitle={view === 'schedules' ? '按你的时间，完成固定的整理与提醒。' : '查看妥啦准备内容的进度与结果。'}
         action={view === 'tasks' ? '新建任务' : '新建计划'}
         onAction={() =>
           navigate({ name: view === 'tasks' ? 'newTask' : 'schedule' })

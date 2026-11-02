@@ -78,10 +78,10 @@ const server = createServer(async (request, response) => {
     pending--; awaitingAdmission = false; active++;
     const settings = snapshot.model;
     const webProvider = snapshot.web ? createDeepSeekWeb(snapshot.web) : undefined;
-    const callback = async (path: string, body?: unknown, signal?: AbortSignal) => {
+    const callback = async (path: string, body?: unknown, signal?: AbortSignal, lateUsage = false) => {
       const mcpCall = path === '/tools' && body && typeof body === 'object' &&
         ['list_mcp_tools', 'call_mcp_tool'].includes(String((body as { name?: unknown }).name));
-      const combined = AbortSignal.any([controller.signal, AbortSignal.timeout(mcpCall ? 50000 : 15000), ...(signal ? [signal] : [])]);
+      const combined = AbortSignal.any([...(lateUsage ? [] : [controller.signal]), AbortSignal.timeout(mcpCall ? 50000 : 15000), ...(signal ? [signal] : [])]);
       const result = await fetch(`${apiUrl}/internal/agent/runs/${encodeURIComponent(input.run_id)}${path}`, {
         method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: combined,
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${input.run_token}`, 'X-Agent-Service': secret },
@@ -92,6 +92,7 @@ const server = createServer(async (request, response) => {
       return value;
     };
     const bridge: Bridge = {
+      usage: async (message, signal) => { await callback('/usage', message, signal, message.kind === 'finish'); },
       state: async signal => await callback('/state', undefined, signal) as { next_sequence: number },
       event: async (event, signal) => { await callback('/events', event, signal); },
       tool: (name, args, signal, operationIndex, operationSlot) => callback('/tools', {

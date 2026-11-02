@@ -4,6 +4,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 use tomorrow_domain::model::ModelProbe;
+use tomorrow_domain::Repository;
+use crate::metering::MediaUsage;
 
 const IMAGE: &[u8] = include_bytes!("service_probe/red-circle.png");
 const TEXT: &str = "明天上午九点提醒我开会。";
@@ -16,17 +18,27 @@ pub async fn vision(get: impl Fn(&str) -> Option<String>) -> ModelProbe {
     let config = vision::config_from(|key| if key == "PHOTO_VISION_ENABLED" {
         Some("true".into())
     } else { get(key) });
-    probe(config.ok().flatten(), Service::Vision).await
+    probe(config.ok().flatten(), Service::Vision, None).await
 }
 
 pub async fn embedding(get: impl Fn(&str) -> Option<String>) -> ModelProbe {
     let config = semantic::config_from(|key| if key == "PHOTO_EMBEDDING_ENABLED" {
         Some("true".into())
     } else { get(key) });
-    probe(config.ok().flatten(), Service::Embedding).await
+    probe(config.ok().flatten(), Service::Embedding, None).await
 }
 
-async fn probe(config: Option<semantic::Config>, service: Service) -> ModelProbe {
+pub async fn vision_with_usage(get: impl Fn(&str) -> Option<String>, repository: &Repository, user: &str) -> ModelProbe {
+    let config = vision::config_from(|key| if key == "PHOTO_VISION_ENABLED" { Some("true".into()) } else { get(key) });
+    probe(config.ok().flatten(), Service::Vision, Some((repository, user))).await
+}
+
+pub async fn embedding_with_usage(get: impl Fn(&str) -> Option<String>, repository: &Repository, user: &str) -> ModelProbe {
+    let config = semantic::config_from(|key| if key == "PHOTO_EMBEDDING_ENABLED" { Some("true".into()) } else { get(key) });
+    probe(config.ok().flatten(), Service::Embedding, Some((repository, user))).await
+}
+
+async fn probe(config: Option<semantic::Config>, service: Service, owner: Option<(&Repository, &str)>) -> ModelProbe {
     let start = Instant::now();
     let mut result = ModelProbe {
         ok: false, code: "not_configured", message: "请先选择服务商并配置对应 API Key，或配置可沿用的百炼语音服务。",
@@ -57,9 +69,22 @@ async fn probe(config: Option<semantic::Config>, service: Service) -> ModelProbe
     if matches!(service, Service::Vision) && config.model.starts_with("qwen") {
         payload["enable_thinking"] = json!(false);
     }
-    let response = client.post(&config.endpoint).bearer_auth(&config.key).json(&payload).send().await;
+    let Ok(request) = client.post(&config.endpoint).bearer_auth(&config.key).json(&payload).build() else { return result; };
+    let usage = if let Some((repository, user)) = owner {
+        let (capability, images) = match service { Service::Vision => ("vision", Some(1)), Service::Embedding => ("embedding", None) };
+        match MediaUsage::begin(repository, user, &config.endpoint, &config.model, capability, "other", None, images).await {
+            Ok(usage) => Some(usage),
+            Err(_) => {
+                result.code = "usage_unavailable";
+                result.message = "用量记录暂时不可用，未调用模型服务。";
+                return result;
+            }
+        }
+    } else { None };
+    let response = client.execute(request).await;
     match response {
         Err(error) => {
+            if let Some(usage) = &usage { let _ = usage.transport_failure(&error).await; }
             result.code = if error.is_timeout() { "timeout" } else { "connection_failed" };
             result.message = if error.is_timeout() { "模型服务响应超时，请稍后重试。" } else { "无法连接模型服务，请检查网络、地址或证书。" };
         }
@@ -67,6 +92,7 @@ async fn probe(config: Option<semantic::Config>, service: Service) -> ModelProbe
             let status = response.status().as_u16();
             result.upstream_status = Some(status);
             if !response.status().is_success() {
+                if let Some(usage) = &usage { usage.rejected_response(response).await; }
                 (result.code, result.message) = match status {
                     300..=399 => ("redirect_blocked", "模型服务返回重定向，已停止测试以保护密钥。"),
                     401 | 403 => ("authentication_failed", "密钥无效或权限不足，请检查服务地域及模型开通状态。"),
@@ -85,15 +111,22 @@ async fn probe(config: Option<semantic::Config>, service: Service) -> ModelProbe
                         Ok(Some(chunk)) if bytes.len() + chunk.len() <= 128 * 1024 => bytes.extend_from_slice(&chunk),
                         Ok(None) => {
                             if let Ok(body) = serde_json::from_slice::<Value>(&bytes) {
+                                if let Some(usage) = &usage { let _ = usage.finish("succeeded", Some(&body)).await; }
                                 validate(&body, service, config.dimension, &mut result);
+                            } else if let Some(usage) = &usage {
+                                let _ = usage.finish("failed", None).await;
                             }
                             break;
                         }
                         Err(error) => {
+                            if let Some(usage) = &usage { let _ = usage.transport_failure(&error).await; }
                             if error.is_timeout() { result.code = "timeout"; result.message = "读取模型结果超时，请稍后重试。"; }
                             break;
                         }
-                        _ => break,
+                        _ => {
+                            if let Some(usage) = &usage { let _ = usage.finish("failed", None).await; }
+                            break;
+                        }
                     }
                 }
             }

@@ -12,6 +12,7 @@ pub mod repository;
 pub mod sms;
 pub mod todos;
 pub mod growth;
+pub mod usage;
 
 pub use dto::*;
 pub use model::LlmProvider as ModelProvider;

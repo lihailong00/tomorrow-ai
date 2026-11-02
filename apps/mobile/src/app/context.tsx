@@ -14,8 +14,9 @@ import type { HealthReceipt } from '../domain/healthLink';
 
 export type MainTab = 'today' | 'tasks' | 'memories' | 'capabilities';
 export type Route =
-  | { name: 'main' }
-  | { name: 'settings' }
+  | { name: 'main'; tab?: MainTab }
+  | { name: 'settings'; section?: 'account' | 'server' }
+  | { name: 'help' }
   | { name: 'chat'; conversationId?: string; prompt?: string }
   | { name: 'task'; id: string }
   | { name: 'newTask' }
@@ -25,7 +26,7 @@ export type Route =
   | { name: 'growth' }
   | { name: 'growthSettings' }
   | { name: 'growthWeek' }
-  | { name: 'assistantTasks' }
+  | { name: 'assistantTasks'; view?: 'tasks' | 'schedules' }
   | { name: 'memory'; memory?: Memory }
   | { name: 'schedule'; schedule?: Schedule }
   | { name: 'notifications' }
@@ -34,6 +35,7 @@ export type Route =
   | { name: 'integrations' }
   | { name: 'health'; receipt?: HealthReceipt }
   | { name: 'aiHistory' }
+  | { name: 'usage' }
   | { name: 'conversations' };
 export interface AppContextValue {
   api: ApiClient;

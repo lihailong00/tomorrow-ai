@@ -75,6 +75,8 @@ function PhoneSourcesForOwner({
   const [snapshots, setSnapshots] = useState<
     Partial<Record<PhoneSource, PhoneSnapshot>>
   >({});
+  const snapshotsRef = useRef(snapshots);
+  snapshotsRef.current = snapshots;
   const [failures, setFailures] = useState<
     Partial<Record<PhoneSource, string>>
   >({});
@@ -87,6 +89,7 @@ function PhoneSourcesForOwner({
   const [photoSettings, setPhotoSettings] = useState(false);
   const [busy, setBusy] = useState('');
   const busyRef = useRef(false);
+  const refreshPending = useRef(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const extraction = useRef(new Map<string, string>());
@@ -136,9 +139,11 @@ function PhoneSourcesForOwner({
   const readSources = async (sources: PhoneSource[], ask: boolean) => {
     if (!owner.active || busyRef.current) return;
     busyRef.current = true;
-    setBusy('正在检查本机资料权限…');
-    setError('');
-    setNotice('');
+    if (ask) {
+      setBusy('正在检查本机资料权限…');
+      setError('');
+      setNotice('');
+    }
     try {
       if (ask) await persist({ seen: true, enabled: sources });
       let current = await phoneSources.status();
@@ -146,13 +151,7 @@ function PhoneSourcesForOwner({
       setStatus(current);
       for (const source of phoneSourceIds.filter(id => sources.includes(id))) {
         if (!owner.active) return;
-        setBusy(`正在整理${sourceDetails[source].title}…`);
-        setSnapshots(previous => {
-          const next = { ...previous };
-          delete next[source];
-          return next;
-        });
-        setChosen(previous => previous.filter(item => item.source !== source));
+        if (ask) setBusy(`正在连接${sourceDetails[source].title}…`);
         try {
           const permission = ask
             ? await phoneSources.request(source)
@@ -163,17 +162,28 @@ function PhoneSourcesForOwner({
             permissions: { ...current.permissions, [source]: permission },
           };
           setStatus(current);
-          if (!canReadPhoneSource(permission))
+          if (!canReadPhoneSource(permission)) {
+            // Revoked grants must not leave stale previews or selectable content visible.
+            setSnapshots(previous => {
+              const next = { ...previous };
+              delete next[source];
+              return next;
+            });
+            setChosen(previous =>
+              previous.filter(item => item.source !== source),
+            );
+            await phoneSources.stop(source, storageKey);
             throw new Error(
               source === 'sms'
                 ? '未获得短信权限，可能受系统或安装来源限制；可以继续使用其他资料。'
                 : '此来源未获授权，可以跳过，或在系统应用权限中开启。',
             );
+          }
           current = await phoneSources.status();
           if (!owner.active) return;
           setStatus(current);
-          setPageHistory(previous => ({ ...previous, [source]: [] }));
-          const result = await phoneSources.read(
+          if (ask) setPageHistory(previous => ({ ...previous, [source]: [] }));
+          let result = await phoneSources.read(
             source,
             source === 'sms' &&
               sources.includes('contacts') &&
@@ -181,6 +191,16 @@ function PhoneSourcesForOwner({
             storageKey,
             ask,
           );
+          if (!owner.active) return;
+          const cursor = snapshotsRef.current[source]?.cursor;
+          if (!ask && cursor && cursor !== '0') {
+            result = await phoneSources.page(
+              source,
+              storageKey,
+              cursor,
+              source === 'sms' && sources.includes('contacts'),
+            );
+          }
           if (!owner.active) return;
           setSnapshots(previous => ({ ...previous, [source]: result }));
           setFailures(previous => ({ ...previous, [source]: '' }));
@@ -197,6 +217,10 @@ function PhoneSourcesForOwner({
     } finally {
       busyRef.current = false;
       if (owner.active) setBusy('');
+      if (owner.active && refreshPending.current) {
+        refreshPending.current = false;
+        void readLatest.current(savedRef.current.enabled, false);
+      }
     }
   };
   const readLatest = useRef(readSources);
@@ -204,11 +228,17 @@ function PhoneSourcesForOwner({
   useEffect(() => {
     if (!loaded) return;
     const refresh = () => {
-      if (owner.active && !busyRef.current && savedRef.current.enabled.length)
-        void readLatest.current(savedRef.current.enabled, false);
+      if (!owner.active || !savedRef.current.enabled.length) return;
+      if (busyRef.current) refreshPending.current = true;
+      else void readLatest.current(savedRef.current.enabled, false);
     };
     refresh();
-    return platform.onForeground(refresh);
+    const foreground = platform.onForeground(refresh);
+    const changes = phoneSources.onChange?.(refresh);
+    return () => {
+      foreground();
+      changes?.();
+    };
   }, [loaded, owner]);
   useEffect(() => {
     if (visible)
@@ -297,14 +327,12 @@ function PhoneSourcesForOwner({
       if (owner.active) setError(errorMessage(failure));
     }
   };
-  // Poll only a bounded preview page. Native WorkManager continues the full import
-  // independently of this screen, including after JS or the app process restarts.
+  // Poll a bounded preview only while work is actually queued/running.
   useEffect(() => {
     const pending = phoneSourceIds.filter(
       source =>
         saved.enabled.includes(source) &&
-        snapshots[source]?.syncState &&
-        snapshots[source]?.syncState !== 'complete',
+        ['queued', 'running'].includes(snapshots[source]?.syncState ?? ''),
     );
     if (!pending.length) return;
     let cancelled = false;
@@ -347,12 +375,12 @@ function PhoneSourcesForOwner({
     setError('');
     setNotice('');
     try {
-      // Re-read selected calendars from the current local cache: a background
-      // refresh may have cancelled an event after its preview was selected.
+      // Re-read selected records: an event may have been cancelled, or an SMS
+      // may have changed or disappeared since the user selected its preview.
       const currentRecords: SelectedPhoneRecord[] = [];
       for (const item of records) {
         const record =
-          item.source === 'calendar'
+          item.source === 'calendar' || item.source === 'sms'
             ? await phoneSources.record(item.source, storageKey, item.record.id)
             : item.record;
         if (!owner.active) return;
@@ -413,6 +441,13 @@ function PhoneSourcesForOwner({
         (item.timestamp ?? 0) >= Date.now(),
     )
     .sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))[0];
+  const initialImport = phoneSourceIds.find(id => {
+    const snapshot = snapshots[id];
+    return (
+      snapshot?.syncMode === 'full' &&
+      ['queued', 'running'].includes(snapshot.syncState ?? '')
+    );
+  });
   return (
     <>
       <Pressable
@@ -423,12 +458,16 @@ function PhoneSourcesForOwner({
       >
         <View style={{ flex: 1 }}>
           <Text style={ui.entryTitle}>
-            {total ? `已在本机整理 ${total} 条资料` : '让妥啦了解你的安排'}
+            {total ? `本机已保存 ${total} 条资料` : '让妥啦了解你的安排'}
           </Text>
           <Text style={s.small} numberOfLines={2}>
-            {busy ||
+            {(initialImport
+              ? `正在建立${sourceDetails[initialImport].title}资料库…`
+              : '') ||
               (nextEvent
                 ? `接下来：${nextEvent.title} · ${recordDate(nextEvent)}`
+                : saved.enabled.length
+                ? '变化时自动更新 · 资料保存在本机'
                 : '短信 · 日历 · 联系人 · 照片')}
           </Text>
         </View>
@@ -587,10 +626,12 @@ function PhoneSourcesForOwner({
                               snapshot.total ?? 0
                             } 条 · ${
                               snapshot.syncState === 'complete'
-                                ? '全量整理完成'
+                                ? '本机资料已更新'
                                 : snapshot.syncState === 'error'
                                 ? '已暂停，保留进度'
-                                : '正在继续整理'
+                                : snapshot.syncMode === 'incremental'
+                                ? '正在后台更新变化'
+                                : '首次建立资料库'
                             }。`
                           : `本机已保存 ${snapshot.items.length} 条资料。`}{' '}
                         {new Date(snapshot.readAt).toLocaleTimeString('zh-CN')}{' '}
@@ -791,8 +832,7 @@ function PhoneSourcesForOwner({
               </Text>
             )}
             <Text style={[s.small, s.topGap]}>
-              之后回到 App
-              时继续整理已连接的来源，并定期更新。记录加密保存在手机本地；取消勾选会停止该来源并清除本机缓存，退出账号会清除全部本机资料缓存。系统权限可在手机设置中撤回。
+              首次读取后优先展示本机缓存，资料变化时后台增量更新，并低频核对遗漏变化。记录加密保存在手机本地；取消勾选会停止该来源并清除本机缓存，退出账号会清除全部本机资料缓存。系统权限可在手机设置中撤回。
             </Text>
             {photoSettings && <PhotoIndexSettings />}
             <PhoneWeatherCard />

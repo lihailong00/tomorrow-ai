@@ -378,23 +378,29 @@ async fn prepare(
     drop(image);
     let client = vision::client_for(&Some(config.clone()))?;
     let mut attempt = 0;
-    let response = loop {
+    let (response, usage) = loop {
         authorize(state, user, &upload.id, identity).await?;
-        match client
+        let request = client
             .post(&config.endpoint)
             .bearer_auth(&config.key)
             .json(&payload)
-            .send()
-            .await
-        {
-            Ok(response) => break response,
+            .build().map_err(|_| unavailable())?;
+        let usage = crate::metering::MediaUsage::dispatch(
+            state, user, &config.endpoint, &config.model, "vision", "image", None, Some(1),
+        ).await?;
+        match client.execute(request).await {
+            Ok(response) => break (response, usage),
             Err(error) if attempt == 0 && error.is_connect() => {
+                usage.transport_failure(&error).await?;
                 attempt += 1;
             }
-            Err(_) => return Err(unavailable()),
+            Err(error) => {
+                usage.transport_failure(&error).await?;
+                return Err(unavailable());
+            }
         }
     };
-    let result = vision::read_analysis(response)
+    let result = vision::read_analysis(response, &usage)
         .await
         .map_err(|_| unavailable())?;
     let mut text = format!(

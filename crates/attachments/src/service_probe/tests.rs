@@ -2,8 +2,13 @@ use super::*;
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpListener};
 
 async fn mock(service: Service, status: u16, body: String, extra: &str) -> ModelProbe {
+    let repository = Repository::connect("sqlite::memory:").await.unwrap();
+    let user = repository.create_user("media-probe@example.test", "hash", "admin", "Asia/Shanghai").await.unwrap();
+    let pool = repository.pool();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    let expected_input = serde_json::from_str::<Value>(&body).ok()
+        .and_then(|body| body.pointer("/usage/prompt_tokens").and_then(Value::as_i64));
     let extra = extra.to_owned();
     let task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -48,9 +53,20 @@ async fn mock(service: Service, status: u16, body: String, extra: &str) -> Model
         "PHOTO_VISION_API_KEY" | "PHOTO_EMBEDDING_API_KEY" => Some("fixture-private-key".into()),
         _ => None,
     };
-    let result = match service { Service::Vision => vision(get).await, Service::Embedding => embedding(get).await };
+    let result = match service { Service::Vision => vision_with_usage(get, &repository, &user.id).await,
+        Service::Embedding => embedding_with_usage(get, &repository, &user.id).await };
     task.await.unwrap();
     assert!(!serde_json::to_string(&result).unwrap().contains("fixture-private-key"));
+    let rows: Vec<(String,String,String,String)> = sqlx::query_as("SELECT user_id,capability,purpose,outcome_json FROM usage_requests")
+        .fetch_all(&pool).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, user.id);
+    assert_eq!(rows[0].1, match service { Service::Vision => "vision", Service::Embedding => "embedding" });
+    assert_eq!(rows[0].2, "other");
+    let measured: Value = serde_json::from_str(&rows[0].3).unwrap();
+    assert_eq!(measured["measurements"]["image_count"], match service { Service::Vision => json!(1), Service::Embedding => Value::Null });
+    if let Some(expected) = expected_input { assert_eq!(measured["measurements"]["input_tokens"], expected); }
+    pool.close().await;
     result
 }
 
@@ -83,7 +99,7 @@ async fn auxiliary_probes_reject_error_empty_html_oversized_and_redirect_respons
     for service in [Service::Vision, Service::Embedding] {
         for (status, body, extra, code) in [
             (401,"fixture-private-key".into(),"","authentication_failed"),
-            (429,"fixture-private-key".into(),"","upstream_rate_limited"),
+            (429,json!({"error":{"message":"fixture-private-key"},"usage":{"prompt_tokens":4}}).to_string(),"","upstream_rate_limited"),
             (302,String::new(),"Location: /credential-leak\r\n","redirect_blocked"),
             (200,"<html>fixture-private-key</html>".into(),"","invalid_response"),
             (200,"{}".into(),"","invalid_response"),

@@ -120,14 +120,19 @@ async fn mock(
         .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
+    let pool = f.state.pool.clone();
+    let user = f.user.clone();
     let app=Router::new().route("/v1/chat/completions",post(move |headers:HeaderMap,Json(value):Json<serde_json::Value>|{
-        let count=count.clone();let barrier=barrier.clone();async move {
+        let count=count.clone();let barrier=barrier.clone();let pool=pool.clone();let user=user.clone();async move {
+            let dispatched: i64 = sqlx::query_scalar("SELECT count(*) FROM usage_requests WHERE user_id=$1 AND capability='vision' AND purpose='image' AND outcome_json=''")
+                .bind(&user).fetch_one(&pool).await.unwrap();
+            assert!(dispatched > 0, "usage dispatch is durable before provider receives the image");
             assert_eq!(headers[header::AUTHORIZATION],"Bearer fixture-image-key");
             assert_eq!(value["enable_thinking"],false);assert_eq!(value["stream"],false);
             assert_eq!(value.pointer("/messages/0/content/0/image_url/url").unwrap(),&format!("data:image/png;base64,{PNG}"));
             count.fetch_add(1,Ordering::SeqCst);
             if let Some((entered,release))=barrier{entered.notify_one();release.notified().await;}
-            Json(json!({"choices":[{"finish_reason":if valid{"stop"}else{"length"},"message":{"content":json!({"description":"一张日程截图","ocr":"09:00 阅读\n17:00 散步","labels":["日程","阅读"]}).to_string()}}]}))
+            Json(json!({"choices":[{"finish_reason":if valid{"stop"}else{"length"},"message":{"content":json!({"description":"一张日程截图","ocr":"09:00 阅读\n17:00 散步","labels":["日程","阅读"]}).to_string()}}],"usage":{"prompt_tokens":120,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":80}}}))
         }
     }));
     let task = tokio::spawn(async move {
@@ -202,6 +207,14 @@ async fn explicit_image_analysis_is_cached_owner_scoped_and_chat_readable_withou
     assert_eq!(cached.status(), StatusCode::OK);
     assert_eq!(json_body(cached).await, result);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let ledger: Vec<(String,String,String,String)> = sqlx::query_as("SELECT user_id,capability,purpose,outcome_json FROM usage_requests")
+        .fetch_all(&f.state.pool).await.unwrap();
+    assert_eq!(ledger.len(), 1, "cached image results do not generate usage");
+    assert_eq!((&ledger[0].0, ledger[0].1.as_str(), ledger[0].2.as_str()), (&f.user, "vision", "image"));
+    let outcome: serde_json::Value = serde_json::from_str(&ledger[0].3).unwrap();
+    assert_eq!(outcome["measurements"]["image_count"], 1);
+    assert_eq!(outcome["measurements"]["input_tokens"], 120);
+    assert_eq!(outcome["measurements"]["cache_read_tokens"], 80);
     assert_eq!(
         json_body(f.call("GET", &textpath).await).await["text"],
         result["text"]
@@ -244,6 +257,12 @@ async fn explicit_image_analysis_is_cached_owner_scoped_and_chat_readable_withou
         .await
         .unwrap();
     assert_eq!(count, 0);
+    let outcomes: Vec<String> = sqlx::query_scalar("SELECT outcome_json FROM usage_requests WHERE user_id=$1 AND purpose='image'")
+        .bind(&f.user).fetch_all(&f.state.pool).await.unwrap();
+    assert_eq!(outcomes.len(), 1, "deleting the attachment preserves its paid request");
+    let measured: serde_json::Value = serde_json::from_str(&outcomes[0]).unwrap();
+    assert_eq!(measured["measurements"]["input_tokens"], 120);
+    assert_eq!(measured["measurements"]["image_count"], 1);
     server.abort();
     f.cleanup().await;
 }
@@ -328,6 +347,8 @@ async fn missing_provider_and_invalid_or_unsupported_images_never_call_model() {
         StatusCode::UNPROCESSABLE_ENTITY
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let dispatched: i64 = sqlx::query_scalar("SELECT count(*) FROM usage_requests").fetch_one(&f.state.pool).await.unwrap();
+    assert_eq!(dispatched, 0, "local image validation never calls a model");
     server.abort();
     f.cleanup().await;
 }
@@ -434,6 +455,12 @@ async fn incomplete_model_output_is_not_cached_and_retry_remains_explicit() {
         .await
         .unwrap();
     assert_eq!(count, 0);
+    let outcomes: Vec<String> = sqlx::query_scalar("SELECT outcome_json FROM usage_requests WHERE user_id=$1 AND purpose='image'")
+        .bind(&f.user).fetch_all(&f.state.pool).await.unwrap();
+    assert_eq!(outcomes.len(), 1, "rejected model output still has one paid request");
+    let measured: serde_json::Value = serde_json::from_str(&outcomes[0]).unwrap();
+    assert_eq!(measured["measurements"]["input_tokens"], 120);
+    assert_eq!(measured["measurements"]["image_count"], 1);
     server.abort();
     f.cleanup().await;
 }
@@ -453,6 +480,8 @@ async fn upload_analysis_shares_daily_admission_with_album_calls() {
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(response.headers().contains_key(header::RETRY_AFTER));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let dispatched: i64 = sqlx::query_scalar("SELECT count(*) FROM usage_requests").fetch_one(&f.state.pool).await.unwrap();
+    assert_eq!(dispatched, 0, "local quota rejection never calls a model");
     server.abort();
     f.cleanup().await;
 }

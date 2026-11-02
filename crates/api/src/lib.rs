@@ -24,6 +24,8 @@ mod memory_api;
 mod phone_api;
 mod todo_api;
 mod growth_api;
+mod usage;
+mod usage_internal;
 pub mod admin;
 mod live;
 use tomorrow_domain::agent::AgentClient;
@@ -225,8 +227,9 @@ pub fn app(state: AppState) -> Router {
         .route("/artifacts/{id}", get(artifact))
         .route("/artifacts/{id}/download", get(download_artifact))
         .merge(agent_api::public_router())
-        .merge(knowledge_api::router());
-    Router::new().nest("/v1",api).merge(agent_api::internal_router()).fallback(||async{(StatusCode::NOT_FOUND,Json(json!({"error":{"code":"not_found","message":"接口不存在"}})))})
+        .merge(knowledge_api::router())
+        .merge(usage::router());
+    Router::new().nest("/v1",api).merge(agent_api::internal_router()).merge(usage_internal::router()).fallback(||async{(StatusCode::NOT_FOUND,Json(json!({"error":{"code":"not_found","message":"接口不存在"}})))})
         .with_state(Arc::new(state)).layer(axum::extract::DefaultBodyLimit::max(1024*1024)).merge(attachment_router).merge(connector_router).merge(integration_router).merge(personal_mcp_router).merge(personal_wallet_router).merge(health_router).layer(CorsLayer::permissive()).layer(TraceLayer::new_for_http().make_span_with(|request:&axum::http::Request<axum::body::Body>|tracing::info_span!("http_request",method=%request.method(),path=%request.uri().path()))).layer(axum::middleware::map_response(normalize_error))
 }
 async fn normalize_error(response: Response) -> Response {
@@ -928,6 +931,9 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
         state.repository.accept_chat_stream_replacing(stream,user_id,&conversation,&user_message,&assistant_id,&assistant_created_at,ticket.as_ref().map(|t|t.id.as_str()),replacement.as_ref()).await?;
     }
     if let Some(request)=&input.client_request_id {state.repository.ensure_chat_request_visible(user_id,request).await?;}
+    let provider = state.provider.with_usage(tomorrow_domain::model::UsageContext::new(
+        state.repository.clone(), user_id, "chat", format!("chat:{}:{}", conversation.id, assistant_id),
+    ));
     let reply = if let (Some(agent), Some(ticket)) = (&state.agent, &ticket) {
         ModelReply {
             content: agent
@@ -937,13 +943,13 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
             provider: Some("pi".into()),
         }
     } else if let Some(stream) = stream {
-        state.provider.complete_stream_with_reasoning(&context,input.reasoning_effort,|delta| {
+        provider.complete_stream_with_reasoning(&context,input.reasoning_effort,|delta| {
             let repository = state.repository.clone();
             let stream = stream.clone();
             async move {repository.append_chat_stream_delta(&stream,delta).await}
         }).await?
     } else {
-        state.provider.complete_with_reasoning(&context,input.reasoning_effort).await?
+        provider.complete_with_reasoning(&context,input.reasoning_effort).await?
     };
     let message = Message {
         id: assistant_id,

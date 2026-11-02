@@ -2143,3 +2143,19 @@ summary:focus-visible {
   padding: 0 26px 24px;
   font-size: 12px;
 }
+.usage-price-card { margin-top: 20px; }
+.usage-price-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 23px 25px; border: 0; background: transparent; text-align: left; color: inherit; cursor: pointer; }
+.usage-price-toggle strong { display: block; font-size: 15px; }
+.usage-price-toggle small { display: block; margin-top: 6px; font-size: 11px; color: #8794ae; }
+.usage-price-toggle > span:last-child { font-size: 22px; }
+.usage-price-content { padding: 0 25px 24px; }
+.usage-price-model { margin: 22px 0 0; padding: 15px 0 0; border: 0; border-top: 1px solid #e9edf5; min-width: 0; }
+.usage-price-model legend { padding: 0 8px 0 0; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.usage-price-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px 18px; }
+.usage-price-grid .field-label { margin: 10px 0; }
+.usage-price-unit { max-width: 380px; }
+.usage-price-unit select { width: 100%; }
+.usage-price-advanced { margin-top: 8px; font-size: 12px; }
+.usage-price-advanced summary { cursor: pointer; }
+.usage-price-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 22px; }
+@media (max-width: 700px) { .usage-price-content { padding: 0 18px 20px; } .usage-price-toggle { padding: 20px 18px; } }

@@ -60,6 +60,15 @@ const paths = {
   share: 'm14 3 7 6-7 6V11c-6 0-9 3-11 8 0-9 4-13 11-13V3Z',
   chevronDown: 'm5 9 7 7 7-7',
   delete: 'M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7',
+  panelLeft: 'M3 4h18v16H3V4Zm5 0v16m8-12-4 4 4 4',
+  growth: 'M12 21v-9M12 14C5 15 3 11 3 5c6 0 10 2 9 9Zm0-2c-1-6 3-9 9-9 0 6-3 10-9 9Z',
+  folder: 'M3 6h7l2 2h9v12H3V6Zm0 4h18',
+  connections: 'M3 3h7v7H3V3Zm11 0h7v7h-7V3ZM3 14h7v7H3v-7Zm11 0h7v7h-7v-7Z',
+  health: 'M2 12h5l3-8 4 16 3-8h5',
+  import: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5',
+  help: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM9.5 9a2.5 2.5 0 1 1 4.2 1.8c-1.2.7-1.7 1.2-1.7 2.7m0 3h.01',
+  server: 'M3 3h18v7H3V3Zm0 11h18v7H3v-7ZM7 6.5h.01M7 17.5h.01M12 6.5h5m-5 11h5',
+  shield: 'M12 3 3 7v5c0 5 9 10 9 10s9-5 9-10V7l-9-4Zm-5 9 3 3 7-7',
 } as const;
 
 export type IconName = keyof typeof paths;

@@ -28,6 +28,14 @@ import {
 } from './memoryModel';
 import { useMemoryCollection } from './useMemoryCollection';
 import { AutomaticMemorySettings } from './AutomaticMemory';
+import { MemoryConfirmationCard } from './MemoryConfirmationCard';
+import { MemorySourceCard } from './MemorySourceCard';
+import {
+  getMemoryConfirmation,
+  memoryCategories,
+  memoryCategory,
+  memorySource,
+} from './memoryPresentation';
 
 const appearance = {
   ink: '#303849',
@@ -102,10 +110,13 @@ function MemoryRow({
 }) {
   const { formatDate } = useApp();
   const presentation = describeMemory(memory);
+  const pending = getMemoryConfirmation(memory);
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`查看记忆：${memory.title || memory.content}`}
+      accessibilityLabel={`查看记忆：${
+        pending ? '体重待确认' : memory.title || memory.content
+      }`}
       disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [m.memoryRow, pressed && m.pressed]}
@@ -116,11 +127,13 @@ function MemoryRow({
       <View style={m.flex}>
         {summary && <Text style={m.rowLabel}>{presentation.label}</Text>}
         <Text style={m.rowContent} numberOfLines={summary ? 3 : 2}>
-          {memory.content}
+          {pending ? '体重待确认' : memory.content}
         </Text>
         {!summary && (
           <Text style={m.rowSource} numberOfLines={1}>
-            {memory.source || '你主动添加'} · {formatDate(memory.updated_at)}
+            {pending ? '待确认' : memoryCategory(memory)} ·{' '}
+            {memorySource(memory.source).label} ·{' '}
+            {formatDate(memory.updated_at)}
           </Text>
         )}
       </View>
@@ -129,24 +142,32 @@ function MemoryRow({
   );
 }
 
-function MemoryEntry(props: { memory?: Memory; onSaved: (memory: Memory) => void; onBusyChange: (busy: boolean) => void }) {
+function MemoryEntry(props: {
+  memory?: Memory;
+  onSaved: (memory: Memory) => void;
+  onBusyChange: (busy: boolean) => void;
+}) {
   return <MemoryCaptureEditor {...props} embedded />;
 }
 
 export function MemoryHome() {
-  const { api, revision, invalidate, navigate, formatDate } = useApp();
+  const { api, revision, invalidate, navigate } = useApp();
   const data = useMemoryCollection(api, revision);
   const highlights = useMemo(
     () => selectMemoryHighlights(data.items),
     [data.items],
   );
   const recent = data.items.find(
-    item => !highlights.some(highlight => highlight.id === item.id),
+    item =>
+      !getMemoryConfirmation(item) &&
+      !highlights.some(highlight => highlight.id === item.id),
   );
+  const pending = data.items.filter(item => getMemoryConfirmation(item));
   const [pane, setPane] = useState<Pane>(null);
   const paneRef = useRef(pane);
   paneRef.current = pane;
   const [query, setQuery] = useState('');
+  const [category, setCategory] = useState('全部');
   const [editBusy, setEditBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [deleted, setDeleted] = useState<{
@@ -155,10 +176,15 @@ export function MemoryHome() {
   } | null>(null);
   const action = useAction();
   const busy = editBusy || action.busy;
-  const visible = data.items.filter(item =>
-    `${item.title}\n${item.content}\n${item.source}`
-      .toLocaleLowerCase()
-      .includes(query.trim().toLocaleLowerCase()),
+  const visible = data.items.filter(
+    item =>
+      (category === '全部' ||
+        (category === '待确认'
+          ? !!getMemoryConfirmation(item)
+          : memoryCategory(item) === category)) &&
+      `${item.title}\n${item.content}\n${memorySource(item.source).label}`
+        .toLocaleLowerCase()
+        .includes(query.trim().toLocaleLowerCase()),
   );
   const openDetail = (memory: Memory) => {
     action.setError(null);
@@ -167,6 +193,7 @@ export function MemoryHome() {
   const openAll = () => {
     action.setError(null);
     setQuery('');
+    setCategory('全部');
     setPane({ kind: 'all' });
   };
   const openEditor = (memory?: Memory) => {
@@ -263,6 +290,23 @@ export function MemoryHome() {
           <Icon name="chevronRight" size={15} color={appearance.accent} />
         </Pressable>
         <ErrorNotice message={data.error} retry={data.refresh} />
+        {pending.length > 0 && (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="查看待确认的记忆"
+            onPress={() => {
+              openAll();
+              setCategory('待确认');
+            }}
+            style={m.discover}
+          >
+            <Icon name="sparkles" size={17} color={appearance.accent} />
+            <Text style={m.discoverText}>
+              {pending.length} 条信息需要你确认一下
+            </Text>
+            <Icon name="chevronRight" size={15} color={appearance.accent} />
+          </Pressable>
+        )}
         {data.loading && !data.items.length ? <Loading /> : null}
         {(data.items.length > 0 || (!data.loading && !data.error)) && (
           <View style={m.summary}>
@@ -281,14 +325,22 @@ export function MemoryHome() {
             ))}
             {!highlights.length && (
               <View style={m.empty}>
-                <Text style={m.emptyTitle}>先告诉我一件关于你的事</Text>
+                <Text style={m.emptyTitle}>
+                  {pending.length
+                    ? '有信息等待你确认'
+                    : '先告诉我一件关于你的事'}
+                </Text>
                 <Text style={m.emptyBody}>
-                  比如你喜欢怎样的回复，或者什么时候更专注。
+                  {pending.length
+                    ? '先核对一下数字，确认后我再把它用于回答。'
+                    : '比如你喜欢怎样的回复，或者什么时候更专注。'}
                 </Text>
                 <MemoryAction
-                  label="告诉我一件事"
+                  label={pending.length ? '核对信息' : '告诉我一件事'}
                   secondary
-                  onPress={() => openEditor()}
+                  onPress={() =>
+                    pending.length ? openDetail(pending[0]) : openEditor()
+                  }
                 />
               </View>
             )}
@@ -424,6 +476,35 @@ export function MemoryHome() {
                     style={m.searchInput}
                   />
                 </View>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={m.categories}
+                >
+                  {[
+                    '全部',
+                    ...(pending.length ? ['待确认'] : []),
+                    ...memoryCategories.filter(label =>
+                      data.items.some(item => memoryCategory(item) === label),
+                    ),
+                  ].map(label => (
+                    <Pressable
+                      key={label}
+                      accessibilityRole="button"
+                      accessibilityLabel={`分类：${label}`}
+                      accessibilityState={{ selected: category === label }}
+                      onPress={() => setCategory(label)}
+                      style={[
+                        m.category,
+                        category === label && m.categorySelected,
+                      ]}
+                    >
+                      <Text style={[m.small, category === label && m.link]}>
+                        {label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
                 <FlatList
                   style={m.sheetScroll}
                   data={visible}
@@ -437,7 +518,9 @@ export function MemoryHome() {
                   ItemSeparatorComponent={MemoryDivider}
                   ListEmptyComponent={
                     <Text style={m.listEmpty}>
-                      {query
+                      {category === '待确认' && !query
+                        ? '需要确认的信息已处理完。'
+                        : query
                         ? data.hasMore
                           ? '已加载的记忆中没有匹配项，可继续加载后查找。'
                           : '还没记住这件事，可以直接告诉我。'
@@ -469,22 +552,33 @@ export function MemoryHome() {
                 style={m.sheetScroll}
                 contentContainerStyle={m.detail}
               >
-                <Text style={m.detailContent}>{pane.memory.content}</Text>
+                <Text style={m.detailContent}>
+                  {getMemoryConfirmation(pane.memory)
+                    ? '体重待确认'
+                    : pane.memory.content}
+                </Text>
+                <MemoryConfirmationCard
+                  key={`confirmation:${pane.memory.id}:${pane.memory.version}`}
+                  memory={pane.memory}
+                  onBusyChange={setEditBusy}
+                  onSaved={memory => {
+                    data.updateLocal(memory);
+                    setPane({ kind: 'detail', memory });
+                    setNotice('已确认，以后按这个信息记住。');
+                  }}
+                />
                 <View style={m.effect}>
                   <Icon name="sparkles" size={18} color={appearance.accent} />
                   <Text style={m.effectText}>
-                    {describeMemory(pane.memory).effect}
+                    {getMemoryConfirmation(pane.memory)
+                      ? '确认后，才会用于相关回答。'
+                      : describeMemory(pane.memory).effect}
                   </Text>
                 </View>
-                <View style={m.source}>
-                  <Text style={m.sourceLabel}>从哪里记住的</Text>
-                  <Text style={m.sourceText}>
-                    {pane.memory.source || '你主动添加'}
-                  </Text>
-                  <Text style={m.sourceDate}>
-                    更新于 {formatDate(pane.memory.updated_at)}
-                  </Text>
-                </View>
+                <MemorySourceCard
+                  key={`source:${pane.memory.id}:${pane.memory.version}`}
+                  memory={pane.memory}
+                />
                 <ErrorNotice message={action.error} />
                 <MemoryAction
                   label="改一下"
@@ -763,6 +857,15 @@ const m = StyleSheet.create({
     justifyContent: 'center',
   },
   detail: { paddingBottom: 4 },
+  categories: { gap: 8, paddingBottom: 12 },
+  category: {
+    minHeight: 44,
+    paddingHorizontal: 14,
+    justifyContent: 'center',
+    backgroundColor: appearance.background,
+    borderRadius: 22,
+  },
+  categorySelected: { backgroundColor: appearance.soft },
   detailContent: { fontSize: 19, lineHeight: 31, color: appearance.ink },
   effect: {
     backgroundColor: appearance.soft,

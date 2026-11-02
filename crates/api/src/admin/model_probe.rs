@@ -17,7 +17,8 @@ pub(super) async fn test_model(
     if revision != input.expected_revision { return Err(ConfigError::Conflict.into()); }
     let values = state.settings.preview_effective_values(input.expected_revision, &input.changes).await?;
     protect_saved_key(&saved, &values, &input.changes)?;
-    let provider = LlmProvider::from_lookup(|name| values.get(name).cloned());
+    let provider = LlmProvider::from_lookup(|name| values.get(name).cloned())
+        .with_usage(tomorrow_domain::model::UsageContext::new(state.repository.clone(), &session.user_id, "other", format!("probe-model:{}", tomorrow_domain::new_id())));
     let result = provider.probe_connection().await;
     Ok(Json(serde_json::to_value(result).map_err(|_| internal())?))
 }
@@ -34,7 +35,7 @@ pub(super) async fn test_speech(
     if revision != input.expected_revision { return Err(ConfigError::Conflict.into()); }
     let values = state.settings.preview_effective_values(input.expected_revision, &input.changes).await?;
     protect_key_scope(&saved, &values, &input.changes, "ASR_BASE_URL", "ASR_API_KEY", "")?;
-    let result = tomorrow_attachments::asr_probe::probe(|name| values.get(name).cloned()).await;
+    let result = tomorrow_attachments::asr_probe::probe_with_usage(|name| values.get(name).cloned(), &state.repository, &session.user_id).await;
     Ok(Json(serde_json::to_value(result).map_err(|_| internal())?))
 }
 
@@ -68,8 +69,8 @@ async fn test_auxiliary(state: AdminState, session: AdminSession, input: ConfigI
         protect_key_scope(&saved, &values, &input.changes, "ASR_BASE_URL", "ASR_API_KEY", "")?;
     }
     let get = |name: &str| values.get(name).cloned();
-    let result = if vision { tomorrow_attachments::service_probe::vision(get).await }
-        else { tomorrow_attachments::service_probe::embedding(get).await };
+    let result = if vision { tomorrow_attachments::service_probe::vision_with_usage(get, &state.repository, &session.user_id).await }
+        else { tomorrow_attachments::service_probe::embedding_with_usage(get, &state.repository, &session.user_id).await };
     Ok(Json(serde_json::to_value(result).map_err(|_| internal())?))
 }
 

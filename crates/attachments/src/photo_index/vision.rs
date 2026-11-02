@@ -497,21 +497,24 @@ async fn perform(
 ) -> Result<Vec<Derived>, AttachmentError> {
     let payload = image_payload(config, mime, &image);
     let mut attempt = 0;
-    let response = loop {
+    let (response, usage) = loop {
         // Detached work rechecks live destinations and device authorization
         // immediately before each possible outbound request, including retries.
         provider::authorize(state, user, device, epoch, config, true).await?;
-        match state
+        let request = state
             .photo_vision
             .client
             .post(&config.endpoint)
             .bearer_auth(&config.key)
             .json(&payload)
-            .send()
-            .await
-        {
-            Ok(response) => break response,
+            .build().map_err(|_| unavailable())?;
+        let usage = crate::metering::MediaUsage::dispatch(
+            state, user, &config.endpoint, &config.model, "vision", "gallery", None, Some(1),
+        ).await?;
+        match state.photo_vision.client.execute(request).await {
+            Ok(response) => break (response, usage),
             Err(error) if attempt == 0 && error.is_connect() => {
+                usage.transport_failure(&error).await?;
                 // A connection failure has not submitted a model request.
                 // Never retry response/read timeouts or an HTTP error here.
                 attempt += 1;
@@ -521,6 +524,7 @@ async fn perform(
                 );
             }
             Err(error) => {
+                usage.transport_failure(&error).await?;
                 tracing::warn!(
                     timeout = error.is_timeout(),
                     connect = error.is_connect(),
@@ -530,7 +534,7 @@ async fn perform(
             }
         }
     };
-    let analysis = read_analysis(response).await?;
+    let analysis = read_analysis(response, &usage).await?;
     Ok([
         ("description", analysis.description),
         ("ocr", analysis.ocr),
@@ -545,22 +549,8 @@ async fn perform(
     .collect())
 }
 
-pub(crate) async fn read_analysis(mut response: reqwest::Response) -> Result<Analysis, AttachmentError> {
-    if !response.status().is_success() {
-        tracing::warn!(
-            http_status = response.status().as_u16(),
-            "Cloud photo provider rejected request"
-        );
-        return Err(unavailable());
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| unavailable())? {
-        if body.len() + chunk.len() > 128 * 1024 {
-            return Err(unavailable());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    let envelope: serde_json::Value = serde_json::from_slice(&body).map_err(|_| unavailable())?;
+pub(crate) async fn read_analysis(response: reqwest::Response, usage: &crate::metering::MediaUsage) -> Result<Analysis, AttachmentError> {
+    let envelope = usage.read_json(response, 128 * 1024).await.map_err(|_| unavailable())?;
     if envelope
         .pointer("/choices/0/finish_reason")
         .and_then(|v| v.as_str())

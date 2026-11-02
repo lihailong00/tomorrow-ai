@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  AccessibilityInfo,
   BackHandler,
   DeviceEventEmitter,
   Dimensions,
@@ -78,6 +79,7 @@ jest.mock('../src/ui/visuals', () => ({
   Icon: () => null,
 }));
 jest.mock('../src/screens/Main', () => ({
+  MemoriesScreen: () => require('react').createElement(require('react-native').View, { testID: 'sidebar-memory-destination' }),
   HomeScreen: () => {
     const { createElement } = require('react');
     const { navigate } = require('../src/app/context').useApp();
@@ -143,6 +145,33 @@ jest.mock('../src/features/ai-history/AiHistoryScreen', () => ({}));
 
 beforeAll(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+});
+
+test('sidebar top-level navigation preserves the active conversation draft and its back path', async () => {
+  const motion = jest.spyOn(AccessibilityInfo, 'isReduceMotionEnabled').mockResolvedValue(true);
+  const listeners: { active: boolean; handler: () => boolean | null | undefined }[] = [];
+  const subscribe = jest.spyOn(BackHandler, 'addEventListener').mockImplementation((_event, handler) => {
+    const entry = { active: true, handler }; listeners.push(entry);
+    return { remove: () => { entry.active = false; } };
+  });
+  let tree!: ReactTestRenderer;
+  await act(async () => { DeviceEventEmitter.emit('keyboardDidHide'); tree = create(<App />); });
+  try {
+    await act(async () => button(tree.root, '打开测试对话').props.onPress());
+    await act(async () => tree.root.findByType(TextInput).props.onChangeText('这段草稿要保留'));
+    await act(async () => button(tree.root, '打开侧边栏').props.onPress());
+    await act(async () => button(tree.root, '记忆').props.onPress());
+    expect(tree.root.findAll(node => node.props.testID === 'sidebar-memory-destination').length).toBeGreaterThan(0);
+    expect(tree.root.findAllByType(ChatScreen)).toHaveLength(0);
+    await act(async () => {
+      const handled = [...listeners].reverse().some(listener => listener.active && listener.handler());
+      expect(handled).toBe(true);
+    });
+    expect(tree.root.findAllByType(ChatScreen)).toHaveLength(1);
+    expect(tree.root.findByType(TextInput).props.value).toBe('这段草稿要保留');
+  } finally {
+    await act(async () => tree.unmount()); subscribe.mockRestore(); motion.mockRestore();
+  }
 });
 
 const button = (root: ReactTestInstance, label: string) =>

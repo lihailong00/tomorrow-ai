@@ -59,6 +59,7 @@ type Receipt = {
   memory_id: string;
   content: string;
   updated?: boolean;
+  needs_confirmation?: boolean;
 };
 export function AutomaticMemoryNotice({
   replyId,
@@ -150,7 +151,13 @@ export function AutomaticMemoryNotice({
             }}
           >
             <Text style={styles.small}>
-              ✧ {item.updated ? '已更新' : '已记住'}：{item.content}
+              ✧{' '}
+              {item.needs_confirmation
+                ? '请确认'
+                : item.updated
+                ? '已更新'
+                : '已记住'}
+              ：{item.content}
             </Text>
           </Pressable>
           <Pressable

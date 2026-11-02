@@ -60,6 +60,63 @@ async function run(url: string, authorized = true) {
     body: JSON.stringify(input), signal: AbortSignal.timeout(8000) });
 }
 
+test('usage completion callback survives caller cancellation after final provider usage', { timeout: 25000 }, async () => {
+  let finishSeen!: () => void, finishReply!: () => void, savedFinish!: () => void;
+  const seen = new Promise<void>(resolve => { finishSeen = resolve; });
+  const reply = new Promise<void>(resolve => { finishReply = resolve; });
+  const saved = new Promise<void>(resolve => { savedFinish = resolve; });
+  let dispatches = 0, finishAborted = false;
+  const usage: Record<string, unknown>[] = [];
+  const backend = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown> : {};
+    if (request.url?.endsWith('/usage')) {
+      assert.equal(request.headers['x-agent-service'], serviceToken);
+      assert.equal(request.headers.authorization, `Bearer ${input.run_token}`);
+      usage.push(body);
+      if (body.kind === 'dispatch') dispatches++;
+      else {
+        response.on('close', () => { if (!response.writableEnded) finishAborted = true; });
+        finishSeen();
+        await reply;
+      }
+    }
+    if (response.destroyed) return;
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify(request.url?.endsWith('/state') ? { next_sequence: 1 } : { ok: true }));
+    if (body.kind === 'finish') savedFinish();
+  });
+  const backendPort = await listen(backend);
+  const provider = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Consume local fixture input. */ }
+    assert.equal(dispatches, 1, 'durable dispatch must precede the provider request');
+    response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    response.end('data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"synthetic answer"},"finish_reason":"stop"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":45,"completion_tokens":7}}\n\ndata: [DONE]\n\n');
+  });
+  const providerPort = await listen(provider);
+  const fixture = await start({ RUST_API_URL: `http://127.0.0.1:${backendPort}`,
+    MODEL_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, MODEL_NAME: 'usage-fixture', MODEL_API_KEY: 'fixture-provider-key' });
+  const abort = new AbortController();
+  try {
+    const running = fetch(`${fixture.url}/v1/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${serviceToken}` }, body: JSON.stringify(input), signal: abort.signal });
+    const ended = running.catch(() => undefined);
+    await Promise.race([seen, new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('usage callback not received')), 5000).unref())]);
+    abort.abort();
+    await ended;
+    finishReply();
+    await Promise.race([saved, new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('late usage callback was cancelled')), 5000).unref())]);
+    assert.equal(finishAborted, false);
+    assert.equal(dispatches, 1);
+    const final = usage.find(message => message.kind === 'finish');
+    assert.deepEqual(final?.measurements, { input_tokens: 45, output_tokens: 7 });
+    for (const forbidden of ['synthetic answer', 'fixture-provider-key', serviceToken, input.run_token]) {
+      assert.equal(JSON.stringify(usage).includes(forbidden), false);
+      assert.equal(fixture.logs().includes(forbidden), false);
+    }
+  } finally { finishReply(); await fixture.stop(); await closeServer(provider); await closeServer(backend); }
+});
+
 test('Pi starts without model keys; health is live and execution fails with a clear sanitized configuration code', { timeout: 25000 }, async () => {
   const fixture = await start();
   try {

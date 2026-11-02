@@ -9,6 +9,11 @@ export type User = {
 };
 export type AuthSession = { token: string; user: User };
 export type MemoryKind = 'preference' | 'person' | 'project' | 'goal' | 'fact';
+export type MemoryConfirmation = {
+  field: 'weight';
+  options: number[];
+  proposed_content: string;
+};
 export type Memory = {
   id: string;
   title: string;
@@ -18,6 +23,7 @@ export type Memory = {
   created_at: string;
   updated_at: string;
   version: number;
+  confirmation?: MemoryConfirmation | null;
 };
 export type TaskStatus =
   | 'queued'

@@ -385,21 +385,23 @@ fn unavailable() -> AttachmentError {
 pub(super) async fn embed(
     state: &AttachmentsState,
     config: &Config,
+    user: &str,
     text: &str,
 ) -> Result<Vec<f64>, AttachmentError> {
-    let mut response=state.client.post(&config.endpoint).bearer_auth(&config.key).timeout(Duration::from_secs(12))
-        .json(&json!({"model":config.model,"input":[text],"dimensions":config.dimension,"encoding_format":"float"})).send().await.map_err(|_|unavailable())?;
-    if !response.status().is_success() {
-        return Err(unavailable());
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| unavailable())? {
-        if bytes.len() + chunk.len() > 128 * 1024 {
+    let request=state.client.post(&config.endpoint).bearer_auth(&config.key).timeout(Duration::from_secs(12))
+        .json(&json!({"model":config.model,"input":[text],"dimensions":config.dimension,"encoding_format":"float"}))
+        .build().map_err(|_|unavailable())?;
+    let usage = crate::metering::MediaUsage::dispatch(
+        state, user, &config.endpoint, &config.model, "embedding", "gallery", None, None,
+    ).await?;
+    let response = match state.client.execute(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            usage.transport_failure(&error).await?;
             return Err(unavailable());
         }
-        bytes.extend_from_slice(&chunk);
-    }
-    let data: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+    };
+    let data = usage.read_json(response, 128 * 1024).await.map_err(|_| unavailable())?;
     if data["data"].as_array().map(Vec::len) != Some(1) || data["data"][0]["index"] != 0 {
         return Err(unavailable());
     }
@@ -449,7 +451,7 @@ pub(super) async fn prepare(
         return Ok(json!({"processed":false,"more":true,"deferred":true}));
     }
     provider::authorize(state, user, device, epoch, config, false).await?;
-    let vector = embed(state, config, &text).await?;
+    let vector = embed(state, config, user, &text).await?;
     let encoded = serde_json::to_string(&vector).map_err(|_| unavailable())?;
     let scope = provider::authorize(state, user, device, epoch, config, false).await?;
     let mut tx = state.pool.begin().await?;
@@ -508,7 +510,7 @@ pub(super) async fn search(
             return Ok(None);
         }
         provider::authorize(state,user,device,epoch,config,false).await?;
-        let vector = embed(state, config, query).await?;
+        let vector = embed(state, config, user, query).await?;
         let scope = provider::authorize(state,user,device,epoch,config,false).await?;
         let mut tx = state.pool.begin().await?;
         vision::lock_cloud_consent(&mut tx, user, device, epoch, &scope).await?;

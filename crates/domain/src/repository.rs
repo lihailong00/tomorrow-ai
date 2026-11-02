@@ -1143,6 +1143,7 @@ impl Repository {
             .execute(&pool).await?;
         sqlx::raw_sql(include_str!("../../../migrations/sqlite/014_daily_growth.sql"))
             .execute(&pool).await?;
+        crate::usage::initialize(&pool).await?;
         crate::chat_messages::initialize(&pool).await?;
         sqlx::raw_sql(crate::automatic_memory::SCHEMA).execute(&pool).await?;
         // Authentication checks this table even in non-admin processes such as

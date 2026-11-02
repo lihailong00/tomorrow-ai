@@ -5,6 +5,7 @@ import type { ModelSettings } from './config.js';
 import type { WebBudget, WebProvider } from './web.js';
 import { DEFAULT_LIMITS, EVENT_LIMITS, type ExecutionLimits } from './limits.js';
 import { createResearch, needsResearch, RESEARCH_INSTRUCTION, researchAudit, researchReviewEnabled } from './research.js';
+import { createMeteredFetch, type UsageSink } from './usage.js';
 export { DEFAULT_LIMITS } from './limits.js';
 
 export type ToolDefinition = { name: string; description: string; parameters: Record<string, unknown> };
@@ -21,6 +22,7 @@ export type RunInput = {
 };
 export type RunEvent = { sequence: number; kind: string; body: Record<string, unknown> };
 export type Bridge = {
+  usage?: UsageSink;
   state(signal?: AbortSignal): Promise<{ next_sequence: number }>;
   event(event: RunEvent, signal?: AbortSignal): Promise<void>;
   tool(name: string, args: unknown, signal?: AbortSignal, operationIndex?: number, operationSlot?: number): Promise<unknown>;
@@ -325,6 +327,7 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
     }));
     if (web) tools.push(...web.tools);
     if (research) tools.push(...research.tools);
+    const meteredFetch = bridge.usage ? createMeteredFetch(settings.model, bridge.usage) : undefined;
     const runningAgent = agent = new Agent({
       initialState: { model: settings.model, thinkingLevel: reasoningEffort, tools, messages: transcript(input, settings.model, web?.budget(), researchEnabled) },
       // Only all-web batches may overlap. Every business/review tool explicitly
@@ -332,7 +335,8 @@ export async function executeRun(input: RunInput, settings: ModelSettings, bridg
       toolExecution: 'parallel',
       streamFn: streamOverride ?? ((model, context, options) =>
         streamSimple(model as Model<'openai-completions'>, context,
-          { ...options, apiKey: settings.apiKey, maxTokens: REASONING_MAX_TOKENS[reasoningEffort], maxRetryDelayMs: 1000 })),
+          { ...options, apiKey: settings.apiKey, maxTokens: REASONING_MAX_TOKENS[reasoningEffort], maxRetries: 0,
+            ...(meteredFetch ? { fetch: meteredFetch } : {}) })),
       prepareNextTurnWithContext: ({ context }) => {
         if (!web || !researchEnabled) return undefined;
         // Searching repeatedly without opening any result grows the transcript

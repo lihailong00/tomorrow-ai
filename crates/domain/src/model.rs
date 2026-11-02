@@ -3,7 +3,7 @@ use std::{env, time::Duration};
 use reqwest::{Client, Url, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
 
-use crate::{DomainError, dto::Message};
+use crate::{DomainError, Repository, dto::Message, usage::{UsageDispatch, UsageIdentity, UsageMeasurements, UsageOutcome}};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
@@ -40,6 +40,23 @@ mod probe_tests;
 mod stream_tests;
 #[cfg(test)]
 mod reasoning_tests;
+#[cfg(test)]
+mod usage_tests;
+
+/// Owner and initiating feature are supplied by the authenticated caller, never the model.
+#[derive(Clone)]
+pub struct UsageContext {
+    pub repository: Repository,
+    pub user_id: String,
+    pub purpose: String,
+    pub request_prefix: String,
+}
+
+impl UsageContext {
+    pub fn new(repository: Repository, user_id: impl Into<String>, purpose: impl Into<String>, request_prefix: impl Into<String>) -> Self {
+        Self { repository, user_id: user_id.into(), purpose: purpose.into(), request_prefix: request_prefix.into() }
+    }
+}
 
 // Deliberately no Debug implementation: provider credentials must not enter logs.
 #[derive(Clone)]
@@ -50,6 +67,7 @@ pub struct LlmProvider {
     model: Option<String>,
     remote_intent: bool,
     kind: ProviderKind,
+    usage: Option<UsageContext>,
 }
 
 #[derive(Clone, Copy)]
@@ -156,7 +174,7 @@ pub struct ModelProbe {
 }
 
 impl LlmProvider {
-    /// One bounded completion, with no tools, user data, persistence or retries.
+    /// One bounded completion with no tools, user data or retries.
     pub async fn probe_connection(&self) -> ModelProbe {
         let start = std::time::Instant::now();
         let mut result = ModelProbe {
@@ -178,6 +196,11 @@ impl LlmProvider {
         if endpoint.host_str() == Some("api.deepseek.com") && self.model.as_deref() == Some("deepseek-flash") {
             body["thinking"] = serde_json::json!({"type":"disabled"});
         }
+        let request_id = match self.dispatch_usage().await {
+            Ok(id) => id,
+            Err(_) => { result.code = "usage_unavailable"; result.message = "用量记录暂不可用，请稍后重试。"; return result; }
+        };
+        let mut measurements = UsageMeasurements::default();
         let response = client.post(endpoint).bearer_auth(self.api_key.as_deref().unwrap_or_default())
             .json(&body).send().await;
         match response {
@@ -198,6 +221,14 @@ impl LlmProvider {
                         400 | 422 => ("request_rejected", "服务商未接受测试请求，请检查模型和接口兼容性。"),
                         _ => ("upstream_error", "模型服务暂时不可用，请稍后重试。"),
                     };
+                    let mut bytes = Vec::new();
+                    while let Ok(Some(chunk)) = response.chunk().await {
+                        if bytes.len().saturating_add(chunk.len()) > 64 * 1024 { break; }
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        measurements = compatible_usage(value.get("usage"));
+                    }
                 } else {
                     result.code = "invalid_response"; result.message = "接口可访问，但未返回有效的模型响应。";
                     let mut bytes = Vec::new();
@@ -206,6 +237,7 @@ impl LlmProvider {
                             Ok(Some(chunk)) if bytes.len() + chunk.len() <= 64 * 1024 => bytes.extend_from_slice(&chunk),
                             Ok(None) => {
                                 if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                                    measurements = compatible_usage(value.get("usage"));
                                     let message = value.pointer("/choices/0/message");
                                     let generated = message.is_some_and(|message| {
                                         ["content", "reasoning_content"].iter().any(|key| message.get(key).and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty())) ||
@@ -229,6 +261,9 @@ impl LlmProvider {
                 }
             }
         }
+        if self.finish_usage(&request_id, if result.ok { "succeeded" } else { "failed" }, measurements).await.is_err() {
+            result.ok = false; result.code = "usage_unavailable"; result.message = "模型已响应，用量结果暂未完整保存。";
+        }
         result.elapsed_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
         result
     }
@@ -244,6 +279,7 @@ impl LlmProvider {
             model: None,
             remote_intent: false,
             kind: ProviderKind::Compatible,
+            usage: None,
         }
     }
 
@@ -289,6 +325,29 @@ impl LlmProvider {
 
     pub fn provider_name(&self) -> Option<&str> {
         self.remote_intent.then(|| self.kind.name())
+    }
+
+    pub fn with_usage(&self, context: UsageContext) -> Self {
+        let mut provider = self.clone();
+        provider.usage = Some(context);
+        provider
+    }
+
+    async fn dispatch_usage(&self) -> Result<Option<String>, DomainError> {
+        let Some(context) = &self.usage else { return Ok(None); };
+        let request_id = format!("{}:{}", context.request_prefix, crate::new_id());
+        let model = self.model.as_deref().unwrap_or("unknown");
+        context.repository.usage_dispatch(&context.user_id, UsageDispatch::new(
+            &request_id, UsageIdentity::new(&self.base_url, model, model, self.kind.name()), "llm", &context.purpose,
+        )).await?;
+        Ok(Some(request_id))
+    }
+
+    async fn finish_usage(&self, request_id: &Option<String>, status: &str, measurements: UsageMeasurements) -> Result<(), DomainError> {
+        if let (Some(context), Some(request_id)) = (&self.usage, request_id) {
+            context.repository.usage_finish(&context.user_id, request_id, UsageOutcome::new(status, measurements)).await?;
+        }
+        Ok(())
     }
 
     pub async fn complete(&self, messages: &[Message]) -> Result<ModelReply, DomainError> {
@@ -356,6 +415,9 @@ impl LlmProvider {
         }
 
         // Do not retry generation here: durable retries belong to the task executor.
+        let request_id = self.dispatch_usage().await?;
+        let mut measurements = UsageMeasurements::default();
+        let result = async {
         let mut response = client
             .post(endpoint)
             .header(header::AUTHORIZATION, authorization)
@@ -363,6 +425,7 @@ impl LlmProvider {
                 model,
                 messages: provider_messages,
                 stream: false,
+                stream_options: None,
                 thinking, reasoning_effort, max_tokens,
             })
             .timeout(Duration::from_secs(if effort.is_some_and(|value| !value.is_off()) { crate::agent::AGENT_EXECUTION_TIMEOUT_SECONDS } else { 60 }))
@@ -370,13 +433,6 @@ impl LlmProvider {
             .await
             .map_err(model_transport_error)?;
         let status = response.status();
-        if !status.is_success() {
-            // Provider bodies can contain prompts, credentials, or internal endpoints.
-            return Err(DomainError::External(format!(
-                "模型服务返回错误（HTTP {}）",
-                status.as_u16()
-            )));
-        }
         if response
             .content_length()
             .is_some_and(|length| length > RESPONSE_LIMIT_BYTES as u64)
@@ -389,6 +445,14 @@ impl LlmProvider {
                 return Err(DomainError::External("模型回复超过大小限制".into()));
             }
             body.extend_from_slice(&chunk);
+        }
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
+            measurements = compatible_usage(value.get("usage"));
+        }
+        // Preserve consumed usage even if content validation below rejects the response.
+        self.finish_usage(&request_id, if status.is_success() { "succeeded" } else { "failed" }, measurements.clone()).await?;
+        if !status.is_success() {
+            return Err(DomainError::External(format!("模型服务返回错误（HTTP {}）", status.as_u16())));
         }
         let completion: CompletionResponse = serde_json::from_slice(&body)
             .map_err(|_| DomainError::External("模型服务返回了无效的回复格式".into()))?;
@@ -405,6 +469,9 @@ impl LlmProvider {
             mode: "llm".into(),
             provider: Some(self.kind.name().into()),
         })
+        }.await;
+        self.finish_usage(&request_id, if result.is_ok() { "succeeded" } else { "failed" }, measurements).await?;
+        result
     }
 
     /// Forward only visible upstream content as it arrives. Awaiting the callback
@@ -467,6 +534,9 @@ impl LlmProvider {
             });
         }
         // No generation retries: a disconnect must not start a second model run.
+        let request_id = self.dispatch_usage().await?;
+        let mut measurements = UsageMeasurements::default();
+        let result = async {
         let mut response = client
             .post(endpoint)
             .header(header::AUTHORIZATION, authorization)
@@ -474,6 +544,7 @@ impl LlmProvider {
                 model,
                 messages: provider_messages,
                 stream: true,
+                stream_options: Some(serde_json::json!({"include_usage": true})),
                 thinking, reasoning_effort, max_tokens,
             })
             .timeout(Duration::from_secs(if effort.is_some_and(|value| !value.is_off()) { crate::agent::AGENT_EXECUTION_TIMEOUT_SECONDS } else { 60 }))
@@ -481,9 +552,18 @@ impl LlmProvider {
             .await
             .map_err(model_transport_error)?;
         if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(model_transport_error)? {
+                if body.len().saturating_add(chunk.len()) > RESPONSE_LIMIT_BYTES { break; }
+                body.extend_from_slice(&chunk);
+            }
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
+                measurements = compatible_usage(value.get("usage"));
+            }
             return Err(DomainError::External(format!(
                 "模型服务返回错误（HTTP {}）",
-                response.status().as_u16()
+                status
             )));
         }
         if response
@@ -502,7 +582,24 @@ impl LlmProvider {
             if total_bytes > RESPONSE_LIMIT_BYTES {
                 return Err(DomainError::External("模型回复超过大小限制".into()));
             }
-            for event in decoder.push(&chunk)? {
+            let events = decoder.push(&chunk)?;
+            // Capture final usage already received in this network chunk before an
+            // application callback can reject a delta and stop content processing.
+            for event in &events {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(event) {
+                    if value.get("error").is_some() && value.get("usage").is_some() {
+                        measurements = compatible_usage(value.get("usage"));
+                        self.finish_usage(&request_id, "failed", measurements.clone()).await?;
+                    }
+                }
+                if let Ok(update) = completion_stream_update(event) {
+                    if let Some(usage) = update.usage {
+                        measurements = usage;
+                        self.finish_usage(&request_id, "succeeded", measurements.clone()).await?;
+                    }
+                }
+            }
+            for event in events {
                 let update = completion_stream_update(&event)?;
                 if let Some(delta) = update.delta.filter(|value| !value.is_empty()) {
                     content_chars = content_chars.saturating_add(delta.chars().count());
@@ -514,6 +611,9 @@ impl LlmProvider {
                 }
                 if update.finished {
                     finished = true;
+                }
+                // finish_reason precedes OpenAI's usage-only chunk. Only DONE ends reading.
+                if update.done {
                     break 'response;
                 }
             }
@@ -531,6 +631,9 @@ impl LlmProvider {
             mode: "llm".into(),
             provider: Some(self.kind.name().into()),
         })
+        }.await;
+        self.finish_usage(&request_id, if result.is_ok() { "succeeded" } else { "failed" }, measurements).await?;
+        result
     }
 
     pub fn from_settings(base_url: String, api_key: Option<String>, model: Option<String>) -> Self {
@@ -547,6 +650,7 @@ impl LlmProvider {
             model: nonempty(model),
             remote_intent: true,
             kind: ProviderKind::Compatible,
+            usage: None,
         }
     }
 }
@@ -602,6 +706,8 @@ impl CompletionStreamDecoder {
 struct CompletionStreamUpdate {
     delta: Option<String>,
     finished: bool,
+    done: bool,
+    usage: Option<UsageMeasurements>,
 }
 
 fn completion_stream_update(data: &str) -> Result<CompletionStreamUpdate, DomainError> {
@@ -609,6 +715,8 @@ fn completion_stream_update(data: &str) -> Result<CompletionStreamUpdate, Domain
         return Ok(CompletionStreamUpdate {
             delta: None,
             finished: true,
+            done: true,
+            usage: None,
         });
     }
     let value: serde_json::Value = serde_json::from_str(data)
@@ -625,7 +733,27 @@ fn completion_stream_update(data: &str) -> Result<CompletionStreamUpdate, Domain
         .and_then(|v| v.get("finish_reason"))
         .is_some_and(|v| !v.is_null());
     // reasoning_content, tool arguments, and every other field remain private.
-    Ok(CompletionStreamUpdate { delta, finished })
+    let final_usage = finished || value.get("choices").and_then(serde_json::Value::as_array).is_some_and(Vec::is_empty);
+    let usage = value.get("usage").filter(|value| final_usage && value.is_object()).map(|value| compatible_usage(Some(value)));
+    Ok(CompletionStreamUpdate { delta, finished, done: false, usage })
+}
+
+/// Compatible prompt_tokens already includes cache subsets (unlike Pi Usage.input).
+fn compatible_usage(value: Option<&serde_json::Value>) -> UsageMeasurements {
+    let count = |value: Option<&serde_json::Value>| value.and_then(serde_json::Value::as_i64).filter(|value| (0..=9_007_199_254_740_991).contains(value));
+    let Some(value) = value else { return UsageMeasurements::default(); };
+    let input = count(value.get("prompt_tokens"));
+    let cache_read = value.pointer("/prompt_tokens_details/cached_tokens").or_else(|| value.get("prompt_cache_hit_tokens")).or_else(|| value.get("cached_tokens"));
+    let cache_write = value.pointer("/prompt_tokens_details/cache_write_tokens");
+    UsageMeasurements {
+        input_tokens: input,
+        output_tokens: count(value.get("completion_tokens")),
+        // A positive prompt total does not prove either cache subset is zero.
+        // Only a measured zero input mathematically forces missing subsets to zero.
+        cache_read_tokens: cache_read.map_or_else(|| input.filter(|input| *input == 0), |value| count(Some(value))),
+        cache_write_tokens: cache_write.map_or_else(|| input.filter(|input| *input == 0), |value| count(Some(value))),
+        ..Default::default()
+    }
 }
 
 #[derive(Serialize)]
@@ -633,6 +761,8 @@ struct CompletionRequest<'a> {
     model: &'a str,
     messages: Vec<ProviderMessage<'a>>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]

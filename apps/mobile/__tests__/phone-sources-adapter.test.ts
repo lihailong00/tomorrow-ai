@@ -4,6 +4,7 @@ import { phoneSources } from '../src/platform/phoneSources';
 jest.mock('react-native', () => ({
   Platform: { OS: 'android' },
   Linking: { openSettings: jest.fn() },
+  DeviceEventEmitter: { addListener: jest.fn(() => ({ remove: jest.fn() })) },
   NativeModules: {
     TadaPhoneSources: {
       read: jest.fn(),

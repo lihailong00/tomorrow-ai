@@ -31,6 +31,7 @@ import {
 } from "./api";
 import { Icon, Orb } from "./icons";
 import { ProviderPanel } from "./ProviderPanel";
+import { UsagePricePanel } from "./UsagePricePanel";
 import { currentService, providerIssue, type Service } from "./providers";
 
 type Page = "overview" | "ai" | "connections" | "users" | "maintenance";
@@ -809,6 +810,8 @@ export function App() {
                   onSave={() => void saveConfiguration()}
                   onDiscard={() => setEdits({})}
                 />
+                {page === "ai" && session && <UsagePricePanel session={session} configRevision={config?.revision}
+                  hasConfigurationEdits={changeCount > 0} onError={handleError} onNotice={setNotice} />}
               </>
             )}
           {page === "users" && (

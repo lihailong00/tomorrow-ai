@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "test": "tsc -p tsconfig.json && node --test dist/runtime.test.js dist/config.test.js dist/web.test.js dist/research.test.js dist/runtime-settings.test.js dist/server.test.js"
+    "test": "tsc -p tsconfig.json && node --test dist/runtime.test.js dist/config.test.js dist/web.test.js dist/research.test.js dist/runtime-settings.test.js dist/server.test.js dist/usage.test.js"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "1.4.0",

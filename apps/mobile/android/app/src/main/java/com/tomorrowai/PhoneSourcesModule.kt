@@ -3,15 +3,22 @@ package com.tomorrowai
 import android.Manifest
 import android.content.ContentUris
 import android.content.pm.PackageManager
+import android.database.ContentObserver
+import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.PermissionAwareActivity
 import com.facebook.react.modules.core.PermissionListener
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.Executors
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.RejectedExecutionException
 
 /** Permission UI and paged access to the complete, encrypted, local system-source cache. */
 class PhoneSourcesModule(private val context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
@@ -19,6 +26,9 @@ class PhoneSourcesModule(private val context: ReactApplicationContext) : ReactCo
   private val requested = context.getSharedPreferences("tada_phone_permission_requests", 0)
   private var pending: Promise? = null
   @Volatile private var closed = false
+  private val handler = Handler(Looper.getMainLooper())
+  private val observers = ConcurrentHashMap<String, Pair<String, ContentObserver>>()
+  private val pendingChanges = mutableMapOf<String, Runnable>()
   override fun getName() = "TadaPhoneSources"
 
   private fun permissions(source: String) = PhoneSourceReader.permissions(source)
@@ -72,13 +82,18 @@ class PhoneSourcesModule(private val context: ReactApplicationContext) : ReactCo
       permissions(source)
       check(state(source) in listOf("granted", "limited")) { "请先授权此来源" }
       val scope = PhoneSourceStore.scope(owner)
+      val observationGap = observe(scope, source)
+      var enqueue = false
       val result = synchronized(PhoneSourceStore.lock) {
         PhoneSourceStore(context).use { store ->
-          store.start(scope, source, force)
+          // Android's selected-photo set can change without changing the permission name.
+          // Reconcile identities, while page() independently rechecks current visibility.
+          if (observationGap || (source == "photos" && state(source) == "limited")) store.markDirty(scope, source)
+          enqueue = store.start(scope, source, force)
           store.page(scope, source, 0, withContactNames)
         }
       }
-      PhoneSourceStore.enqueue(context, scope, source)
+      if (enqueue) PhoneSourceStore.enqueue(context, scope, source)
       result.toString()
     }
   }
@@ -109,6 +124,7 @@ class PhoneSourcesModule(private val context: ReactApplicationContext) : ReactCo
   @ReactMethod fun stop(source: String, owner: String, promise: Promise) {
     background(promise) {
       permissions(source)
+      unobserve(source)
       synchronized(PhoneSourceStore.lock) {
         PhoneSourceStore(context).use { it.stop(PhoneSourceStore.scope(owner), source) }
       }
@@ -117,9 +133,55 @@ class PhoneSourcesModule(private val context: ReactApplicationContext) : ReactCo
   }
   @ReactMethod fun suspend(promise: Promise) {
     background(promise) {
+      observers.keys.toList().forEach { unobserve(it) }
       synchronized(PhoneSourceStore.lock) { PhoneSourceStore(context).use { it.suspendAll() } }
       true
     }
+  }
+  /** Notifications are debounced per source, never per screen mount. Persist the
+   * dirty receipt before scheduling work so process death cannot lose it. */
+  private fun observe(scope: String, source: String): Boolean {
+    if (observers[source]?.first == scope) return false
+    observers.entries.filter { it.value.first != scope }.forEach { unobserve(it.key) }
+    unobserve(source)
+    val observer = object : ContentObserver(null) {
+      override fun onChange(selfChange: Boolean, uri: Uri?) {
+        if (closed) return
+        synchronized(pendingChanges) {
+          pendingChanges.remove(source)?.let { handler.removeCallbacks(it) }
+          val update = Runnable {
+            synchronized(pendingChanges) { pendingChanges.remove(source) }
+            if (!closed) try { executor.execute {
+              try {
+                val active = synchronized(PhoneSourceStore.lock) { PhoneSourceStore(context).use { store ->
+                  if (!store.active(scope, source)) false else {
+                    store.markDirty(scope, source)
+                    true
+                  }
+                } }
+                if (active && !closed) {
+                  PhoneSourceStore.enqueue(context, scope, source)
+                  context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                    .emit("TadaPhoneSourcesChanged", null)
+                }
+              } catch (failure: Exception) {
+                Log.w("TadaPhoneSources", "change_refresh_failed type=${failure.javaClass.simpleName}")
+              }
+            } } catch (_: RejectedExecutionException) { /* Bridge is closing. */ }
+          }
+          pendingChanges[source] = update
+          handler.postDelayed(update, 1500)
+        }
+      }
+    }
+    context.contentResolver.registerContentObserver(PhoneSourceReader.watchUri(source), true, observer)
+    observers[source] = scope to observer
+    if (closed) unobserve(source)
+    return true
+  }
+  private fun unobserve(source: String) {
+    observers.remove(source)?.let { context.contentResolver.unregisterContentObserver(it.second) }
+    synchronized(pendingChanges) { pendingChanges.remove(source)?.let { handler.removeCallbacks(it) } }
   }
   private fun background(promise: Promise, action: () -> Any) {
     if (closed) { promise.reject("E_PHONE_CLOSED", "应用已关闭，请重试"); return }
@@ -139,6 +201,10 @@ class PhoneSourcesModule(private val context: ReactApplicationContext) : ReactCo
     closed = true
     pending?.reject("E_PHONE_CLOSED", "应用已关闭，请重试"); pending = null
     executor.shutdownNow()
+    // Registration/removal may overlap bridge invalidation.
+    observers.values.toList().forEach { context.contentResolver.unregisterContentObserver(it.second) }
+    observers.clear()
+    synchronized(pendingChanges) { pendingChanges.values.forEach { handler.removeCallbacks(it) }; pendingChanges.clear() }
     super.invalidate()
   }
 }

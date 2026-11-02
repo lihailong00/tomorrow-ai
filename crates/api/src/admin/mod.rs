@@ -17,6 +17,7 @@ use tomorrow_settings::{ConfigError, ConfigStore};
 
 pub mod backup;
 mod model_probe;
+mod usage_pricing;
 const COOKIE: &str = "tada_admin_session";
 const SESSION_SECONDS: i64 = 12 * 60 * 60;
 const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$ZHVtbXktc2FsdC0xMjM0NQ$2Fk2PbqQ1mQj5F0R2jXYSzOaC84n1sKUXvB+ukpQkqg";
@@ -238,6 +239,7 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/api/password", post(change_own_password))
         .route("/admin/api/status", get(status))
         .route("/admin/api/config", get(config).patch(update_config))
+        .route("/admin/api/usage-pricing", get(usage_pricing::read).patch(usage_pricing::save))
         .route("/admin/api/config/check", post(check_config))
         .route("/admin/api/config/test-model", post(model_probe::test_model))
         .route("/admin/api/config/test-speech", post(model_probe::test_speech))

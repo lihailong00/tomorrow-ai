@@ -25,6 +25,7 @@ jest.mock('../src/platform/phoneSources', () => ({
     status: jest.fn(),
     request: jest.fn(),
     read: jest.fn(),
+    onChange: jest.fn(() => jest.fn()),
     fingerprint: jest.fn(),
     page: jest.fn(),
     record: jest.fn(),
@@ -377,7 +378,7 @@ it('shows the full count, pages beyond 200 contacts, and retains only the curren
   const view = await setup({ seen: true, enabled: ['contacts'] });
   await view.select('连接与管理本机资料');
   expect(JSON.stringify(view.tree.toJSON())).toContain(
-    '已在本机整理 100000 条资料',
+    '本机已保存 100000 条资料',
   );
   await view.press('浏览全部资料（已保存 100000 条）');
   await view.press('下一页');
@@ -613,11 +614,160 @@ it('updates every active source in one poll without starving sibling sources', a
       (phoneSources.page as jest.Mock).mock.calls.map(call => call[0]),
     ).toEqual(['contacts', 'calendar', 'sms', 'photos']);
     expect(JSON.stringify(view.tree.toJSON())).toContain(
-      '已在本机整理 400000 条资料',
+      '本机已保存 400000 条资料',
     );
     expect(view.request).not.toHaveBeenCalled();
   } finally {
     if (view) await view.unmount();
     jest.useRealTimers();
   }
+});
+
+it('keeps cached previews and selections visible during a foreground check', async () => {
+  const view = await setup({ seen: true, enabled: ['calendar'] });
+  await view.select('连接与管理本机资料');
+  await view.select(record.title);
+  let finish!: (value: unknown) => void;
+  (phoneSources.read as jest.Mock).mockImplementationOnce(
+    () =>
+      new Promise(resolve => {
+        finish = resolve;
+      }),
+  );
+  const refresh = (platform.onForeground as jest.Mock).mock.calls.at(-1)![0];
+  await act(async () => refresh());
+  const whileReading = JSON.stringify(view.tree.toJSON());
+  expect(whileReading).toContain(record.title);
+  expect(
+    view.tree.root
+      .findAllByType(Button)
+      .some(
+        node =>
+          React.Children.toArray(node.props.children).join('') ===
+          '将 1 条资料交给 AI 整理',
+      ),
+  ).toBe(true);
+  expect(whileReading).not.toContain('正在整理日历');
+  expect(whileReading).not.toContain('正在检查本机资料权限');
+  await act(async () =>
+    finish({
+      source: 'calendar',
+      items: [record],
+      readAt: Date.now(),
+      permission: 'granted',
+      syncState: 'complete',
+    }),
+  );
+  expect(
+    view.tree.root
+      .findAllByType(Button)
+      .some(
+        node =>
+          React.Children.toArray(node.props.children).join('') ===
+          '将 1 条资料交给 AI 整理',
+      ),
+  ).toBe(true);
+  await view.unmount();
+});
+
+it('refreshes after a native change, cleans up the listener, and does not upload anything', async () => {
+  const unsubscribe = jest.fn();
+  (phoneSources.onChange as jest.Mock).mockReturnValueOnce(unsubscribe);
+  const view = await setup({ seen: true, enabled: ['calendar'] });
+  await view.select('连接与管理本机资料');
+  (phoneSources.read as jest.Mock).mockResolvedValueOnce({
+    source: 'calendar',
+    items: [{ ...record, title: '修改后的预约' }],
+    readAt: Date.now(),
+    permission: 'granted',
+    syncState: 'complete',
+  });
+  await act(async () =>
+    (phoneSources.onChange as jest.Mock).mock.calls.at(-1)![0](),
+  );
+  expect(JSON.stringify(view.tree.toJSON())).toContain('修改后的预约');
+  expect(view.request).not.toHaveBeenCalled();
+  await view.unmount();
+  expect(unsubscribe).toHaveBeenCalledTimes(1);
+});
+
+it('removes cached previews and choices when system permission is revoked', async () => {
+  const view = await setup({ seen: true, enabled: ['calendar'] });
+  await view.select('连接与管理本机资料');
+  await view.select(record.title);
+  (phoneSources.status as jest.Mock).mockResolvedValue({
+    ...status,
+    permissions: { ...status.permissions, calendar: 'blocked' },
+  });
+  await act(async () =>
+    (platform.onForeground as jest.Mock).mock.calls.at(-1)![0](),
+  );
+  expect(phoneSources.stop).toHaveBeenCalledWith(
+    'calendar',
+    expect.any(String),
+  );
+  const rendered = JSON.stringify(view.tree.toJSON());
+  expect(rendered).not.toContain(record.title);
+  expect(
+    view.tree.root
+      .findAllByType(Button)
+      .some(
+        node =>
+          React.Children.toArray(node.props.children).join('') ===
+          '将 1 条资料交给 AI 整理',
+      ),
+  ).toBe(false);
+  expect(view.request).not.toHaveBeenCalled();
+  await view.unmount();
+});
+
+it('does not poll a paused error forever or describe an incremental refresh as a first import', async () => {
+  jest.useFakeTimers();
+  let view: Awaited<ReturnType<typeof setup>> | undefined;
+  try {
+    (phoneSources.page as jest.Mock).mockClear();
+    (phoneSources.read as jest.Mock).mockResolvedValue({
+      source: 'calendar',
+      items: [record],
+      readAt: Date.now(),
+      permission: 'granted',
+      cached: 4,
+      processed: 1,
+      total: 4,
+      syncState: 'error',
+      syncMode: 'incremental',
+    });
+    view = await setup({ seen: true, enabled: ['calendar'] });
+    await act(async () => {
+      jest.advanceTimersByTime(60_000);
+    });
+    expect(phoneSources.page).not.toHaveBeenCalled();
+    const rendered = JSON.stringify(view.tree.toJSON());
+    expect(rendered).toContain('本机已保存 4 条资料');
+    expect(rendered).not.toContain('正在建立日历资料库');
+  } finally {
+    if (view) await view.unmount();
+    jest.useRealTimers();
+  }
+});
+
+it('rechecks SMS content before upload and blocks a selected message that became sensitive', async () => {
+  const view = await setup({ seen: true, enabled: ['sms'] });
+  await view.select('连接与管理本机资料');
+  await view.select(record.title);
+  (phoneSources.record as jest.Mock).mockResolvedValue({
+    ...record,
+    eligibleForTodo: false,
+  });
+  await view.press('将 1 条资料交给 AI 整理');
+  expect(phoneSources.record).toHaveBeenCalledWith(
+    'sms',
+    expect.any(String),
+    record.id,
+  );
+  expect(view.request).not.toHaveBeenCalled();
+  expect(JSON.stringify(view.tree.toJSON())).toContain(
+    '验证码等敏感短信仅保存在本机',
+  );
+  await view.unmount();
 });

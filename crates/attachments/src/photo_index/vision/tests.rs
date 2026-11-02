@@ -86,7 +86,7 @@ async fn mock(
             assert_eq!(data,format!("data:image/png;base64,{PNG}"));
             observed.fetch_add(1,Ordering::SeqCst);
             if let Some((entered,release))=barrier {entered.notify_one();release.notified().await;}
-            Json(json!({"choices":[{"finish_reason":if valid{"stop"}else{"length"},"message":{"content":json!({"description":"一张飞往昆明的机票截图","ocr":"2026年10月28日\n航班：MU5810\n目的地：昆明","labels":["机票","出行"]}).to_string()}}]}))
+            Json(json!({"choices":[{"finish_reason":if valid{"stop"}else{"length"},"message":{"content":json!({"description":"一张飞往昆明的机票截图","ocr":"2026年10月28日\n航班：MU5810\n目的地：昆明","labels":["机票","出行"]}).to_string()}}],"usage":{"prompt_tokens":75,"completion_tokens":11,"prompt_tokens_details":{"cached_tokens":30}}}))
         }
     }));
     let server = tokio::spawn(async move {
@@ -243,6 +243,13 @@ async fn cloud_round_trip(database: &str) {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(body(response).await["cached"], true);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let ledger: Vec<(String,String,String,String)> = sqlx::query_as("SELECT user_id,capability,purpose,outcome_json FROM usage_requests")
+        .fetch_all(&f.state.pool).await.unwrap();
+    assert_eq!(ledger.len(), 1, "gallery cached derivatives do not dispatch another request");
+    assert_eq!((&ledger[0].0, ledger[0].1.as_str(), ledger[0].2.as_str()), (&f.user, "vision", "gallery"));
+    let measured: serde_json::Value = serde_json::from_str(&ledger[0].3).unwrap();
+    assert_eq!(measured["measurements"]["image_count"], 1);
+    assert_eq!(measured["measurements"]["input_tokens"], 75);
     let listed = body(
         f.call(
             "GET",
@@ -294,6 +301,7 @@ async fn cloud_analysis_rejects_invalid_images_and_metadata_without_paid_calls()
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(count(&f, "photo_vision_attempts").await, 0);
+    assert_eq!(count(&f, "usage_requests").await, 0);
     server.abort();
     f.cleanup().await;
 }
@@ -332,6 +340,7 @@ async fn cloud_analysis_daily_quota_is_persistent_and_failed_calls_count() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     f.call("DELETE", &f.base(), json!(null)).await;
     assert_eq!(count(&f, "photo_vision_attempts").await, 50);
+    assert_eq!(count(&f, "usage_requests").await, 1, "failed inference counts; denied quota admissions do not");
     server.abort();
     f.cleanup().await;
 }

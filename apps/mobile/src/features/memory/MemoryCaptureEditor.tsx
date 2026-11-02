@@ -22,6 +22,8 @@ import { AssistantOrb, Icon } from '../../ui/visuals';
 import { chatAppearance as colors } from '../../ui/ChatAppearance';
 import { suggestedMemoryKind } from './memoryModel';
 import { useMemoryCapture } from './useMemoryCapture';
+import { getMemoryConfirmation } from './memoryPresentation';
+import { MemoryConfirmationCard } from './MemoryConfirmationCard';
 
 interface MemoryCaptureEditorProps {
   memory?: Memory;
@@ -34,6 +36,16 @@ interface MemoryCaptureEditorProps {
 export function MemoryCaptureEditor(props: MemoryCaptureEditorProps) {
   const { api } = useApp();
   const scopeKey = useMemo(() => newRequestId(), [api, props.memory?.id]);
+  if (props.memory && getMemoryConfirmation(props.memory)) {
+    return (
+      <MemoryConfirmationCard
+        key={`${scopeKey}:${props.memory.version}`}
+        memory={props.memory}
+        onSaved={props.onSaved}
+        onBusyChange={props.onBusyChange}
+      />
+    );
+  }
   return <MemoryCaptureBody key={scopeKey} {...props} />;
 }
 

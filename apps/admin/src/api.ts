@@ -18,6 +18,30 @@ export type Setting = {
   restart_required?: boolean;
 };
 export type Config = { revision: number; settings: Setting[] };
+export type UsageRates = {
+  input_cny_micros_per_million: number | null;
+  output_cny_micros_per_million: number | null;
+  cache_read_cny_micros_per_million: number | null;
+  cache_write_cny_micros_per_million: number | null;
+  audio_cny_micros_per_minute: number | null;
+  image_cny_micros_each: number | null;
+  request_cny_micros_each: number | null;
+};
+export type UsagePriceModel = {
+  model_key: string;
+  model: string;
+  model_name: string;
+  provider: string;
+  capabilities: ("llm" | "asr" | "vision" | "embedding")[];
+  rates: UsageRates;
+};
+export type UsagePricing = {
+  revision: number;
+  config_revision: number;
+  currency: "CNY";
+  source: "environment" | "database" | "unconfigured";
+  models: UsagePriceModel[];
+};
 export type ProviderProbe = {
   ok: boolean;
   code: string;

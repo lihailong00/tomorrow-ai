@@ -290,7 +290,7 @@ async fn semantic_search_checks(database: &str, require_vector: bool) {
                     } else {
                         vec![1.0, 0.0]
                     };
-                    Json(json!({"data":[{"index":0,"embedding":vector}]}))
+                    Json(json!({"data":[{"index":0,"embedding":vector}],"usage":{"prompt_tokens":9,"total_tokens":9}}))
                 }
             },
         ),
@@ -364,6 +364,15 @@ async fn semantic_search_checks(database: &str, require_vector: bool) {
     let isolated = body(call(&f.state, &f.other, "GET", &path, json!(null)).await).await;
     assert!(isolated["items"].as_array().unwrap().is_empty());
     assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let ledger: Vec<(String,String,String,String)> = sqlx::query_as("SELECT user_id,capability,purpose,outcome_json FROM usage_requests")
+        .fetch_all(&f.state.pool).await.unwrap();
+    assert_eq!(ledger.len(), 3, "two indexed documents and one uncached query are three requests");
+    for row in ledger {
+        assert_eq!((&row.0, row.1.as_str(), row.2.as_str()), (&f.user, "embedding", "gallery"));
+        let measured: serde_json::Value = serde_json::from_str(&row.3).unwrap();
+        assert_eq!(measured["measurements"]["input_tokens"], 9);
+        assert_eq!(measured["measurements"]["output_tokens"], serde_json::Value::Null);
+    }
     f.call("PUT", &f.base(), json!({"enabled":false})).await;
     assert_eq!(
         body(f.call("GET", &path, json!(null)).await).await["search_mode"],
@@ -529,14 +538,15 @@ async fn real_embedding_service_ranks_synthetic_travel_text() {
     let travel = semantic::embed(
         &f.state,
         config,
+        &f.user,
         "航班行程单：上海飞往昆明，2026年10月28日，航班MU5810。",
     )
     .await
     .unwrap();
-    let food = semantic::embed(&f.state, config, "餐厅发票：宫保鸡丁、米饭，合计58元。")
+    let food = semantic::embed(&f.state, config, &f.user, "餐厅发票：宫保鸡丁、米饭，合计58元。")
         .await
         .unwrap();
-    let query = semantic::embed(&f.state, config, "去云南坐飞机的出行凭证")
+    let query = semantic::embed(&f.state, config, &f.user, "去云南坐飞机的出行凭证")
         .await
         .unwrap();
     let score = |v: &Vec<f64>| v.iter().zip(&query).map(|(a, b)| a * b).sum::<f64>();
@@ -573,7 +583,7 @@ async fn malformed_or_zero_embeddings_are_never_persisted() {
             "/embeddings",
             post(move || {
                 let vector = vector.clone();
-                async move { Json(json!({"data":[{"index":0,"embedding":vector}]})) }
+                async move { Json(json!({"data":[{"index":0,"embedding":vector}],"usage":{"prompt_tokens":12}})) }
             }),
         );
         let server = tokio::spawn(async move {
@@ -590,6 +600,10 @@ async fn malformed_or_zero_embeddings_are_never_persisted() {
             StatusCode::BAD_GATEWAY
         );
         assert_eq!(count(&f.state, "photo_index_vector_spaces").await, 0);
+        let outcome: String = sqlx::query_scalar("SELECT outcome_json FROM usage_requests WHERE user_id=$1 AND capability='embedding'")
+            .bind(&f.user).fetch_one(&f.state.pool).await.unwrap();
+        let measured: serde_json::Value = serde_json::from_str(&outcome).unwrap();
+        assert_eq!(measured["measurements"]["input_tokens"], 12, "invalid model vectors can still consume input tokens");
         server.abort();
         f.cleanup().await;
     }

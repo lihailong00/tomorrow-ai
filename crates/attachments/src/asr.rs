@@ -175,11 +175,13 @@ pub(super) async fn reserve(
 
 pub(super) async fn perform(
     state: &AttachmentsState,
+    user: &str,
     config: &AsrConfig,
     upload: &Upload,
     bytes: Vec<u8>,
 ) -> Result<String, AttachmentError> {
     let operation_id = uuid::Uuid::new_v4();
+    let audio_ms = crate::metering::wav_duration_ms(&bytes);
     let mut request = match config.protocol {
         Protocol::Multipart => {
             let part = reqwest::multipart::Part::bytes(bytes).file_name(upload.name.clone()).mime_str(&upload.mime_type)
@@ -195,46 +197,64 @@ pub(super) async fn perform(
     if let Some(key) = &config.api_key {
         request = request.bearer_auth(key);
     }
-    let mut response = request.send().await.map_err(|error| {
-        let is_timeout = error.is_timeout();
-        tracing::warn!(%operation_id, timeout = is_timeout, "ASR provider connection did not complete");
-        if is_timeout { timed_out() } else { AttachmentError::new(
-            StatusCode::BAD_GATEWAY, "asr_unavailable", "无法连接语音识别服务，录音已保留；请手动重试",
-        ) }
-    })?;
+    let request = request.build().map_err(|_| AttachmentError::validation("无效的语音识别请求"))?;
+    let usage = crate::metering::MediaUsage::dispatch(
+        state, user, &config.endpoint, &config.model, "asr", "voice", audio_ms, None,
+    ).await?;
+    let mut response = match state.client.execute(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            usage.transport_failure(&error).await?;
+            let is_timeout = error.is_timeout();
+            tracing::warn!(%operation_id, timeout = is_timeout, "ASR provider connection did not complete");
+            return Err(if is_timeout { timed_out() } else { AttachmentError::new(
+                StatusCode::BAD_GATEWAY, "asr_unavailable", "无法连接语音识别服务，录音已保留；请手动重试",
+            ) });
+        }
+    };
     if !response.status().is_success() {
         let status = response.status();
         let error = provider_error(status, response.headers());
         // Only locally generated correlation and numeric status are logged.
-        // Never read/echo an upstream error body, token or reflected header.
+        // Error bodies are parsed only for bounded usage fields, never echoed.
         tracing::warn!(%operation_id, upstream_status = status.as_u16(), code = error.code, "ASR provider rejected the operation");
+        usage.rejected_response(response).await;
         return Err(error);
     }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|error| {
-        tracing::warn!(%operation_id, timeout = error.is_timeout(), "ASR provider response did not complete");
-        if error.is_timeout() { timed_out() } else { AttachmentError::new(
-            StatusCode::BAD_GATEWAY,
-            "asr_failed",
-            "语音识别响应中断，录音已保留；请手动重试",
-        ) }
-    })? {
-        if body.len() + chunk.len() > MAX_TRANSCRIPT_BYTES {
-            return Err(AttachmentError::new(
+    let result = async {
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            tracing::warn!(%operation_id, timeout = error.is_timeout(), "ASR provider response did not complete");
+            if error.is_timeout() { timed_out() } else { AttachmentError::new(
                 StatusCode::BAD_GATEWAY,
-                "asr_response_too_large",
-                "识别文字过长，请分段录制",
-            ));
+                "asr_failed",
+                "语音识别响应中断，录音已保留；请手动重试",
+            ) }
+        })? {
+            if body.len() + chunk.len() > MAX_TRANSCRIPT_BYTES {
+                return Err(AttachmentError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "asr_response_too_large",
+                    "识别文字过长，请分段录制",
+                ));
+            }
+            body.extend_from_slice(&chunk);
         }
-        body.extend_from_slice(&chunk);
-    }
-    let result: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
-        AttachmentError::new(
-            StatusCode::BAD_GATEWAY,
-            "asr_invalid_response",
-            "语音识别返回了无效结果",
-        )
-    })?;
+        serde_json::from_slice::<serde_json::Value>(&body).map_err(|_| {
+            AttachmentError::new(
+                StatusCode::BAD_GATEWAY,
+                "asr_invalid_response",
+                "语音识别返回了无效结果",
+            )
+        })
+    }.await;
+    // Valid provider usage is durable even when the transcript is empty/malformed.
+    usage.finish(match &result {
+        Ok(_) => "succeeded",
+        Err(error) if error.status == StatusCode::GATEWAY_TIMEOUT => "timeout",
+        Err(_) => "failed",
+    }, result.as_ref().ok()).await?;
+    let result = result?;
     let text = match config.protocol {
         Protocol::Multipart => result.get("text").and_then(|s| s.as_str()),
         Protocol::Qwen => result

@@ -8,6 +8,7 @@ fn provider(base: &str, model: &str) -> LlmProvider {
         model: Some(model.into()),
         remote_intent: true,
         kind: ProviderKind::Compatible,
+        usage: None,
     }
 }
 
@@ -26,6 +27,7 @@ fn reasoning_fields_match_deepseek_wire_contract_on_both_direct_transports() {
                     .unwrap();
                 for stream in [false, true] {
                     let body = serde_json::to_value(CompletionRequest {
+                        stream_options: None,
                         model,
                         messages: vec![],
                         stream,

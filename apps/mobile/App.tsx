@@ -46,6 +46,7 @@ import { GrowthScreen, GrowthWeekScreen } from './src/features/growth/GrowthScre
 import { GrowthSettingsScreen } from './src/features/growth/GrowthSettings';
 import { HealthScreen } from './src/features/health/HealthScreen';
 import { AiHistoryScreen } from './src/features/ai-history/AiHistoryScreen';
+import { UsageScreen } from './src/features/usage/UsageScreen';
 import { appInputs } from './src/platform/appInputs';
 import { phoneSources } from './src/platform/phoneSources';
 import { PhoneSourcesEntry } from './src/features/phone-sources/PhoneSourcesEntry';
@@ -62,6 +63,8 @@ import { IconButton, Loading } from './src/ui/components';
 import { colors, styles as s } from './src/ui/theme';
 import { chatAppearance } from './src/ui/ChatAppearance';
 import { AmbientBackground, AssistantOrb, Icon } from './src/ui/visuals';
+import { SidebarNavigation } from './src/features/navigation/SidebarNavigation';
+import { HelpScreen } from './src/features/navigation/HelpScreen';
 
 function Application() {
   const [booting, setBooting] = useState(true);
@@ -74,6 +77,7 @@ function Application() {
   const [expired, setExpired] = useState(false);
   const [authNotice, setAuthNotice] = useState('');
   const [tab, setTab] = useState<MainTab>('today');
+  const [sidebarClient, setSidebarClient] = useState<ApiClient | null>(null);
   const [shellHeight, setShellHeight] = useState<number>();
   const [keyboardVisible, setKeyboardVisible] = useState(() =>
     Keyboard.isVisible(),
@@ -97,12 +101,23 @@ function Application() {
     userId: session?.user.id,
     tab,
   }), [preferences.serverUrl, preferences.instance?.id, session?.token, session?.user.id, tab]);
-  const { entry, depth, navigate, back, getEntryState, resetRoutes } = useRouteStack(navigationOwner);
+  const { entry, depth, navigate, back, updateRoute, getEntryState, resetRoutes } = useRouteStack(navigationOwner);
   const [revision, setRevision] = useState(0);
   const [pendingInputs, setPendingInputs] = useState(0);
   const inputCleanup = useRef<Promise<void>>(Promise.resolve());
   const activeConnection = useRef(defaultServerUrl);
   const route = entry.route;
+  const activeTab = route.name === 'main' ? route.tab ?? tab : tab;
+  const selectTab = useCallback((next: MainTab) => {
+    if (route.name !== 'main') {
+      // Keep this conversation/editor entry behind the selected top-level page.
+      navigate({ name: 'main', tab: next });
+    } else if (route.tab !== undefined) {
+      updateRoute(() => ({ name: 'main', tab: next }));
+    } else {
+      setTab(next);
+    }
+  }, [navigate, route, updateRoute]);
   // Measure the whole shell so moving the header cannot change this predicate.
   const compactChatHeader =
     route.name === 'chat' &&
@@ -267,14 +282,14 @@ function Application() {
         back();
         return true;
       }
-      if (session && tab !== 'today') {
-        setTab('today');
+      if (session && activeTab !== 'today') {
+        selectTab('today');
         return true;
       }
       return false;
     });
     return () => listener.remove();
-  }, [depth, tab, session, back, route.name]);
+  }, [depth, activeTab, selectTab, session, back, route.name]);
   const savePreferences = async (next: Preferences) => {
     const changed = next.serverUrl !== preferences.serverUrl || next.instance?.id !== preferences.instance?.id;
     if (changed) {
@@ -354,7 +369,9 @@ function Application() {
   let page: React.ReactNode;
   let currentChatEntry: ReturnType<typeof createChatEntryState> | undefined;
   if (route.name === 'settings') {
-    page = <SettingsScreen />;
+    page = <SettingsScreen initialSection={route.section} />;
+  } else if (route.name === 'help') {
+    page = <HelpScreen />;
   } else if (!preferences.onboarded) {
     page = (
       <IntroScreen
@@ -410,7 +427,7 @@ function Application() {
         page = <GrowthWeekScreen />;
         break;
       case 'assistantTasks':
-        page = <TasksScreen />;
+        page = <TasksScreen initialView={route.view} />;
         break;
       case 'newTask':
         page = <NewTaskScreen />;
@@ -458,16 +475,19 @@ function Application() {
       case 'aiHistory':
         page = <AiHistoryScreen key={session.user.id + preferences.serverUrl} />;
         break;
+      case 'usage':
+        page = <UsageScreen key={session.user.id + preferences.serverUrl} />;
+        break;
       case 'conversations':
         page = <ConversationsScreen />;
         break;
       default:
         page =
-          tab === 'today' ? (
-            <HomeScreen onTasks={() => setTab('tasks')} />
-          ) : tab === 'tasks' ? (
+          activeTab === 'today' ? (
+            <HomeScreen onTasks={() => selectTab('tasks')} />
+          ) : activeTab === 'tasks' ? (
             <TodosScreen />
-          ) : tab === 'memories' ? (
+          ) : activeTab === 'memories' ? (
             <MemoriesScreen />
           ) : (
             <CapabilitiesScreen />
@@ -477,7 +497,7 @@ function Application() {
   const main = route.name === 'main';
   const chatPage = route.name === 'chat' && Boolean(session);
   const chatSurface = chatPage || (route.name === 'conversations' && Boolean(session));
-  const capabilitiesSurface = main && tab === 'capabilities' && Boolean(session);
+  const capabilitiesSurface = main && activeTab === 'capabilities' && Boolean(session);
   const tabs: Array<{
     id: MainTab;
     label: string;
@@ -534,7 +554,7 @@ function Application() {
             barStyle="dark-content"
             backgroundColor={capabilitiesSurface ? capabilityAppearance.background : colors.background}
           />
-          {route.name !== 'health' && route.name !== 'integrations' && <View
+          {route.name !== 'health' && route.name !== 'integrations' && route.name !== 'usage' && <View
             testID="application-header"
             style={[s.header, chatSurface && shell.chatHeader, compactChatHeader && shell.hiddenHeader]}
           >
@@ -544,7 +564,9 @@ function Application() {
                   <Icon name="back" size={22} color={chatAppearance.ink} />
                 </Pressable>
                 <AssistantOrb size={32} />
-                <Text numberOfLines={1} style={[s.wordmark, shell.brand, {flexShrink:1}]}>妥啦</Text>
+                <Pressable accessibilityRole="button" accessibilityLabel="打开侧边栏" onPress={() => { Keyboard.dismiss(); setSidebarClient(api); }} style={shell.sidebarChatTitle}>
+                  <Text numberOfLines={1} style={[s.wordmark, shell.brand, {flexShrink:1}]}>妥啦</Text>
+                </Pressable>
               </View>
               <View style={shell.chatHeaderActions}>
                 <CurrentConversationPin entryState={currentChatEntry} />
@@ -557,6 +579,9 @@ function Application() {
               </View>
             </> : main ? (
               <View style={s.row}>
+                {session && <Pressable accessibilityRole="button" accessibilityLabel="打开侧边栏" onPress={() => { Keyboard.dismiss(); setSidebarClient(api); }} style={shell.sidebarMenuButton}>
+                  <Icon name="menu" size={22} color={colors.ink} />
+                </Pressable>}
                 <AssistantOrb size={34} />
                 <Text style={[s.wordmark, shell.brand]}>妥啦</Text>
               </View>
@@ -584,7 +609,7 @@ function Application() {
                     ? (session.user.name || '我').slice(0, 1).toUpperCase()
                     : '⚙'
                 }
-                onPress={() => navigate({ name: 'settings' })}
+                onPress={() => navigate({ name: 'settings', ...(session ? { section: 'account' as const } : {}) })}
               />
             )}
           </View>}
@@ -596,7 +621,7 @@ function Application() {
             </Pressable>
           )}
           {session && <GrowthFeedbackBanner />}
-          {session && main && tab === 'today' && <PhoneSourcesEntry autoOpen onShowTodos={() => navigate({name: 'todos'})} />}
+          {session && main && activeTab === 'today' && <PhoneSourcesEntry autoOpen onShowTodos={() => navigate({name: 'todos'})} />}
           <KeyboardAvoidingView
             key={entry.key}
             style={s.fill}
@@ -604,7 +629,7 @@ function Application() {
           >
             {page}
           </KeyboardAvoidingView>
-          {session && main && tab === 'today' && (
+          {session && main && activeTab === 'today' && (
             <View style={shell.dockArea}>
               <View style={shell.dock}>
                 <Pressable
@@ -637,21 +662,21 @@ function Application() {
                 <Pressable
                   key={item.id}
                   accessibilityRole="tab"
-                  accessibilityState={{ selected: item.id === tab }}
+                  accessibilityState={{ selected: item.id === activeTab }}
                   accessibilityLabel={item.label}
-                  onPress={() => setTab(item.id)}
+                  onPress={() => selectTab(item.id)}
                   style={({ pressed }) => [
                     s.tab,
-                    tab === item.id && shell.selectedTab,
+                    activeTab === item.id && shell.selectedTab,
                     pressed && { opacity: 0.65 },
                   ]}
                 >
                   <Icon
                     name={item.icon}
                     size={22}
-                    color={tab === item.id ? colors.action : colors.secondary}
+                    color={activeTab === item.id ? colors.action : colors.secondary}
                   />
-                  <Text style={[s.tabLabel, tab === item.id && s.tabActive]}>
+                  <Text style={[s.tabLabel, activeTab === item.id && s.tabActive]}>
                     {item.label}
                   </Text>
                 </Pressable>
@@ -659,6 +684,12 @@ function Application() {
             </View>
           )}
         </SafeAreaView>
+        {session && <SidebarNavigation visible={sidebarClient === api} route={route} tab={activeTab}
+          onClose={() => setSidebarClient(current => current === api ? null : current)}
+          onSelect={destination => {
+            if (destination.kind === 'tab') selectTab(destination.tab);
+            else navigate(destination.route);
+          }} />}
       </View>
       </GrowthProvider>
     </AppProvider>
@@ -667,6 +698,8 @@ function Application() {
 const shell = StyleSheet.create({
   hiddenHeader: { display: 'none' },
   safeArea: { flex: 1, backgroundColor: 'transparent' },
+  sidebarMenuButton: { width: 40, minHeight: 44, alignItems: 'center', justifyContent: 'center', marginRight: 6 },
+  sidebarChatTitle: { minHeight: 44, flexShrink: 1, justifyContent: 'center' },
   brand: { marginLeft: 5 },
   chatTitle: { flex: 1, textAlign: 'center', color: chatAppearance.ink, fontSize: 17, fontWeight: '500' },
   chatCanvas: { backgroundColor: chatAppearance.background },

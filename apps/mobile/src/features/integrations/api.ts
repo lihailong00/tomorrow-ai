@@ -4,6 +4,8 @@ import type {
   ImportedContent,
   Integration,
   IntegrationResult,
+  MailDraft,
+  MailReceipt,
 } from './types';
 
 export function integrationsApi(
@@ -29,6 +31,11 @@ export function integrationsApi(
         {},
       ),
     disconnect: (id: string) => request<{ ok: boolean }>(path(id), 'DELETE'),
+    sendMail: (id: string, draft: MailDraft) =>
+      request<MailReceipt>(path(id) + '/send', 'POST', {
+        ...draft,
+        confirmed: true,
+      }),
     read: async (id: string, query: Record<string, string>) => {
       const result = await request<{
         items?: IntegrationResult[];

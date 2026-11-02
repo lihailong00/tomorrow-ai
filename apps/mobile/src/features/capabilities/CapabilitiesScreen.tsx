@@ -24,6 +24,7 @@ import { Button, ErrorNotice, Loading, Notice } from '../../ui/components';
 import { Icon, IconName } from '../../ui/visuals';
 import { integrationsApi } from '../integrations/api';
 import { CloudConnection } from '../integrations/IntegrationsScreen';
+import { MailConnectionSheet } from '../integrations/MailConnection';
 import { healthApi } from '../health/api';
 import { personalMcpApi } from '../personal-mcp/api';
 import { PhoneSourcesEntry } from '../phone-sources/PhoneSourcesEntry';
@@ -160,6 +161,12 @@ export function CapabilitiesScreen() {
   );
   const groups = splitHubEntries(entries, query, category);
   const selected = entries.find(entry => entry.key === opened);
+  const mailToConnect =
+    selected?.kind === 'integration' &&
+    selected.source.mode === 'mail' &&
+    selected.source.status === 'not_connected'
+      ? selected.source
+      : null;
   const available =
     expanded || query.trim() || category !== '全部'
       ? groups.available
@@ -418,7 +425,7 @@ export function CapabilitiesScreen() {
         </Pressable>
       </ScrollView>
       <Modal
-        visible={Boolean(opened)}
+        visible={Boolean(opened) && !mailToConnect}
         animationType="slide"
         transparent
         onRequestClose={close}
@@ -599,6 +606,17 @@ export function CapabilitiesScreen() {
           </SafeAreaView>
         </View>
       </Modal>
+      <MailConnectionSheet
+        item={mailToConnect}
+        onClose={close}
+        onConnected={async () => {
+          await reloadDomestic();
+          if (owner.active) {
+            setNotice('邮箱已连接，可以查找和发送邮件。');
+            setOpened(current => (current === selected?.key ? null : current));
+          }
+        }}
+      />
     </View>
   );
 }

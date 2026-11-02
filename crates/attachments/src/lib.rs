@@ -13,6 +13,7 @@ mod ai_history;
 mod office;
 mod photo_index;
 mod upload_image;
+mod metering;
 pub use upload_image::ImageAnalysis;
 
 use axum::{
@@ -1054,7 +1055,7 @@ async fn transcribe(
         let bytes = state
             .read_bytes(&user_id, &id, asr::MAX_AUDIO_BYTES)
             .await?;
-        asr::perform(&state, config, &upload, bytes).await
+        asr::perform(&state, &user_id, config, &upload, bytes).await
     }).await.unwrap_or_else(|_| Err(asr::timed_out()));
     let text = match result {
         Ok(text) => text,

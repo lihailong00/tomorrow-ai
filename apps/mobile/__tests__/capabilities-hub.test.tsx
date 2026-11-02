@@ -267,8 +267,8 @@ it('moves an email account only after real connect verification and refresh succ
   view.setPending(gate.promise);
   await view.click('网易邮箱，连接');
   await view.field('邮箱地址', 'owner@163.com');
-  await view.field('邮箱客户端授权码', 'test-authorization');
-  await view.button('验证并连接邮箱');
+  await view.field('邮箱客户端授权码', 'testauthorization');
+  await view.click('验证并连接');
   expect(view.sources('connected')).not.toContain(
     'capability-source-integration:netease163',
   );
@@ -276,7 +276,7 @@ it('moves an email account only after real connect verification and refresh succ
   expect(view.request).toHaveBeenCalledWith(
     '/integrations/netease163/connect',
     'POST',
-    { email: 'owner@163.com', authorization_code: 'test-authorization' },
+    { email: 'owner@163.com', authorization_code: 'testauthorization' },
     expect.anything(),
   );
   expect(view.sources('connected')).toContain(

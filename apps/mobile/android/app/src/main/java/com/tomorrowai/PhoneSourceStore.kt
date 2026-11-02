@@ -20,7 +20,7 @@ import javax.crypto.spec.GCMParameterSpec
 
 /** App-private, excluded from backup. Checkpoints and complete records commit together. */
 internal class PhoneSourceStore(private val context: Context) : SQLiteOpenHelper(
-  context, File(context.noBackupFilesDir, "phone-sources.db").absolutePath, null, 1
+  context, File(context.noBackupFilesDir, "phone-sources.db").absolutePath, null, 2
 ) {
   companion object {
     val lock = Any()
@@ -53,19 +53,36 @@ internal class PhoneSourceStore(private val context: Context) : SQLiteOpenHelper
     db.execSQL("CREATE TABLE records(scope TEXT, source TEXT, id INTEGER, epoch TEXT NOT NULL, signature TEXT NOT NULL, PRIMARY KEY(scope,source,id))")
     // Small encrypted pieces avoid CursorWindow's per-row size limit for long notes/SMS.
     db.execSQL("CREATE TABLE parts(scope TEXT, source TEXT, id INTEGER, part INTEGER, payload BLOB NOT NULL, PRIMARY KEY(scope,source,id,part))")
+    addSyncColumns(db)
   }
-  override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+  private fun addSyncColumns(db: SQLiteDatabase) {
+    db.execSQL("ALTER TABLE records ADD COLUMN revision TEXT NOT NULL DEFAULT ''")
+    db.execSQL("ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'full'")
+    db.execSQL("ALTER TABLE jobs ADD COLUMN requested INTEGER NOT NULL DEFAULT 0")
+    db.execSQL("ALTER TABLE jobs ADD COLUMN scan_request INTEGER NOT NULL DEFAULT 0")
+    db.execSQL("ALTER TABLE jobs ADD COLUMN access TEXT NOT NULL DEFAULT ''")
+  }
+  override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+    if (oldVersion < 2) addSyncColumns(db)
+  }
   private val prefs get() = context.getSharedPreferences("tada_phone_sources_sync", 0)
   data class Job(val epoch: String, val after: Long, val upper: Long, val total: Long,
-    val processed: Long, val state: String, val error: String, val updated: Long)
+    val processed: Long, val state: String, val error: String, val updated: Long,
+    val mode: String, val requested: Long, val scanRequest: Long, val access: String)
 
   fun job(scope: String, source: String): Job? = readableDatabase.rawQuery(
-    "SELECT epoch,after_id,upper_id,total,processed,state,error,updated FROM jobs WHERE scope=? AND source=? AND enabled=1",
+    "SELECT epoch,after_id,upper_id,total,processed,state,error,updated,mode,requested,scan_request,access FROM jobs WHERE scope=? AND source=? AND enabled=1",
     arrayOf(scope, source)).use { if (!it.moveToFirst()) null else Job(it.getString(0), it.getLong(1),
-      it.getLong(2), it.getLong(3), it.getLong(4), it.getString(5), it.getString(6), it.getLong(7)) }
+      it.getLong(2), it.getLong(3), it.getLong(4), it.getString(5), it.getString(6), it.getLong(7),
+      it.getString(8), it.getLong(9), it.getLong(10), it.getString(11)) }
 
   fun active(scope: String, source: String) = prefs.getString("active", "") == scope && job(scope, source) != null
-  fun start(scope: String, source: String, force: Boolean = true) {
+  fun markDirty(scope: String, source: String) {
+    if (active(scope, source)) writableDatabase.execSQL(
+      "UPDATE jobs SET requested=requested+1 WHERE scope=? AND source=? AND enabled=1", arrayOf(scope, source))
+  }
+  /** Returns false when the existing cache is current; opening a screen does not reset it. */
+  fun start(scope: String, source: String, force: Boolean = false): Boolean {
     require(source in PhoneSourceReader.sources)
     // A different account/server never inherits an old account's background read grant.
     if (prefs.getString("active", "") != scope) {
@@ -73,16 +90,25 @@ internal class PhoneSourceStore(private val context: Context) : SQLiteOpenHelper
       check(prefs.edit().putString("active", scope).commit()) { "无法保存本机资料授权" }
     }
     val previous = job(scope, source)
-    if (previous?.state == "complete" && source != "photos" && !force && System.currentTimeMillis() - previous.updated < 5 * 60_000L) return
-    if (previous == null || previous.state == "complete") {
+    val access = PhoneSourceReader.access(context, source)
+    check(access != "denied") { "请先授权此来源" }
+    val now = System.currentTimeMillis()
+    val accessChanged = previous != null && previous.access != access
+    if (previous?.state == "complete" && !PhoneSourceSyncPolicy.needsRefresh(previous.state, previous.updated,
+        previous.requested, previous.scanRequest, previous.access, access, force, now)) return false
+    if (previous == null || previous.state == "complete" || accessChanged) {
       writableDatabase.insertWithOnConflict("jobs", null, ContentValues().apply {
         put("scope", scope); put("source", source); put("epoch", UUID.randomUUID().toString())
         put("after_id", 0); put("upper_id", -1); put("total", 0); put("processed", 0)
-        put("state", "queued"); put("error", ""); put("enabled", 1); put("updated", System.currentTimeMillis())
+        put("state", "queued"); put("error", ""); put("enabled", 1); put("updated", now)
+        put("mode", if (previous == null || (previous.mode == "full" && previous.state != "complete")) "full" else "incremental")
+        put("requested", previous?.requested ?: 0); put("scan_request", previous?.requested ?: 0)
+        put("access", access)
       }, SQLiteDatabase.CONFLICT_REPLACE)
-    } else {
+    } else if (previous.state == "error") {
       writableDatabase.execSQL("UPDATE jobs SET state='queued',error='' WHERE scope=? AND source=?", arrayOf(scope, source))
     }
+    return true
   }
 
   fun stop(scope: String, source: String) {
@@ -100,7 +126,7 @@ internal class PhoneSourceStore(private val context: Context) : SQLiteOpenHelper
   }
   fun initialize(scope: String, source: String, epoch: String, upper: Long, total: Long) {
     writableDatabase.execSQL("UPDATE jobs SET upper_id=?,total=?,state='running',error='' WHERE scope=? AND source=? AND epoch=? AND enabled=1 AND upper_id=-1",
-      arrayOf(upper, total, scope, source, epoch))
+      arrayOf<Any>(upper, total, scope, source, epoch))
   }
   fun error(scope: String, source: String, message: String) {
     writableDatabase.execSQL("UPDATE jobs SET state='error',error=? WHERE scope=? AND source=? AND enabled=1", arrayOf(message, scope, source))
@@ -129,12 +155,24 @@ internal class PhoneSourceStore(private val context: Context) : SQLiteOpenHelper
     finally { writableDatabase.endTransaction() }
   }
 
-  fun commit(scope: String, source: String, checkpoint: Job, rows: List<PhoneSourceReader.Record>, complete: Boolean) {
+  fun revisions(scope: String, source: String, ids: Collection<Long>): Map<Long, String> {
+    if (ids.isEmpty()) return emptyMap()
+    return readableDatabase.rawQuery("SELECT id,revision FROM records WHERE scope=? AND source=? AND id IN (${ids.joinToString(",") { "?" }})",
+      (listOf(scope, source) + ids.map { it.toString() }).toTypedArray()).use { cursor ->
+      buildMap { while (cursor.moveToNext()) put(cursor.getLong(0), cursor.getString(1)) }
+    }
+  }
+  fun commit(scope: String, source: String, checkpoint: Job, revisions: Map<Long, String>,
+    rows: List<PhoneSourceReader.Record>, complete: Boolean) {
     val current = job(scope, source)
     // A periodic refresh and an explicit resume may overlap. A stale batch must
     // never move the durable cursor backwards or increment progress twice.
     if (current == null || !active(scope, source) || current.epoch != checkpoint.epoch || current.after != checkpoint.after) return
     transaction {
+      // Stamp unchanged identities without loading, normalizing or re-encrypting their bodies.
+      for ((id, revision) in revisions) execSQL(
+        "UPDATE records SET epoch=? WHERE scope=? AND source=? AND id=? AND revision=?",
+        arrayOf<Any>(checkpoint.epoch, scope, source, id, revision))
       for (row in rows) {
         val selection = arrayOf(scope, source, row.id.toString())
         val serialized = row.value.toString()
@@ -142,12 +180,14 @@ internal class PhoneSourceStore(private val context: Context) : SQLiteOpenHelper
         val unchanged = rawQuery("SELECT signature FROM records WHERE scope=? AND source=? AND id=?", selection)
           .use { it.moveToFirst() && it.getString(0) == signature }
         if (unchanged) {
-          execSQL("UPDATE records SET epoch=? WHERE scope=? AND source=? AND id=?", arrayOf(checkpoint.epoch, scope, source, row.id))
+          execSQL("UPDATE records SET epoch=?,revision=? WHERE scope=? AND source=? AND id=?",
+            arrayOf<Any>(checkpoint.epoch, revisions.getValue(row.id), scope, source, row.id))
           continue
         }
         delete("parts", "scope=? AND source=? AND id=?", selection)
         insertWithOnConflict("records", null, ContentValues().apply {
           put("scope", scope); put("source", source); put("id", row.id); put("epoch", checkpoint.epoch); put("signature", signature)
+          put("revision", revisions.getValue(row.id))
         }, SQLiteDatabase.CONFLICT_REPLACE)
         val bytes = serialized.toByteArray(Charsets.UTF_8)
         var offset = 0; var part = 0
@@ -166,9 +206,9 @@ internal class PhoneSourceStore(private val context: Context) : SQLiteOpenHelper
           arrayOf(scope, source, scope, source, checkpoint.epoch))
         delete("records", "scope=? AND source=? AND epoch!=?", arrayOf(scope, source, checkpoint.epoch))
       }
-      val processed = checkpoint.processed + rows.size
+      val processed = checkpoint.processed + revisions.size
       execSQL("UPDATE jobs SET after_id=?,processed=?,total=?,state=?,error='',updated=? WHERE scope=? AND source=? AND epoch=?",
-        arrayOf(rows.lastOrNull()?.id ?: checkpoint.after, processed, if (complete) processed else maxOf(checkpoint.total, processed),
+        arrayOf<Any>(revisions.keys.lastOrNull() ?: checkpoint.after, processed, if (complete) processed else maxOf(checkpoint.total, processed),
           if (complete) "complete" else "running", System.currentTimeMillis(), scope, source, checkpoint.epoch))
     }
   }
@@ -228,6 +268,7 @@ internal class PhoneSourceStore(private val context: Context) : SQLiteOpenHelper
     return JSONObject().put("source", source).put("readAt", job.updated).put("permission", access)
       .put("limited", access == "limited").put("items", values).put("total", job.total)
       .put("processed", job.processed).put("cached", cached).put("syncState", job.state)
+      .put("syncMode", job.mode)
       .put("syncError", job.error).put("generation", job.epoch).put("cursor", after.toString())
       .put("nextCursor", if (ids.size > PhoneSourceReader.PAGE_SIZE) ids[PhoneSourceReader.PAGE_SIZE - 1].toString() else JSONObject.NULL)
   }
@@ -245,7 +286,7 @@ class PhoneSourceSyncWorker(context: Context, params: WorkerParameters) : Worker
       synchronized(PhoneSourceStore.lock) {
         PhoneSourceStore(applicationContext).use { store ->
           if (!store.active(scope, source)) return Result.success()
-          if (inputData.getBoolean("refresh", false) && store.job(scope, source)?.state == "complete") store.start(scope, source)
+          if (store.job(scope, source)?.state == "complete") store.start(scope, source, inputData.getBoolean("refresh", false))
         }
       }
       while (!isStopped && android.os.SystemClock.elapsedRealtime() - started < 7 * 60_000L) {
@@ -255,7 +296,13 @@ class PhoneSourceSyncWorker(context: Context, params: WorkerParameters) : Worker
             store.job(scope, source) ?: return Result.success()
           }
         }
-        if (job.state == "complete") return Result.success()
+        if (job.state == "complete") {
+          val again = synchronized(PhoneSourceStore.lock) { PhoneSourceStore(applicationContext).use { store ->
+            store.active(scope, source) && store.start(scope, source)
+          } }
+          if (again) continue
+          return Result.success()
+        }
         check(PhoneSourceReader.access(applicationContext, source) != "denied") { "权限已收回，请重新授权" }
         if (job.upper < 0) {
           val (upper, total) = reader.bounds(source)
@@ -265,12 +312,16 @@ class PhoneSourceSyncWorker(context: Context, params: WorkerParameters) : Worker
           } }
           continue
         }
-        val rows = reader.batch(source, job.after, job.upper)
+        val revisions = reader.revisions(source, job.after, job.upper)
+        val cached = synchronized(PhoneSourceStore.lock) { PhoneSourceStore(applicationContext).use {
+          it.revisions(scope, source, revisions.keys)
+        } }
+        val rows = reader.records(source, PhoneSourceSyncPolicy.changedIds(revisions, cached))
         synchronized(PhoneSourceStore.lock) { PhoneSourceStore(applicationContext).use { store ->
           if (isStopped || !store.active(scope, source)) return Result.success()
-          store.commit(scope, source, job, rows, rows.isEmpty())
+          store.commit(scope, source, job, revisions, rows, revisions.isEmpty())
         } }
-        if (rows.isEmpty()) return Result.success()
+        // Completion loops once more so changes arriving during a scan are not lost.
       }
       if (isStopped) return Result.retry()
       // A successful time slice must not accumulate exponential retry delays.

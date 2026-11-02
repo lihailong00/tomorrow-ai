@@ -1,5 +1,10 @@
 /** Replace this adapter for iOS/HarmonyOS. A system permission is separate from the user's source selection. */
-import { Linking, NativeModules, Platform } from 'react-native';
+import {
+  DeviceEventEmitter,
+  Linking,
+  NativeModules,
+  Platform,
+} from 'react-native';
 
 export const phoneSourceIds = [
   'contacts',
@@ -45,6 +50,7 @@ export type PhoneSnapshot = {
   processed?: number;
   cached?: number;
   syncState?: 'queued' | 'running' | 'complete' | 'error';
+  syncMode?: 'full' | 'incremental';
   syncError?: string;
   generation?: string;
   cursor?: string;
@@ -132,6 +138,14 @@ export const canReadPhoneSource = (value: PhonePermission) =>
   value === 'granted' || value === 'limited';
 export const phoneSources = {
   supported,
+  onChange(listener: () => void): () => void {
+    if (!supported) return () => {};
+    const subscription = DeviceEventEmitter.addListener(
+      'TadaPhoneSourcesChanged',
+      listener,
+    );
+    return () => subscription.remove();
+  },
   openSettings: () => Linking.openSettings(),
   async status(): Promise<PhoneStatus> {
     if (!supported)

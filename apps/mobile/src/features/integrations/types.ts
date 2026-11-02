@@ -34,3 +34,16 @@ export interface IntegrationResult {
   text: string;
   url?: string;
 }
+
+export interface MailDraft {
+  client_request_id: string;
+  to: string;
+  subject: string;
+  body: string;
+}
+
+export interface MailReceipt {
+  status: 'sent' | 'sending' | 'unknown' | 'failed';
+  client_request_id: string;
+  detail: string;
+}

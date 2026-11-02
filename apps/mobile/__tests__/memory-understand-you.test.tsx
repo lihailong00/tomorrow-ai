@@ -1,5 +1,5 @@
 import React from 'react';
-import { Alert, Modal, Text, TextInput } from 'react-native';
+import { Alert, FlatList, Modal, Text, TextInput } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { ApiError } from '../src/api/client';
 import { AppContextValue, AppProvider } from '../src/app/context';
@@ -46,6 +46,42 @@ const samples = [
   memory('pace', '上午更适合专注工作。', 'preference'),
   memory('extra', '学习 Rust 喜欢结合小例子。', 'preference'),
 ];
+
+test('memory categories filter saved facts without exposing internal provenance', async () => {
+  const weight = {
+    ...memory('weight', '体重95公斤。'),
+    title: '体重',
+    source:
+      '对话 10d8be9f-bc1f-4e09-898a-bb67f309155b · 2026-11-02T04:07:37Z\n你的原话：我体重95公斤',
+  };
+  const app = await setup([...samples, weight]);
+  await app.press('查看全部记忆');
+  await app.press('分类：个人资料');
+  expect(
+    app.tree.root.findAll(
+      n => n.props.accessibilityLabel === `查看记忆：${weight.title}`,
+    ),
+  ).not.toHaveLength(0);
+  expect(
+    app.tree.root
+      .findByType(FlatList)
+      .props.data.map((item: Memory) => item.id),
+  ).toEqual(['weight']);
+  expect(JSON.stringify(app.text())).not.toContain('10d8be9f');
+  await app.close();
+});
+
+test('legacy abnormal weight stays out of highlights and offers confirmation', async () => {
+  const pending = memory('weight', '体重为“−95kg”。');
+  const app = await setup([...samples, pending]);
+  expect(selectMemoryHighlights([pending])).toHaveLength(0);
+  expect(JSON.stringify(app.text())).not.toContain('−95kg');
+  await app.press('查看待确认的记忆');
+  await app.press('查看记忆：体重待确认');
+  expect(JSON.stringify(app.text())).toContain('你目前的体重是 95 公斤吗？');
+  expect(app.api.saveMemory).not.toHaveBeenCalled();
+  await app.close();
+});
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => {

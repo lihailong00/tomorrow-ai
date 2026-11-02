@@ -31,6 +31,8 @@ import { PhotoIndexSettings } from '../photo-index/PhotoIndexSettings';
 import { PersonalMcpConnections } from '../personal-mcp/PersonalMcpConnections';
 import type { PersonalMcpConnection } from '../personal-mcp/types';
 import { integrationsApi } from './api';
+import { MailConnectionSheet } from './MailConnection';
+import type { Integration } from './types';
 import {
   connectionRows,
   filterConnectionRows,
@@ -110,6 +112,9 @@ export function ConnectionsHub({
   );
   const [managing, setManaging] = useState(browseState?.managing === true);
   const [detailKey, setDetailKey] = useState<string | null>(null);
+  const [mailConnection, setMailConnection] = useState<Integration | null>(
+    null,
+  );
   const [privacy, setPrivacy] = useState(false);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
@@ -346,6 +351,15 @@ export function ConnectionsHub({
     });
   };
   const openRow = (row: ConnectionRow) => {
+    const target = row.target;
+    const mail =
+      target.kind === 'integration'
+        ? snapshot.integrations?.find(item => item.id === target.id)
+        : undefined;
+    if (mail?.mode === 'mail' && mail.status === 'not_connected') {
+      setMailConnection(mail);
+      return;
+    }
     setDetailKey(row.key);
     setNotice('');
   };
@@ -696,6 +710,17 @@ export function ConnectionsHub({
 
   return (
     <View style={v.screen}>
+      <MailConnectionSheet
+        item={mailConnection}
+        onClose={() => setMailConnection(null)}
+        onConnected={async () => {
+          await refresh();
+          if (scope.active) {
+            setMailConnection(null);
+            setNotice('邮箱已连接，可以查找和发送邮件。');
+          }
+        }}
+      />
       <ScrollView
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={v.content}

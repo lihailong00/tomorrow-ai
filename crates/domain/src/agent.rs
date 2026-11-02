@@ -403,6 +403,36 @@ impl Repository {
         Ok((user_id, row.get("scope")))
     }
 
+    /// Durable pre-send admission is serialized with cancellation, lease loss and retries.
+    pub async fn dispatch_agent_usage(&self, run_id: &str, token: &str, index: u32,
+        identity: crate::usage::UsageIdentity) -> Result<(), DomainError> {
+        let request_id = agent_usage_request_id(run_id, token, index)?;
+        let mut tx = self.pool.begin().await?;
+        let locked = sqlx::query("UPDATE agent_runs SET updated_at=updated_at WHERE id=$1 AND token_hash=$2 AND status='running' AND lease_until>=$3 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=agent_runs.user_id AND c.disabled<>0) AND (task_id IS NULL OR EXISTS(SELECT 1 FROM tasks t WHERE t.id=agent_runs.task_id AND t.user_id=agent_runs.user_id AND t.status='running' AND t.attempts=agent_runs.task_attempt AND t.claimed_until>=$3))")
+            .bind(run_id).bind(auth::hash_token(token)).bind(now()).execute(&mut *tx).await?.rows_affected();
+        if locked != 1 { return Err(DomainError::Forbidden); }
+        let row = sqlx::query("SELECT r.user_id,r.scope,t.kind AS task_kind FROM agent_runs r LEFT JOIN tasks t ON t.id=r.task_id AND t.user_id=r.user_id WHERE r.id=$1")
+            .bind(run_id).fetch_one(&mut *tx).await?;
+        let purpose = if row.get::<String, _>("scope") == "chat" { "chat" }
+            else { match row.get::<Option<String>, _>("task_kind").as_deref() {
+                Some("briefing") => "brief", Some("todo_prepare" | "daily_plan") => "todo", _ => "other",
+            } };
+        self.usage_dispatch_in_transaction(&mut tx, &row.get::<String, _>("user_id"),
+            crate::usage::UsageDispatch::new(request_id, identity, "llm", purpose)).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Finishing may arrive after cancellation/rotation. It can only enrich the exact
+    /// existing row derived from that generation's capability, never create a new row.
+    pub async fn finish_agent_usage(&self, run_id: &str, token: &str, index: u32,
+        outcome: crate::usage::UsageOutcome) -> Result<(), DomainError> {
+        let request_id = agent_usage_request_id(run_id, token, index)?;
+        let user_id: String = sqlx::query_scalar("SELECT user_id FROM agent_runs WHERE id=$1")
+            .bind(run_id).fetch_optional(&self.pool).await?.ok_or(DomainError::Forbidden)?;
+        self.usage_finish(&user_id, &request_id, outcome).await
+    }
+
     pub async fn agent_run(&self, user_id: &str, id: &str) -> Result<AgentRunView, DomainError> {
         let row = sqlx::query("SELECT * FROM agent_runs WHERE id=$1 AND user_id=$2")
             .bind(id)
@@ -815,6 +845,13 @@ impl Repository {
         tx.commit().await?;
         Ok(json!({"value":value,"replayed":false}))
     }
+}
+
+fn agent_usage_request_id(run_id: &str, token: &str, index: u32) -> Result<String, DomainError> {
+    if uuid::Uuid::parse_str(run_id).is_err() || token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) || !(1..=1000).contains(&index) {
+        return Err(DomainError::Validation("无效的模型用量请求".into()));
+    }
+    Ok(format!("pi:{run_id}:{}:{index}", auth::hash_token(token)))
 }
 
 fn required<'a>(value: &'a Value, key: &str) -> Result<&'a str, DomainError> {

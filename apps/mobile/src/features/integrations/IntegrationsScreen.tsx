@@ -43,6 +43,7 @@ import { importDraft, integrationsApi } from './api';
 import type { ImportedContent, Integration, IntegrationResult } from './types';
 import { extractTodos } from '../todos/api';
 import { PersonalMcpConnections } from '../personal-mcp/PersonalMcpConnections';
+import { MailConnectionForm, MailComposer } from './MailConnection';
 import {
   ConnectionsHub,
   type ConnectionBrowseState,
@@ -413,7 +414,10 @@ export function IntegrationTools({
         item.text,
         item.url,
       );
-      const imported = await client.importContent({ ...input, external_id: item.id });
+      const imported = await client.importContent({
+        ...input,
+        external_id: item.id,
+      });
       if (!scope.active) {
         return;
       }
@@ -1107,7 +1111,6 @@ export function CloudConnection({
     [api, scope],
   );
   const action = useAction();
-  const [email, setEmail] = useState('');
   const [credential, setCredential] = useState('');
   const [corp, setCorp] = useState('');
   const [query, setQuery] = useState('');
@@ -1120,16 +1123,10 @@ export function CloudConnection({
   const connect = () =>
     action.run(async () => {
       const fields: Record<string, string> =
-        item.mode === 'mail'
-          ? { email: email.trim(), authorization_code: credential }
-          : item.id === 'wecom'
+        item.id === 'wecom'
           ? { corp_id: corp.trim(), agent_secret: credential }
           : { token: credential };
-      if (
-        !credential ||
-        (item.mode === 'mail' && !email.trim()) ||
-        (item.id === 'wecom' && !corp.trim())
-      ) {
+      if (!credential || (item.id === 'wecom' && !corp.trim())) {
         throw new Error('请填写完整后再连接。');
       }
       try {
@@ -1150,36 +1147,13 @@ export function CloudConnection({
     <View style={{ marginTop: 12 }}>
       <ErrorNotice message={action.error} />
       {configured && !connected && item.mode === 'mail' && (
-        <>
-          <Field
-            label="邮箱地址"
-            value={email}
-            onChangeText={setEmail}
-            autoCapitalize="none"
-            keyboardType="email-address"
-            placeholder={item.id === 'qq_mail' ? 'name@qq.com' : 'name@163.com'}
-          />
-          <Field
-            label="邮箱客户端授权码"
-            value={credential}
-            onChangeText={setCredential}
-            secureTextEntry
-            autoCapitalize="none"
-            autoCorrect={false}
-            placeholder="在邮箱设置中开启 IMAP 后获取"
-          />
-          <Text style={[s.small, { marginVertical: 12 }]}>
-            使用邮箱的客户端授权码。连接后仅提供读取功能，不会发送邮件。
-          </Text>
-          <Button
-            loading={action.busy}
-            onPress={() => {
-              void connect();
-            }}
-          >
-            验证并连接邮箱
-          </Button>
-        </>
+        <MailConnectionForm
+          item={item}
+          onConnected={async () => {
+            onNotice('收发信服务已验证。');
+            await onChanged();
+          }}
+        />
       )}
       {configured && !connected && item.mode === 'token' && (
         <>
@@ -1231,6 +1205,9 @@ export function CloudConnection({
       )}
       {(connected || (configured && item.mode === 'map')) && (
         <>
+          {connected && item.mode === 'mail' ? (
+            <MailComposer key={item.id} item={item} />
+          ) : null}
           {(item.mode === 'mail' ||
             item.mode === 'map' ||
             item.id === 'yuque' ||

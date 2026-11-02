@@ -790,13 +790,13 @@ async fn qwen_adapter_preserves_audio_and_caches_without_cross_user_calls() {
             assert_eq!(body["asr_options"]["enable_itn"],true);
             assert_eq!(body["messages"][0]["content"][0]["input_audio"]["data"],"data:audio/mp4;base64,YXVkaW8=");
             counted.fetch_add(1,Ordering::SeqCst);
-            Json(serde_json::json!({"choices":[{"message":{"content":"  明天下午3点开会。  "}}]}))
+            Json(serde_json::json!({"choices":[{"message":{"content":"  明天下午3点开会。  "}}],"usage":{"seconds":2,"input_tokens":30,"output_tokens":8}}))
         }
     }));
     let server = tokio::spawn(async move {
         axum::serve(listener, mock).await.unwrap();
     });
-    let (state, _, token, other) = fixture(
+    let (state, user, token, other) = fixture(
         DEFAULT_MAX_BYTES,
         Some(AsrConfig {
             protocol: asr::Protocol::Qwen,
@@ -839,6 +839,15 @@ async fn qwen_adapter_preserves_audio_and_caches_without_cross_user_calls() {
         .await
         .unwrap();
     assert_eq!(count, 1);
+    let ledger: Vec<(String,String,String,String)> = sqlx::query_as(
+        "SELECT user_id,capability,purpose,outcome_json FROM usage_requests")
+        .fetch_all(&state.pool).await.unwrap();
+    assert_eq!(ledger.len(), 1, "denied access and replayed transcript do not call ASR again");
+    assert_eq!((ledger[0].0.as_str(),ledger[0].1.as_str(),ledger[0].2.as_str()), (user.as_str(),"asr","voice"));
+    let measured: serde_json::Value = serde_json::from_str(&ledger[0].3).unwrap();
+    assert_eq!(measured["measurements"]["audio_ms"], 2000);
+    assert_eq!(measured["measurements"]["input_tokens"], 30);
+    assert_eq!(measured["measurements"]["image_count"], serde_json::Value::Null);
     server.abort();
     remove_fixture(state).await;
 }
@@ -846,6 +855,42 @@ async fn qwen_adapter_preserves_audio_and_caches_without_cross_user_calls() {
 async fn reserve_asr_test(state: &AttachmentsState, user: &str, upload: &str) -> Result<Option<String>, AttachmentError> {
     let observed = asr::observe(state, user, upload).await?;
     asr::reserve(state, user, upload, asr::Limits { user_daily: 20, global_daily: 50 }, observed).await
+}
+
+#[tokio::test]
+async fn asr_usage_survives_empty_transcript_validation_without_inventing_audio_duration() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+    let app = Router::new().route("/chat/completions", post(|Json(body): Json<serde_json::Value>| async move {
+        if body["model"] == "provider-rejected" {
+            (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":{"message":"fixture-private-key"},"usage":{"seconds":4,"input_tokens":6}})))
+        } else if body["model"] == "known-duration" {
+            (StatusCode::OK, Json(serde_json::json!({"choices":[{"message":{"content":" "}}],"usage":{"seconds":2.5,"input_tokens":44,"output_tokens":3}})))
+        } else {
+            (StatusCode::OK, Json(serde_json::json!({"choices":[{"message":{"content":"已识别"}}]})))
+        }
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let (state, user, _, _) = fixture(DEFAULT_MAX_BYTES, None).await;
+    let upload = Upload { id: uuid::Uuid::new_v4().to_string(), name: "voice.m4a".into(),
+        mime_type: "audio/mp4".into(), size: 5, created_at: String::new(), uri: String::new() };
+    for model in ["known-duration", "unknown-duration", "provider-rejected"] {
+        let config = AsrConfig { endpoint: endpoint.clone(), api_key: None, model: model.into(),
+            protocol: asr::Protocol::Qwen, limits: asr::Limits::default() };
+        let result = asr::perform(&state, &user, &config, &upload, b"audio".to_vec()).await;
+        if model == "known-duration" { assert_eq!(result.unwrap_err().code, "no_speech"); }
+        else if model == "provider-rejected" { assert_eq!(result.unwrap_err().code, "asr_provider_unavailable"); }
+        else { assert_eq!(result.unwrap(), "已识别"); }
+    }
+    let outcomes: Vec<String> = sqlx::query_scalar("SELECT outcome_json FROM usage_requests WHERE user_id=$1")
+        .bind(&user).fetch_all(&state.pool).await.unwrap();
+    assert_eq!(outcomes.len(), 3);
+    let measured = outcomes.iter().map(|outcome| serde_json::from_str::<serde_json::Value>(outcome).unwrap()).collect::<Vec<_>>();
+    assert!(measured.iter().any(|value| value["measurements"]["audio_ms"] == 2500 && value["measurements"]["input_tokens"] == 44));
+    assert!(measured.iter().any(|value| value["status"] == "failed" && value["measurements"]["audio_ms"] == 4000 && value["measurements"]["input_tokens"] == 6));
+    assert!(measured.iter().any(|value| value["measurements"]["audio_ms"].is_null()), "unknown container duration stays unknown, regardless of its byte count");
+    server.abort();
+    remove_fixture(state).await;
 }
 
 #[tokio::test]
@@ -898,6 +943,8 @@ async fn asr_admission_rejects_duplicate_running_jobs_and_retains_failed_attempt
             .status,
         StatusCode::TOO_MANY_REQUESTS
     );
+    let dispatched: i64 = sqlx::query_scalar("SELECT count(*) FROM usage_requests").fetch_one(&state.pool).await.unwrap();
+    assert_eq!(dispatched, 0, "ASR quota admission is independent from actual provider dispatch");
     remove_fixture(state).await;
 }
 

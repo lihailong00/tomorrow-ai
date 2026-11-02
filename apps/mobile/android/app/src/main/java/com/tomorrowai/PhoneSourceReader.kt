@@ -15,12 +15,19 @@ import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Reads the entire authorized provider, in ID order. Batch size is never a total limit. */
+/** Establishes a baseline once; subsequent scans materialize only changed records. */
 internal class PhoneSourceReader(private val context: Context) {
   companion object {
     val sources = listOf("contacts", "calendar", "sms", "photos")
     const val BATCH_SIZE = 250
     const val PAGE_SIZE = 50
+    fun watchUri(source: String): Uri = when (source) {
+      "contacts" -> ContactsContract.AUTHORITY_URI
+      "calendar" -> CalendarContract.CONTENT_URI
+      "sms" -> Telephony.Sms.CONTENT_URI
+      "photos" -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+      else -> throw IllegalArgumentException("未知手机资料来源")
+    }
     fun normalizeCalendarRecord(value: JSONObject): JSONObject {
       val raw = value.optJSONObject("raw")
       val status = if (raw == null) "unknown" else PhoneSourcePolicy.calendarStatus(
@@ -68,24 +75,57 @@ internal class PhoneSourceReader(private val context: Context) {
   }
 
   data class Record(val id: Long, val value: JSONObject)
-  fun batch(source: String, after: Long, upper: Long): List<Record> {
+  /** Contacts/media expose revisions. SMS/calendar require fingerprint checking,
+   * but only after a change notification or the low-frequency reconciliation. */
+  fun revisions(source: String, after: Long, upper: Long): Map<Long, String> {
+    val projection = when (source) {
+      "contacts" -> arrayOf("_id", ContactsContract.Contacts.CONTACT_LAST_UPDATED_TIMESTAMP)
+      "photos" -> if (Build.VERSION.SDK_INT >= 30) arrayOf("_id", MediaStore.MediaColumns.GENERATION_MODIFIED)
+        else arrayOf("_id", "date_modified", "_size", "_display_name", "width", "height", "datetaken")
+      else -> null
+    }
+    val rawRows = queryRows(source, projection, "_id>? AND _id<=?", arrayOf(after.toString(), upper.toString()))
+    check(rawRows.all { it.first > after && it.first <= upper }) { "资料来源未按游标返回，请重试" }
+    val relatedRows = if (source == "calendar") calendarDetails(rawRows.map { it.first }) else emptyMap()
+    val mediaVersion = if (source == "photos" && Build.VERSION.SDK_INT >= 30)
+      MediaStore.getVersion(context) else ""
+    return rawRows.associate { (id, raw) ->
+      val revision = JSONObject().put("row", raw).put("mediaVersion", mediaVersion)
+      relatedRows.forEach { (name, rows) -> revision.put(name, rows[id] ?: JSONArray()) }
+      id to PhoneSourcePolicy.digest(revision.toString())
+    }
+  }
+
+  fun records(source: String, ids: List<Long>): List<Record> {
+    if (ids.isEmpty()) return emptyList()
+    val rows = queryRows(source, null, "_id IN (${ids.joinToString(",") { "?" }})",
+      ids.map { it.toString() }.toTypedArray())
+    check(rows.all { it.first in ids }) { "资料来源未按标识返回，请重试" }
+    return materialize(source, rows)
+  }
+
+  private fun queryRows(source: String, projection: Array<String>?, selection: String, args: Array<String>): List<Pair<Long, JSONObject>> {
     val rows = mutableListOf<Pair<Long, JSONObject>>()
-    context.contentResolver.query(uri(source), null, "_id>? AND _id<=?",
-      arrayOf(after.toString(), upper.toString()), "_id ASC")?.use { cursor ->
-      var previous = after
+    context.contentResolver.query(uri(source), projection, selection, args, "_id ASC")?.use { cursor ->
+      var previous = -1L
       while (rows.size < BATCH_SIZE && cursor.moveToNext()) {
         val id = cursor.getLong(cursor.getColumnIndexOrThrow("_id"))
-        check(id > previous && id <= upper) { "资料来源未按游标返回，请重试" }
+        check(id > previous) { "资料来源未按游标返回，请重试" }
         rows.add(id to fields(cursor))
         previous = id
       }
     } ?: throw IllegalStateException("资料来源暂时不可用")
+    return rows
+  }
+
+  private fun calendarDetails(ids: List<Long>): Map<String, Map<Long, JSONArray>> = mapOf(
+    "attendees" to related(CalendarContract.Attendees.CONTENT_URI, ids),
+    "reminders" to related(CalendarContract.Reminders.CONTENT_URI, ids),
+    "extendedProperties" to related(CalendarContract.ExtendedProperties.CONTENT_URI, ids))
+
+  private fun materialize(source: String, rows: List<Pair<Long, JSONObject>>): List<Record> {
     val details = if (source == "contacts") contactDetails(rows.map { it.first }) else emptyMap()
-    val calendarDetails = if (source == "calendar") mapOf(
-      "attendees" to related(CalendarContract.Attendees.CONTENT_URI, rows.map { it.first }),
-      "reminders" to related(CalendarContract.Reminders.CONTENT_URI, rows.map { it.first }),
-      "extendedProperties" to related(CalendarContract.ExtendedProperties.CONTENT_URI, rows.map { it.first })
-    ) else emptyMap()
+    val calendarDetails = if (source == "calendar") calendarDetails(rows.map { it.first }) else emptyMap()
     return rows.map { (id, raw) ->
       val value = JSONObject().put("id", "$source-$id").put("raw", raw)
         .put("uri", ContentUris.withAppendedId(uri(source), id).toString())
