@@ -37,6 +37,7 @@ export function messageReadingCharacters(message: Message): number {
   const cached = counts.get(message);
   if (cached !== undefined) return cached;
   const count = markdownBlocks(message.content).reduce((sum, block) => {
+    if (block.kind === 'code') return sum + readingCharacters(block.text);
     if (block.kind === 'table') return sum + [...block.headers, ...block.rows.flat()]
       .reduce((total, cell) => total + readingCharacters(markdownInlineText(cell)), 0);
     const heading = !block.code && /^(#{1,4})\s+(.+)$/.exec(block.text);

@@ -7,6 +7,7 @@ import { markdownBlocks, markdownInlineText, type MarkdownBlock } from './markdo
 
 import { LinkedText, LinkPreviewScope, DocumentLink } from './LinkPreview';
 import { markdownLinks } from './markdownLinks';
+import { NativeCodeBlock } from './NativeCodeBlock';
 
 function inline(value: string) { return markdownLinks(value).some(t => t.kind === 'link') ? <LinkedText value={value} /> : markdownInlineText(value); }
 
@@ -70,6 +71,7 @@ export function ResultText({ content, textStyle }: { content: string; textStyle?
   const blocks = useMemo(() => markdownBlocks(content), [content]);
   return <LinkPreviewScope blocks={blocks}><View style={{ gap: 7 }}>
     {blocks.map(block => {
+      if (block.kind === 'code') return <NativeCodeBlock key={`code:${block.line}`} block={block} />;
       if (block.kind === 'table') return <NativeMarkdownTable key={`table:${block.line}`} table={block} textStyle={textStyle} />;
       const { text: line, code } = block;
       if (!line.trim()) return <View key={`line:${block.line}`} style={{ height: 4 }} />;

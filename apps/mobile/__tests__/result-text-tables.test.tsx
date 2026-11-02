@@ -1,5 +1,5 @@
 import React from 'react';
-import { Dimensions, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Dimensions, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { ResultText } from '../src/ui/ResultText';
 
@@ -53,17 +53,20 @@ test('escaped delimiters and balanced single/double backtick spans do not create
 test('fenced table examples remain selectable literal code and never become native tables', async () => {
   const tree = await render('```markdown\n| **原样** | B |\n| --- | --- |\n| x | y |\n# 原样标题\n```\n# 真正标题\n- 正文项目');
   expect(tables(tree)).toHaveLength(0);
-  expect(texts(tree)).toEqual(expect.arrayContaining(['| **原样** | B |', '# 原样标题', '真正标题', '• 正文项目']));
-  const code = tree.root.findAllByType(Text).find(node => node.props.children === '# 原样标题')!;
-  expect(StyleSheet.flatten(code.props.style).fontFamily).toBe('monospace');
+  expect(texts(tree)).toEqual(expect.arrayContaining(['真正标题', '• 正文项目']));
+  const code = tree.root.findAllByType(Text).find(node => node.props.testID === 'code-card-source')!;
+  const literal = (value: any): string => Array.isArray(value) ? value.map(literal).join('') : typeof value === 'string' ? value : value?.props ? literal(value.props.children) : '';
+  expect(literal(code.props.children)).toBe('| **原样** | B |\n| --- | --- |\n| x | y |\n# 原样标题');
+  expect(StyleSheet.flatten(code.props.style).fontFamily).toBe(Platform.OS === 'ios' ? 'Menlo' : 'monospace');
   expect(code.props.selectable).toBe(true);
 });
 
 test('fence closing uses the matching character and sufficient run length', async () => {
   const tree = await render('~~~~\n```\n| A | B |\n| --- | --- |\n~~~\n~~~~\n| A | B |\n| --- | --- |\n| 1 | 2 |');
   expect(tables(tree)).toHaveLength(1);
-  expect(texts(tree)).toContain('```');
-  expect(texts(tree)).toContain('~~~');
+  const code = tree.root.findAllByType(Text).find(node => node.props.testID === 'code-card-source')!;
+  const literal = (value: any): string => Array.isArray(value) ? value.map(literal).join('') : typeof value === 'string' ? value : value?.props ? literal(value.props.children) : '';
+  expect(literal(code.props.children)).toBe('```\n| A | B |\n| --- | --- |\n~~~');
   expect(bodyRows(tree)).toHaveLength(1);
 });
 
