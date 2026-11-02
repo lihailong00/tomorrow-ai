@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Pressable,
@@ -22,6 +22,8 @@ import { colors } from '../ui/theme';
 import { AssistantOrb, Icon } from '../ui/visuals';
 import { platform } from '../platform/ports';
 import { MemoryHome } from '../features/memory/MemoryHome';
+import { ResultText } from '../ui/ResultText';
+import { briefingPreview } from '../ui/briefingPreview';
 
 type IconName = React.ComponentProps<typeof Icon>['name'];
 const accent = colors.accent;
@@ -307,6 +309,7 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
   const data = useResource(() => api.today(), [api, revision]);
   const action = useAction();
   const [briefExpanded, setBriefExpanded] = useState(false);
+  const briefPreview = useMemo(() => briefingPreview(data.value?.briefing ?? ''), [data.value?.briefing]);
   const refreshHome = data.refresh;
   // A foreground identity check may cancel the initial read. Let all synchronous
   // guard invalidation listeners run before queuing another guarded GET.
@@ -406,17 +409,27 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
                 <Icon name="arrowRight" size={13} color={secondary} />
               </Pressable>
             </View>
-            <Text
-              selectable
-              style={v.briefText}
-              numberOfLines={briefExpanded ? undefined : 5}
-            >
-              {data.value.briefing ||
-                '还没有生成简报。添加任务或记忆后，可以在这里整理今天的重点。'}
-            </Text>
+            {data.value.briefing.trim() ? (
+              briefExpanded ? (
+                <View testID="home-briefing-markdown">
+                  <ResultText content={data.value.briefing} textStyle={v.briefText} />
+                </View>
+              ) : (
+                <Text testID="home-briefing-preview" selectable style={v.briefText} numberOfLines={5}>
+                  {briefPreview}
+                </Text>
+              )
+            ) : (
+              <Text style={v.briefText}>
+                还没有生成简报。添加任务或记忆后，可以在这里整理今天的重点。
+              </Text>
+            )}
             {Boolean(data.value.briefing.trim()) && (
               <Pressable
                 accessibilityRole="button"
+                accessibilityLabel={briefExpanded ? '收起今日简报' : '展开今日简报'}
+                accessibilityState={{ expanded: briefExpanded }}
+                testID="home-briefing-toggle"
                 onPress={() => setBriefExpanded(old => !old)}
                 style={v.expandBrief}
               >

@@ -94,7 +94,7 @@ async function setup() {
     async update(message = reply) { data = [question, message]; await act(async () => tree.update(render())); },
     async commit(height: number) { measure(height); await act(async () => list().props.onCommitLayoutEffect()); },
     async jump() { await act(async () => tree.root.findByProps({ testID: 'chat-unread-jump' }).props.onPress()); },
-    count() { return tree.root.findAllByProps({ testID: 'chat-unread-count' })
+    label() { return tree.root.findAllByProps({ testID: 'chat-unread-label' })
       .find(node => typeof node.props.children === 'string')?.props.children; },
     async owner() { viewport = createMessageViewport(); version = 0;
       await act(async () => tree.update(render())); },
@@ -126,15 +126,16 @@ test('partial unread counts require real current native line positions; unmeasur
   expect(unreadReadingCharacters(reply, row, '360:1', frame, 24, 144)).toBeNull();
 });
 
-test('real line callbacks update the compact badge as native scroll positions change without repainting messages', async () => {
+test('native reading updates keep one plain new-content label without repainting messages', async () => {
   const app = await setup();
   await app.layout(); await app.native(0); await app.textLayout(reply.content);
   expect(app.viewport.followTail).toBe(false);
   await app.native(124, true);
-  expect(app.count()).toBe('2字');
+  expect(app.label()).toBe('新内容');
+  expect(app.tree.root.findAllByProps({ testID: 'chat-unread-count' })).toHaveLength(0);
   const rendered = app.renderItem.mock.calls.length;
-  await app.native(144, true); expect(app.count()).toBe('4字');
-  await app.native(124, true); expect(app.count()).toBe('2字');
+  await app.native(144, true); expect(app.label()).toBe('新内容');
+  await app.native(124, true); expect(app.label()).toBe('新内容');
   expect(app.renderItem).toHaveBeenCalledTimes(rendered);
 });
 
@@ -149,9 +150,9 @@ test('streaming at native zero retains the same old-text location, even without 
   expect(app.viewport.followTail).toBe(false);
 });
 
-test('jump is one-shot; later text preserves the new reading position and completion leaves only the arrow', async () => {
+test('reading one step is one-shot and unread content remains available after completion', async () => {
   const app = await setup(); await app.layout(); await app.native(0); await app.textLayout(reply.content);
-  await app.native(144, true); expect(app.count()).toBe('4字');
+  await app.native(144, true); expect(app.label()).toBe('新内容');
   await app.jump();
   expect(app.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 0, animated: false });
   await app.native(0);
@@ -159,25 +160,29 @@ test('jump is one-shot; later text preserves the new reading position and comple
   const extended = { ...reply, content: reply.content + '十一十二' };
   await app.update(extended); await app.commit(260); await app.textLayout(extended.content);
   expect(app.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 60, animated: false });
-  await app.native(60);
+  await app.native(60); await app.native(200, true);
+  expect(app.label()).toBe('新内容');
   const position = app.viewport.y;
   app.engine().scrollToOffset.mockClear();
   await app.update({ ...extended, stream_status: undefined });
-  expect(app.count()).toBeUndefined();
-  expect(app.tree.root.findByProps({ testID: 'chat-unread-jump' }).props.accessibilityLabel).toBe('回到最新内容');
+  expect(app.label()).toBe('新内容');
+  expect(app.tree.root.findByProps({ testID: 'chat-unread-jump' }).props.accessibilityLabel).toBe('有新内容，继续往下阅读一屏');
   expect(app.viewport.y).toBe(position);
   expect(app.engine().scrollToOffset).not.toHaveBeenCalled();
+  await app.native(0, true);
+  expect(app.tree.root.findAllByProps({ testID: 'chat-unread-jump' })).toHaveLength(0);
 });
 
-test('unknown partial layout shows a navigation arrow rather than a fabricated character count', async () => {
+test('unknown partial layout shows a plain hint without fabricating a number', async () => {
   const app = await setup(); await app.layout(); await app.native(144, true);
-  expect(app.count()).toBeUndefined();
-  expect(app.tree.root.findByProps({ testID: 'chat-unread-jump' }).props.accessibilityLabel).toBe('回到最新内容');
+  expect(app.label()).toBe('新内容');
+  expect(app.tree.root.findAllByProps({ testID: 'chat-unread-count' })).toHaveLength(0);
+  expect(app.tree.root.findByProps({ testID: 'chat-unread-jump' }).props.accessibilityLabel).toBe('有新内容，继续往下阅读一屏');
 });
 
 test('FlashList measurement copies cannot replace the visible reply measurements', async () => {
   const app = await setup(); await app.layout(); await app.native(0); await app.textLayout(reply.content);
-  await app.native(144, true); expect(app.count()).toBe('4字');
+  await app.native(144, true); expect(app.label()).toBe('新内容');
   let measurement!: ReactTestRenderer;
   await act(async () => {
     measurement = create(app.list().props.renderItem({ item: reply, index: 0, target: 'Measurement' }));
@@ -185,7 +190,7 @@ test('FlashList measurement copies cannot replace the visible reply measurements
   trees.add(measurement);
   const copy = measurement.root.findAllByType(Text).find(node => node.props.children === reply.content)!;
   expect(copy.props.onTextLayout).toBeUndefined();
-  await app.native(124, true); expect(app.count()).toBe('2字');
+  await app.native(124, true); expect(app.label()).toBe('新内容');
 });
 
 test('a width or font change waits for new native lines before measuring the new geometry', async () => {
@@ -217,6 +222,45 @@ test('late native text and scroll callbacks cannot leak counts into a different 
     previous({ nativeEvent: { lines: [{ text: '旧账号内容', y: 0, height: 20 }] } });
     mockMeasurements.splice(0).forEach(measured => measured());
   });
-  expect(app.count()).toBeUndefined();
+  expect(app.label()).toBeUndefined();
   expect(app.viewport.anchor).toBeNull();
+});
+
+test('new-content action moves only part of a screen from deep history, never straight to the end', async () => {
+  const app = await setup(); await app.layout(1200); await app.native(0);
+  await app.native(1240, true);
+  expect(app.label()).toBe('新内容');
+  app.engine().scrollToOffset.mockClear();
+  await app.jump();
+  expect(app.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 1039, animated: false });
+  expect(app.viewport.followTail).toBe(false);
+  await app.native(1039);
+  expect(app.viewport.y).toBe(1039);
+});
+
+test('text arriving before a reading step settles translates the intended screen instead of chasing the tail', async () => {
+  const app = await setup(); await app.layout(1200); await app.native(0);
+  await app.native(1240, true); await app.jump();
+  expect(app.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 1039, animated: false });
+  // The older question is our visible reference. Its top moves by the reply's growth.
+  const extended = { ...reply, content: reply.content + '十一十二' };
+  await app.update(extended); await app.commit(1260);
+  expect(app.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 1099, animated: false });
+  await app.native(1099);
+  expect(app.viewport.followTail).toBe(false);
+  expect(app.viewport.y).toBe(1099);
+});
+
+test('a drag cancels a pending reading step and late retired controls cannot navigate another chat', async () => {
+  const app = await setup(); await app.layout(1200); await app.native(0);
+  await app.native(1240, true);
+  const retired = app.tree.root.findByProps({ testID: 'chat-unread-jump' }).props.onPress;
+  await app.jump(); await app.native(1100, true);
+  app.engine().scrollToOffset.mockClear();
+  await app.commit(1200);
+  expect(app.engine().scrollToOffset).not.toHaveBeenCalled();
+  await app.owner();
+  app.engine().scrollToOffset.mockClear();
+  await act(async () => retired());
+  expect(app.engine().scrollToOffset).not.toHaveBeenCalled();
 });

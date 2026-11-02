@@ -14,7 +14,7 @@ import type { Message } from '../domain/types';
 import { Text } from '../ui/Text';
 import { Icon } from '../ui/visuals';
 import { chatAppearance } from '../ui/ChatAppearance';
-import { ChatReadingRow, formatReadingCharacters, isReadingStream, unreadReadingCharacters,
+import { ChatReadingRow, isReadingStream, unreadReadingCharacters,
   type ReadingRegistry } from '../ui/ChatReadingMetrics';
 import {
   messageAnchorInset,
@@ -36,7 +36,10 @@ type Props = {
   contentContainerStyle: StyleProp<ViewStyle>;
 };
 type ScrollPacket = Parameters<NonNullable<ScrollViewProps['onScroll']>>[0];
-type Destination = { anchor: MessageAnchor } | { latest: true };
+type Destination = { anchor: MessageAnchor } | { latest: true } | {
+  offset: number;
+  reference?: { id: string; top: number; height: number; message: Message };
+};
 const separators = { highlight() {}, unhighlight() {}, updateProps() {} };
 const maintainVisibleContentPosition = { disabled: false };
 // Inverted short collections put this SDK adjustment on the visual bottom,
@@ -156,15 +159,22 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     if (!valid()) return;
     const engine = list.current;
     const offset = observed.current ?? viewport.y;
-    const streamIndex = current.current.streamIndex;
-    const stream = current.current.messages[streamIndex];
-    const streamKey = stream ? messageRowKey(stream) : null;
-    const unread = observed.current !== null && engine && stream ? unreadReadingCharacters(stream,
-      registry.rows.get(messageRowKey(stream)), layoutKey, engine.getLayout(streamIndex),
-      engine.getFirstItemOffset(), offset) : null;
     const previous = readingState.getSnapshot();
-    readingState.update({ offset, streamKey, unread: stream && unread === null && streamKey === previous.streamKey
-      ? previous.unread : unread });
+    const activeIndex = current.current.streamIndex;
+    // A completed reply can still have unread text below the reader. Keep its
+    // identity until the reader reaches it instead of removing the hint on done.
+    const readingIndex = activeIndex >= 0 ? activeIndex : offset > 2 && previous.streamKey
+      ? current.current.messages.findIndex(item => messageRowKey(item) === previous.streamKey) : -1;
+    const reply = current.current.messages[readingIndex];
+    const streamKey = reply ? messageRowKey(reply) : null;
+    const unread = observed.current !== null && engine && reply ? unreadReadingCharacters(reply,
+      registry.rows.get(messageRowKey(reply)), layoutKey, engine.getLayout(readingIndex),
+      engine.getFirstItemOffset(), offset) : null;
+    const retainedUnread = reply && unread === null && streamKey === previous.streamKey
+      ? previous.unread : unread;
+    readingState.update({ offset,
+      streamKey: activeIndex < 0 && retainedUnread === 0 ? null : streamKey,
+      unread: retainedUnread });
   }, [layoutKey, readingState, registry, valid, viewport]);
   registry.notify = refreshReading;
 
@@ -215,10 +225,26 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
 
   const destinationOffset = useCallback((destination: Destination) => {
     if ('latest' in destination) return 0;
+    if ('offset' in destination) {
+      let offset = destination.offset;
+      const reference = destination.reference;
+      if (reference) {
+        const engine = list.current;
+        const index = current.current.messages.findIndex(item => messageRowKey(item) === reference.id);
+        const row = index >= 0 ? engine?.getLayout(index) : undefined;
+        if (!engine || !row?.isHeightMeasured) return null;
+        offset += engine.getFirstItemOffset() + row.y - reference.top;
+        const message = current.current.messages[index];
+        if (message.role === 'assistant' && message.content.length > reference.message.content.length &&
+          message.content.startsWith(reference.message.content)) offset += row.height - reference.height;
+      }
+      return Math.max(0, Math.min(offset,
+        Math.max(0, metrics.current.contentHeight - metrics.current.height)));
+    }
     const engine = list.current;
     const index = current.current.messages.findIndex(item =>
       messageRowKey(item) === destination.anchor.id);
-    const row = index >= 0 && engine?.getLayout(index);
+    const row = index >= 0 ? engine?.getLayout(index) : undefined;
     if (!engine || !row || !row.isHeightMeasured || metrics.current.height <= 0)
       return null;
     const requested = engine.getFirstItemOffset() + row.y + messageAnchorInset(
@@ -261,7 +287,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
         }
       }
     }
-    const anchor = target.current && 'latest' in target.current ? null
+    const anchor = target.current && ('latest' in target.current || 'offset' in target.current) ? null
       : target.current && 'anchor' in target.current ? target.current.anchor : viewport.anchor;
     const index = anchor ? messages.findIndex(item => messageRowKey(item) === anchor.id) : -1;
     const row = index >= 0 ? list.current?.getLayout(index) : undefined;
@@ -375,7 +401,28 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
   const inverted = messages.length > 0;
   const firstItem = useMemo(() => <View>{inverted ? footer : header}</View>,
     [footer, header, inverted]);
-  const streaming = streamIndex >= 0;
+  const readNext = () => {
+    if (!valid() || metrics.current.height <= 0) return;
+    interacting.current = false;
+    viewport.followTail = followTail.current = false;
+    // Keep some of the previous screen for context. The inverted list moves
+    // toward newer text by decreasing its native offset, never by chasing zero.
+    const offset = Math.max(0, (observed.current ?? viewport.y) - metrics.current.height * 0.67);
+    const anchor = observedAnchor.current ?? viewport.anchor;
+    const index = anchor ? current.current.messages.findIndex(item => messageRowKey(item) === anchor.id) : -1;
+    const engine = list.current;
+    const row = index >= 0 ? engine?.getLayout(index) : undefined;
+    // Appended text can grow before the native command arrives. Translate the
+    // requested page by the same measured growth, preserving its reading intent.
+    const reference = anchor && engine && row?.isHeightMeasured ? {
+      id: anchor.id, top: engine.getFirstItemOffset() + row.y,
+      height: row.height, message: current.current.messages[index],
+    } : undefined;
+    target.current = { offset, reference };
+    viewport.pendingAppendAnchor = null;
+    command.current = null;
+    restore();
+  };
   const jumpToLatest = () => {
     if (!valid()) return;
     interacting.current = false;
@@ -431,37 +478,36 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     onMomentumScrollEnd={finishInteraction}
     scrollEventThrottle={16}
     />
-    <UnreadIndicator state={readingState} streaming={streaming} jump={jumpToLatest} />
+    <UnreadIndicator state={readingState} next={readNext} jump={jumpToLatest} />
   </View>;
 }
 
-function UnreadIndicator({ state, streaming, jump }: {
-  state: ReturnType<typeof createReadingState>; streaming: boolean; jump: () => void;
+function UnreadIndicator({ state, next, jump }: {
+  state: ReturnType<typeof createReadingState>; next: () => void; jump: () => void;
 }) {
   const reading = useSyncExternalStore(state.subscribe, state.getSnapshot, state.getSnapshot);
-  const showCount = streaming && reading.unread !== null && reading.unread > 0;
+  const hasNewContent = reading.streamKey !== null && (reading.unread === null || reading.unread > 0);
   return reading.offset > 2 ? <Pressable testID="chat-unread-jump"
       accessibilityRole="button"
-      accessibilityLabel={showCount ? `下方还有${reading.unread}字，跳到最新内容` : '回到最新内容'}
-      onPress={jump}
-      style={[readingStyles.jump, !showCount && readingStyles.circle]}>
-      <View style={readingStyles.arrow}><Icon name="arrowUp" size={17} color={chatAppearance.accent} /></View>
-      {showCount && <Text testID="chat-unread-count" style={readingStyles.count}>
-        {formatReadingCharacters(reading.unread!)}
-      </Text>}
+      accessibilityLabel={hasNewContent ? '有新内容，继续往下阅读一屏' : '回到最新内容'}
+      hitSlop={4}
+      onPress={hasNewContent ? next : jump}
+      style={[readingStyles.jump, !hasNewContent && readingStyles.circle]}>
+      {hasNewContent && <Text testID="chat-unread-label" style={readingStyles.label}>新内容</Text>}
+      <View style={readingStyles.arrow}><Icon name="arrowUp" size={16} color={chatAppearance.accent} /></View>
     </Pressable> : null;
 }
 
 const readingStyles = StyleSheet.create({
   container: { flex: 1, minHeight: 0 },
-  jump: { position: 'absolute', right: 16, bottom: 14, minHeight: 44, minWidth: 44,
-    paddingHorizontal: 14, paddingVertical: 9, borderRadius: 24,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
+  jump: { position: 'absolute', right: 16, bottom: 14, minHeight: 40, minWidth: 40,
+    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 21,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5,
     backgroundColor: chatAppearance.surface, borderWidth: StyleSheet.hairlineWidth,
     borderColor: chatAppearance.line, elevation: 3,
     shadowColor: chatAppearance.ink, shadowOpacity: 0.08, shadowRadius: 12,
     shadowOffset: { width: 0, height: 3 } },
-  circle: { width: 44, paddingHorizontal: 0 },
+  circle: { width: 40, paddingHorizontal: 0 },
   arrow: { transform: [{ rotate: '180deg' }] },
-  count: { color: chatAppearance.accent, fontSize: 13, lineHeight: 20, fontVariant: ['tabular-nums'] },
+  label: { color: chatAppearance.accent, fontSize: 12, lineHeight: 18 },
 });
