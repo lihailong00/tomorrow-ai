@@ -33,6 +33,7 @@ import {
   TasksScreen,
 } from './src/screens/Main';
 import { ChatScreen, ConversationsScreen, createChatEntryState } from './src/screens/Chat';
+import { CurrentConversationPin } from './src/features/conversations/CurrentConversationPin';
 import { UploadsScreen } from './src/screens/Uploads';
 import { IntegrationsScreen, type ConnectionBrowseState } from './src/features/integrations/IntegrationsScreen';
 import { CapabilitiesScreen } from './src/features/capabilities/CapabilitiesScreen';
@@ -351,6 +352,7 @@ function Application() {
   }
 
   let page: React.ReactNode;
+  let currentChatEntry: ReturnType<typeof createChatEntryState> | undefined;
   if (route.name === 'settings') {
     page = <SettingsScreen />;
   } else if (!preferences.onboarded) {
@@ -364,15 +366,17 @@ function Application() {
   } else {
     switch (route.name) {
       case 'chat':
+        currentChatEntry = getEntryState(scope => createChatEntryState(route.conversationId, route.prompt, scope));
         page = (
           <ChatScreen
             conversationId={route.conversationId}
             prompt={route.prompt}
-            entryState={getEntryState(scope => createChatEntryState(route.conversationId, route.prompt, scope))}
+            entryState={currentChatEntry}
             navigationActions={
               compactChatHeader ? (
                 <>
                   <IconButton label="返回" icon="back" onPress={back} />
+                  <CurrentConversationPin entryState={currentChatEntry} />
                   <IconButton
                     label="历史对话"
                     icon="history"
@@ -540,9 +544,10 @@ function Application() {
                   <Icon name="back" size={22} color={chatAppearance.ink} />
                 </Pressable>
                 <AssistantOrb size={32} />
-                <Text style={[s.wordmark, shell.brand]}>妥啦</Text>
+                <Text numberOfLines={1} style={[s.wordmark, shell.brand, {flexShrink:1}]}>妥啦</Text>
               </View>
               <View style={shell.chatHeaderActions}>
+                <CurrentConversationPin entryState={currentChatEntry} />
                 <Pressable accessibilityRole="button" accessibilityLabel="开启新对话" onPress={() => navigate({ name: 'chat' })} style={shell.chatHeaderButton}>
                   <Icon name="compose" size={21} color={chatAppearance.ink} />
                 </Pressable>

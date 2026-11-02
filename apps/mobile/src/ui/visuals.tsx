@@ -49,6 +49,8 @@ const paths = {
   search: 'M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0Zm-2 4 6 6',
   menu: 'M4 6h16M4 12h11M4 18h16',
   more: 'M5 12h.1M12 12h.1M19 12h.1',
+  pin: 'M8 3h8M9 3v7l-3 3v3h12v-3l-3-3V3M12 16v6',
+  pinOff: 'm3 3 18 18M8 3h8m-1 0v7l3 3v1M9 9v1l-3 3v3h9M12 16v6',
   copy: 'M9 8h11v13H9V8ZM5 16H3V3h12v2',
   edit: 'm15 4 5 5M4 20l4-1L21 6a2.1 2.1 0 0 0-3-3L5 16l-1 4Zm0 0h15',
   quote: 'M4 7h6v7H6c0 3-1 5-3 6M14 7h6v7h-4c0 3-1 5-3 6',

@@ -5,7 +5,6 @@ import {
   Image,
   Keyboard,
   Pressable,
-  RefreshControl,
   ScrollView,
   StyleSheet,
   TextInput,
@@ -25,7 +24,6 @@ import { UnifiedInputBar, UnifiedAttachmentMenu } from '../ui/UnifiedInputBar';
 import {
   Button,
   Card,
-  Empty,
   ErrorNotice,
   Loading,
 } from '../ui/components';
@@ -36,9 +34,10 @@ import { ChatVoiceOverlay } from '../ui/ChatVoiceOverlay';
 import { ChatVoiceRecovery } from '../ui/ChatVoiceRecovery';
 import { ChatDeleteConfirmation, ChatMessageActions, ChatTextSelection, type MessageAction, type MessageAnchor } from '../ui/ChatMessageActions';
 import { chatAppearance as appearance } from '../ui/ChatAppearance';
-import { colors as historyColors, styles as s } from '../ui/theme';
+import { styles as s } from '../ui/theme';
 import { AssistantOrb, Icon } from '../ui/visuals';
-import { ModeNotice, usePagedList } from './Main';
+import { ModeNotice } from './Main';
+export { ConversationsScreen } from '../features/conversations/ConversationsScreen';
 import { createMessageHistory, mergeMessageHistory } from './messageHistory';
 import { ChatMessageList } from './ChatMessageList';
 import { createChatStreamController, type ChatProgress, type ChatStreamController } from './chatStreamController';
@@ -1341,73 +1340,6 @@ const ChatMessage = memo(function ChatMessage({
   );
 });
 
-export function ConversationsScreen() {
-  const { api, navigate, formatDate } = useApp();
-  const data = usePagedList(offset => api.conversations({ offset, limit: 50 }), [api]);
-  return (
-    <ScrollView
-      refreshControl={
-        <RefreshControl
-          refreshing={data.loading && data.items.length > 0}
-          onRefresh={data.refresh}
-        />
-      }
-      contentContainerStyle={s.content}
-    >
-      <View style={chat.conversationsHeading}>
-        <View>
-          <Text style={chat.conversationsTitle}>对话记录</Text>
-          <Text style={chat.conversationsSubtitle}>
-            接着上次的想法，继续聊。
-          </Text>
-        </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="开启新对话"
-          style={chat.newConversation}
-          onPress={() => navigate({ name: 'chat' })}
-        >
-          <Icon name="plus" size={21} color={historyColors.accent} />
-        </Pressable>
-      </View>
-      <ErrorNotice message={data.error} retry={data.refresh} />
-      {data.loading && !data.items.length && <Loading />}
-      {data.items.length ? (
-          <View style={chat.conversationList}>
-            {data.items.map(item => (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={'继续对话：' + item.title}
-                key={item.id}
-                style={chat.conversationRow}
-                onPress={() =>
-                  navigate({ name: 'chat', conversationId: item.id })
-                }
-              >
-                <View style={s.fill}>
-                  <Text style={chat.conversationName} numberOfLines={2}>
-                    {item.title}
-                  </Text>
-                  <Text style={chat.conversationDate}>
-                    {formatDate(item.updated_at)}
-                  </Text>
-                </View>
-                <Icon name="chevronRight" size={18} color={historyColors.secondary} />
-              </Pressable>
-            ))}
-          </View>
-        ) : !data.loading && !data.error ? (
-          <Empty
-            symbol="✧"
-            title="还没有对话记录"
-            body="聊过的内容会保存在你的账号里。"
-          />
-        ) : null}
-      {data.hasMore && <Button variant="ghost" disabled={data.loading} onPress={data.loadMore}>{data.loading ? '正在加载…' : '加载更多对话'}</Button>}
-    </ScrollView>
-  );
-}
-
 const chat = StyleSheet.create({
   contextStrip: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: appearance.tint,
     borderLeftWidth: 3, borderLeftColor: appearance.accent, paddingVertical: 10, paddingLeft: 12, paddingRight: 8, marginBottom: 8, borderRadius: 12 },
@@ -1592,60 +1524,5 @@ const chat = StyleSheet.create({
     height: 44,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  conversationsHeading: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-    marginTop: 8,
-    marginBottom: 24,
-  },
-  conversationsTitle: {
-    fontSize: 25,
-    lineHeight: 35,
-    color: historyColors.ink,
-    fontWeight: '500',
-  },
-  conversationsSubtitle: {
-    fontSize: 12,
-    lineHeight: 20,
-    color: historyColors.secondary,
-    marginTop: 6,
-  },
-  newConversation: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: historyColors.blueLight,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  conversationList: {
-    backgroundColor: historyColors.surface,
-    borderRadius: 23,
-    overflow: 'hidden',
-  },
-  conversationRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    paddingHorizontal: 18,
-    paddingVertical: 18,
-    minHeight: 86,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderColor: historyColors.line,
-  },
-  conversationName: {
-    fontSize: 14,
-    lineHeight: 23,
-    color: historyColors.ink,
-    fontWeight: '500',
-  },
-  conversationDate: {
-    fontSize: 11,
-    lineHeight: 18,
-    color: historyColors.secondary,
-    marginTop: 5,
   },
 });
