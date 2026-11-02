@@ -28,6 +28,7 @@ export function DocumentLink({ source }: { source: WebSource }) {
 function sourceList(blocks: MarkdownBlock[]): WebSource[] {
   const found = new Map<string, WebSource>();
   for (const block of blocks) {
+    if (block.kind === 'code') continue;
     const strings = block.kind === 'table' ? [...block.headers, ...block.rows.flat()] : block.code ? [] : [block.text];
     for (const value of strings) for (const token of markdownLinks(value)) {
       if (token.kind !== 'link') continue;

@@ -2,6 +2,7 @@ import { linkDisplayText } from './markdownLinks';
 export type ColumnAlignment = 'left' | 'center' | 'right';
 export type MarkdownBlock =
   | { kind: 'line'; line: number; text: string; code: boolean }
+  | { kind: 'code'; line: number; language: string; text: string; closed: boolean }
   | { kind: 'table'; line: number; headers: string[]; alignments: ColumnAlignment[]; rows: string[][] };
 
 type PipeRow = { cells: string[]; hasPipe: boolean };
@@ -76,20 +77,28 @@ export function markdownInlineText(value: string): string {
 
 /** Parse only proven tables; a partial streamed separator remains ordinary text. */
 export function markdownBlocks(content: string): MarkdownBlock[] {
-  const lines = content.split(/\r?\n/);
+  const rawLines = content.split('\n');
+  const lines = rawLines.map(value => value.endsWith('\r') ? value.slice(0, -1) : value);
+  const offsets: number[] = [];
+  let offset = 0;
+  rawLines.forEach(value => { offsets.push(offset); offset += value.length + 1; });
   const blocks: MarkdownBlock[] = [];
-  let fence: { char: string; size: number } | null = null;
+  let fence: { char: string; size: number; line: number; start: number; language: string } | null = null;
   for (let line = 0; line < lines.length; line++) {
     const text = lines[line];
     const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(text);
     if (fence) {
       if (marker && marker[1][0] === fence.char && marker[1].length >= fence.size && !marker[2].trim()) {
+        blocks.push({ kind: 'code', line: fence.line, language: fence.language,
+          text: content.slice(fence.start, offsets[line]), closed: true });
         fence = null;
-      } else blocks.push({ kind: 'line', line, text, code: true });
+      }
       continue;
     }
     if (marker) {
-      fence = { char: marker[1][0], size: marker[1].length };
+      fence = { char: marker[1][0], size: marker[1].length, line,
+        start: Math.min(content.length, offsets[line] + rawLines[line].length + 1),
+        language: marker[2].trim().split(/\s/)[0].slice(0, 40) };
       continue;
     }
     const header = pipeRow(text);
@@ -118,5 +127,7 @@ export function markdownBlocks(content: string): MarkdownBlock[] {
       blocks.push(table);
     } else blocks.push({ kind: 'line', line, text, code: false });
   }
+  if (fence) blocks.push({ kind: 'code', line: fence.line, language: fence.language,
+    text: content.slice(fence.start), closed: false });
   return blocks;
 }

@@ -50,6 +50,8 @@ const paths = {
   menu: 'M4 6h16M4 12h11M4 18h16',
   more: 'M5 12h.1M12 12h.1M19 12h.1',
   copy: 'M9 8h11v13H9V8ZM5 16H3V3h12v2',
+  expand: 'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5',
+  code: 'm8 6-6 6 6 6m8-12 6 6-6 6m-3-16-2 20',
   edit: 'm15 4 5 5M4 20l4-1L21 6a2.1 2.1 0 0 0-3-3L5 16l-1 4Zm0 0h15',
   quote: 'M4 7h6v7H6c0 3-1 5-3 6M14 7h6v7h-4c0 3-1 5-3 6',
   select: 'M4 7V4h3m10 0h3v3M4 17v3h3m10 0h3v-3M8 8h8m-4 0v8m-3 0h6',
