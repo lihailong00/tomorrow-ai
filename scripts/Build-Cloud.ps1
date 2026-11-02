@@ -3,7 +3,8 @@ param(
     [string]$DockerContext = 'desktop-linux',
     [string]$OutputDirectory = 'artifacts/deploy/linux-x64',
     [string]$BuildProxy = '',
-    [ValidateRange(1, 16)][int]$CargoBuildJobs = 1,
+    # Use local CPU capacity by default; callers can choose fewer jobs on small hosts.
+    [ValidateRange(1, 16)][int]$CargoBuildJobs = [Math]::Max(1, [Math]::Min(12, [Environment]::ProcessorCount)),
     [switch]$ApiOnly
 )
 $ErrorActionPreference = 'Stop'
