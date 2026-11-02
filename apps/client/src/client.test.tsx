@@ -7,7 +7,7 @@ import {Chat, shouldSendOnEnter} from './Chat';
 import {CopyButton, Markdown} from './Markdown';
 import {ServerDialog} from './Auth';
 import {TodosView} from './Views';
-import {createPlatform, type Platform} from './platform';
+import {createPlatform, OFFICIAL_SERVER, serviceLabel, type Platform} from './platform';
 
 vi.mock('./platform', async importOriginal => ({...await importOriginal<typeof import('./platform')>(), createPlatform: vi.fn()}));
 vi.mock('@tanstack/react-virtual', () => ({useVirtualizer: (options: {count: number}) => ({
@@ -123,6 +123,18 @@ describe('聊天真实事件与重试', () => {
 });
 
 describe('服务选择与账号隔离', () => {
+  it('自定义地址即使清单声称 official，也不会显示官方服务标识', () => {
+    expect(serviceLabel('https://private.example.com', {...manifest, deployment_mode: 'official'})).toBe('自定义服务');
+    expect(serviceLabel(manifest.public_url, manifest)).toBe('自建服务');
+  });
+  it('仅已验证的官方地址显示官方服务，容忍正常化后的尾部 /v1', () => {
+    expect(serviceLabel(OFFICIAL_SERVER, manifest)).toBe('官方服务');
+    expect(serviceLabel(`${OFFICIAL_SERVER}/v1`, manifest)).toBe('官方服务');
+  });
+  it('尚未验证时不以官方服务作为默认状态', () => {
+    expect(serviceLabel(OFFICIAL_SERVER, null)).toBe('正在验证服务');
+    expect(serviceLabel('https://private.example.com', null)).toBe('正在验证服务');
+  });
   it('检查期间锁定地址，旧检查不会覆盖用户另一个地址', async () => {
     const pending = deferred<InstanceManifest>();
     vi.mocked(ApiClient.prototype.inspectInstance).mockReturnValue(pending.promise);

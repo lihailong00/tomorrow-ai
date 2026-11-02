@@ -1,4 +1,4 @@
-import {createDesktopTransport, createFetchTransport, type ClientTransport, type DesktopStreamEvent} from '@tada/client-core';
+import {createDesktopTransport, createFetchTransport, normalizeServerUrl, type ClientTransport, type DesktopStreamEvent, type InstanceManifest} from '@tada/client-core';
 
 export type Platform = {
   desktop: boolean;
@@ -43,6 +43,12 @@ export async function openExternal(input: string) {
 }
 
 export const OFFICIAL_SERVER = 'https://api.example.invalid';
+/** A custom server cannot confer official status through its own manifest. */
+export function serviceLabel(serverUrl: string, manifest: InstanceManifest | null): '官方服务' | '自建服务' | '自定义服务' | '正在验证服务' {
+  if (!manifest) return '正在验证服务';
+  try {if (normalizeServerUrl(serverUrl, true) === OFFICIAL_SERVER) return '官方服务';} catch {return '正在验证服务';}
+  return manifest.deployment_mode === 'self_hosted' ? '自建服务' : '自定义服务';
+}
 export type ServerChoice = {url: string; instanceId?: string; allowInsecureLan?: boolean; autoRestore?: boolean};
 const preferenceKey = 'tada.client.server.v1';
 export function readServerChoice(): ServerChoice {
