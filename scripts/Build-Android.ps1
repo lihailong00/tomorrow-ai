@@ -58,16 +58,15 @@ try {
     if ($value) { [Environment]::SetEnvironmentVariable($name, (Get-TadaFullPath $value), 'Process') }
   }
   Register-TadaStoragePaths -RepoPath $repoPath -AdditionalPaths $storagePaths -Lease $packagingLease
-  $storageBefore = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
-  Write-TadaStorageStatus -Usage $storageBefore -Phase 'before build' -EstimatedBuildBytes $EstimatedBuildBytes
-  if (($storageBefore.TotalBytes + $EstimatedBuildBytes) -ge $storageBefore.WarningBytes) {
-    $preCleanup = Invoke-TadaBuildCacheCleanup -RepoPath $repoPath -Lease $packagingLease -Phase Preflight -NativeBuildDirectory $NativeBuildDirectory -IncludeRustTarget:(-not $PreserveRustTarget)
-    Write-TadaCleanupStatus $preCleanup
-  }
   if ($NativeBuildDirectory) { Initialize-TadaNativeBuildDirectory -RepoPath $repoPath -NativeBuildDirectory $NativeBuildDirectory }
-  $storageReady = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
-  Write-TadaStorageStatus -Usage $storageReady -Phase 'ready' -EstimatedBuildBytes $EstimatedBuildBytes
-  # This is a planning estimate, not a claim to monitor or enforce peak usage.
+  $storageBefore = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
+  # 10 GB is a retained target after housekeeping, not a transient build cap.
+  # Keep warm caches for build speed; reclaim unused outputs only in finally.
+  $storageReady = $storageBefore
+  Write-Host ('Storage before build: {0:N2} GB measured ({1}); retained target after housekeeping: 10 GB. Temporary build usage may exceed the target.' -f ($storageBefore.TotalBytes / 1e9), $storageBefore.Status)
+  if ($storageBefore.Status -eq 'incomplete') { Write-Warning 'Some project paths could not be measured; see the final storage report for accounting limits.' }
+  Write-Verbose ('Estimated transient peak: {0:N2} GB; no pre-build cache cleanup or retained-target enforcement.' -f (($storageBefore.TotalBytes + $EstimatedBuildBytes) / 1e9))
+  # Enforce actual available disk space, not the retained-storage target.
   foreach ($driveRoot in (@($repoPath) + $storagePaths | ForEach-Object { [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($_)) } | Select-Object -Unique)) {
     $buildDrive = [IO.DriveInfo]::new($driveRoot)
     if ($EstimatedBuildBytes -gt 0 -and $buildDrive.AvailableFreeSpace -lt $EstimatedBuildBytes) {
@@ -253,6 +252,7 @@ try {
         schema_version=1; finished_at=[DateTimeOffset]::UtcNow.ToString('o'); build_succeeded=$buildSucceeded
         package_target=$packageTarget.Name; build_type=$BuildType; compact=[bool]$Compact; candidate=[bool]$Candidate; apk_path=$apkPath; mapping_path=$mappingPath; native_tests=$nativeTestSummary; package_contents=$packageContents; rust_target_preserved=[bool]$PreserveRustTarget
         budget_bytes=10000000000; warning_bytes=9000000000; estimated_build_bytes=$EstimatedBuildBytes
+        budget_scope='retained_after_housekeeping'; temporary_overage_allowed=$true; pre_cleanup_policy='deferred_until_build_finishes'
         actual_peak_bytes=$null; peak_note='Pre/post measurements only; temporary build peak is not continuously monitored.'
         before=$storageBefore; ready=$storageReady; after=$storageAfter
         pre_cleanup=$preCleanup; post_cleanup=$postCleanup; rust_cleanup=$rustCleanup; publication=$publication
@@ -264,7 +264,7 @@ try {
       Assert-TadaPlainPath $reportPath
       [IO.File]::WriteAllText($reportPath, (($report | ConvertTo-Json -Depth 12) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
       Write-Host ('Storage report: ' + $reportPath)
-      if ($storageAfter.TotalBytes -gt $storageAfter.BudgetBytes) { Write-Warning 'Safe cleanup finished, but the project still exceeds 10 GB. Required data and unrelated work were preserved.' }
+      if ($storageAfter.TotalBytes -gt $storageAfter.BudgetBytes) { Write-Warning 'Safe cleanup finished, but retained project storage remains above the 10 GB target. Required data and unrelated work were preserved; temporary build usage was allowed.' }
     } catch { Write-Warning ('Storage housekeeping/report could not finish: ' + $_.Exception.Message) }
     finally { $packagingLease.Stream.Dispose() }
   }

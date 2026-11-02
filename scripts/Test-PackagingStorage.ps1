@@ -550,9 +550,20 @@ try {
     if ([IO.File]::Exists($targetSelector)) {
       Copy-Item -LiteralPath $targetSelector -Destination (Join-Path $scriptDirectory 'Android-PackageTargets.ps1')
     }
-    # The build script is unchanged; only process inspection in the copied helper
-    # is deterministic so unrelated developer Gradle daemons cannot affect tests.
-    $helper = [IO.File]::ReadAllText($storageScript) + "`nfunction Get-TadaActiveBuildProcesses { return @() }`n"
+    # Keep cleanup process inspection deterministic and simulate a temporary
+    # >10 GB total without allocating large files or touching real build caches.
+    $helper = [IO.File]::ReadAllText($storageScript) + @'
+
+function Get-TadaActiveBuildProcesses { return @() }
+$script:FixtureRealStorageUsage = (Get-Command Get-TadaStorageUsage).ScriptBlock
+function Get-TadaStorageUsage {
+  param([string]$RepoPath, [string[]]$AdditionalPaths = @())
+  $usage = & $script:FixtureRealStorageUsage -RepoPath $RepoPath -AdditionalPaths $AdditionalPaths
+  $usage.TotalBytes = 11000000000
+  $usage.Status = 'over_budget'
+  return $usage
+}
+'@
     Write-Fixture (Join-Path $scriptDirectory 'Project-Storage.ps1') $helper
     $apkDirectory = Join-Path $directory 'artifacts/apk'
     New-Item -ItemType Directory -Path $apkDirectory -Force | Out-Null
@@ -563,10 +574,14 @@ try {
     $before = Published-State $apkDirectory
     $cache = Join-Path $directory 'apps/mobile/android/app/build/generated.bin'
     Write-Fixture $cache 'failed-build-cache'
+    $rustCache = Join-Path $directory 'target/reusable-cache.bin'
+    Write-Fixture (Join-Path $directory 'target/CACHEDIR.TAG') 'Signature: 8a477f597d28d172789f06886806bc55'
+    Write-Fixture $rustCache 'preserve-for-parallel-rust-build'
     Write-Fixture (Join-Path $directory '.env') 'keep-private-fixture'
     $node = Join-Path $directory 'fake-tools/node-fails.ps1'
     Write-Fixture $node @'
-$observed = [ordered]@{ gradle=$env:GRADLE_USER_HOME; cargo=$env:CARGO_TARGET_DIR }
+$observed = [ordered]@{ gradle=$env:GRADLE_USER_HOME; cargo=$env:CARGO_TARGET_DIR
+  cache_present_at_compile=[IO.File]::Exists((Join-Path $PSScriptRoot '../apps/mobile/android/app/build/generated.bin')) }
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'observed-env.json'), ($observed | ConvertTo-Json))
 exit 42
 '@
@@ -583,7 +598,7 @@ exit 42
     $env:CARGO_TARGET_DIR = 'relative-cargo-cache'
     Set-Location -LiteralPath $directory
     try {
-      Assert-Throws { & $buildCopy -NodePath $node -JavaHome $java -AndroidHome $sdk -NativeBuildDirectory '../build-integration-native' -SkipInstall -EstimatedBuildBytes 0 } 'Simulated TypeScript failure was not reported.'
+      Assert-Throws { & $buildCopy -NodePath $node -JavaHome $java -AndroidHome $sdk -NativeBuildDirectory '../build-integration-native' -SkipInstall -PreserveRustTarget -EstimatedBuildBytes 0 } 'Simulated TypeScript failure was not reported.'
       Assert-Equal (Get-Location).Path $directory 'Build failure did not restore its entry working directory'
       Assert-Equal $env:GRADLE_USER_HOME 'relative-gradle-cache' 'Relative Gradle environment was not restored after failure'
       Assert-Equal $env:CARGO_TARGET_DIR 'relative-cargo-cache' 'Relative Cargo environment was not restored after failure'
@@ -603,10 +618,17 @@ exit 42
     Assert-True (-not $buildReport.build_succeeded) 'Failed build report claimed success.'
     Assert-Equal $buildReport.post_cleanup.Phase 'Failure' 'Build failure used wrong cleanup phase'
     Assert-True ($null -ne $buildReport.before -and $null -ne $buildReport.after) 'Pre/post measurements missing from report.'
+    Assert-Equal $buildReport.before.TotalBytes 11000000000 'Over-target temporary usage fixture was not exercised.'
+    Assert-True ($null -eq $buildReport.pre_cleanup) 'Build ran a budget-triggered preflight cleanup.'
+    Assert-Equal $buildReport.budget_scope 'retained_after_housekeeping' '10 GB target scope missing.'
+    Assert-True $buildReport.temporary_overage_allowed 'Temporary build overage was not allowed.'
+    Assert-True $buildReport.rust_target_preserved 'PreserveRustTarget was not recorded.'
+    Assert-True ([IO.File]::Exists($rustCache)) 'PreserveRustTarget did not retain the reusable Rust cache.'
     $registered = Get-Content -LiteralPath (Join-Path $directory '.tada-storage.local.json') -Raw | ConvertFrom-Json
     Assert-True (@($registered.additional_measure_paths) -icontains $native) 'Relative native path was not normalized before changing working directory.'
     Assert-True (-not [IO.Directory]::Exists($native)) 'Relative native output was not reclaimed at its original resolved path.'
     $observed = Get-Content -LiteralPath (Join-Path $directory 'fake-tools/observed-env.json') -Raw | ConvertFrom-Json
+    Assert-True $observed.cache_present_at_compile 'Warm Android cache was purged before compilation solely because usage exceeded 10 GB.'
     Assert-Equal $observed.gradle (Join-Path $directory 'relative-gradle-cache') 'Gradle command would use another unaccounted relative cache'
     Assert-Equal $observed.cargo (Join-Path $directory 'relative-cargo-cache') 'Cargo command would use another unaccounted relative cache'
     Assert-Equal (Get-Location).Path $oldLocation 'Build failure did not restore working directory'
