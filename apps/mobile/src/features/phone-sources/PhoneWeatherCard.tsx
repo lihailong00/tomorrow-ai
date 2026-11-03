@@ -109,7 +109,7 @@ function WeatherForOwner({ storageKey }: { storageKey: string }) {
         setError(
           '天气暂时不可用：' +
             errorMessage(failure) +
-            '。需要服务器配置高德 Web 服务，并支持天气查询。',
+            '。请在「连接应用 → 高德地图」配置你自己的 Web 服务 Key，并确认已开通天气查询。',
         );
     } finally {
       owner.pending = false;
@@ -129,8 +129,8 @@ function WeatherForOwner({ storageKey }: { storageKey: string }) {
     <Card style={{ marginTop: 16 }}>
       <Text style={s.cardTitle}>天气与出行</Text>
       <Text style={[s.small, s.topGap]}>
-        选择常用城市即可；不需要定位权限。城市将通过当前服务器交给高德查询，普通用户无需填写
-        Key。
+        选择常用城市即可；不需要定位权限。城市将通过当前服务器使用你在高德连接页保存的
+        Key 查询天气。
       </Text>
       {value && (
         <>

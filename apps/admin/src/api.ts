@@ -34,6 +34,9 @@ export type UsagePriceModel = {
   provider: string;
   capabilities: ("llm" | "asr" | "vision" | "embedding")[];
   rates: UsageRates;
+  rates_source?: "official" | "custom" | "unconfigured";
+  preset_version?: string | null;
+  preset_source_url?: string | null;
 };
 export type UsagePricing = {
   revision: number;

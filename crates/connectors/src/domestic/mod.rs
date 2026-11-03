@@ -128,7 +128,6 @@ impl IntegrationState {
     fn configured(&self, item: &catalog::Integration) -> bool {
         match item.mode {
             "import" => true,
-            "map" => self.value("AMAP_WEB_API_KEY").is_some_and(|v| !v.trim().is_empty()),
             "oauth" => self.0.crypto.is_some() && self.oauth_provider(item.id).is_some(),
             _ => self.0.crypto.is_some(),
         }
@@ -137,7 +136,7 @@ impl IntegrationState {
         let mut items = Vec::new();
         for item in catalog::CATALOG {
             let configured = self.configured(item);
-            let connected = if configured && !matches!(item.mode, "import" | "map") {
+            let connected = if configured && item.mode != "import" {
                 self.account(user, item.id)
                     .await?
                     .is_some_and(|(_, encrypted)| {
@@ -154,7 +153,7 @@ impl IntegrationState {
                 "not_configured"
             } else if connected {
                 "connected"
-            } else if matches!(item.mode, "import" | "map") {
+            } else if item.mode == "import" {
                 "available"
             } else {
                 "not_connected"
@@ -163,10 +162,12 @@ impl IntegrationState {
             value["status"] = json!(status);
             value["required_configuration"] = json!(match item.mode {
                 "oauth" => oauth::required_configuration(item.id),
-                "map" => vec!["AMAP_WEB_API_KEY"],
                 "import" => vec![],
                 _ => vec!["CONNECTOR_ENCRYPTION_KEY"],
             });
+            if item.mode == "map" {
+                value["credential_scope"] = json!("user");
+            }
             items.push(value);
         }
         Ok(items)
@@ -357,7 +358,7 @@ impl IntegrationState {
     async fn connect(&self, user: &str, id: &str, value: Value) -> Result<Value> {
         let item = catalog::find(id)?;
         self.crypto()?;
-        if !matches!(item.mode, "mail" | "token")
+        if !matches!(item.mode, "mail" | "token" | "map")
             || serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > 12000)
         {
             return Err(ConnectorError::invalid());
@@ -471,15 +472,6 @@ impl IntegrationState {
             .await
             .unwrap_or_else(|_| Err(read_timeout()));
         }
-        if item.mode == "map" {
-            return timeout(READ_TIMEOUT, async {
-                self.admit(user).await?;
-                let _permit = self.0.requests.try_acquire().map_err(|_| busy())?;
-                providers::read_with_map_key(id, &json!({}), &query, self.value("AMAP_WEB_API_KEY").as_deref()).await
-            })
-            .await
-            .unwrap_or_else(|_| Err(read_timeout()));
-        }
         self.with_account_read(
             user,
             id,
@@ -506,7 +498,7 @@ impl IntegrationState {
                         }
                         result
                     }
-                    "token" => providers::read(id, &credentials, &query).await?,
+                    "token" | "map" => providers::read(id, &credentials, &query).await?,
                     _ => return Err(ConnectorError::invalid()),
                 };
                 Ok(result)
@@ -640,6 +632,7 @@ fn usable_credentials(mode: &str, id: &str, value: &Value) -> bool {
         }
         "token" if id == "wecom" => secret("corp_id") && secret("agent_secret"),
         "token" => secret("token"),
+        "map" => secret("web_api_key"),
         _ => false,
     }
 }
@@ -811,3 +804,6 @@ mod tests;
 
 #[cfg(test)]
 mod reconnect_tests;
+
+#[cfg(test)]
+mod amap_tests;

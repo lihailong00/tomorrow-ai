@@ -31,4 +31,9 @@ class VaultCryptoTest {
     assertThrows(Exception::class.java) { VaultCrypto.recoveryKey("123456") }
     assertThrows(Exception::class.java) { VaultCrypto.seal(VaultCrypto.newKey(), ByteArray(VaultCrypto.MAX_PLAIN_BYTES + 1)) }
   }
+  @Test fun recoveryAcceptsCopiedWhitespaceAndLowercaseWithoutChangingTheKey() {
+    val key = VaultCrypto.newKey()
+    val copied = " \t" + VaultCrypto.recovery(key).lowercase().replace("-", "-\r\n \t") + "\n"
+    assertArrayEquals(key, VaultCrypto.recoveryKey(copied))
+  }
 }

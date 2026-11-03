@@ -48,7 +48,10 @@ type Options = {
 
 /** A route-owned durable turn. Disconnects never mutate its original payload. */
 export function createChatStreamController(options: Options) {
+  const context = options.intent.client_context;
   const intent: ChatIntent = Object.freeze({ ...options.intent,
+    ...(context ? { client_context: Object.freeze({ ...context,
+      ...(context.location ? { location: Object.freeze({ ...context.location }) } : {}) }) } : {}),
     upload_ids: Object.freeze([...options.intent.upload_ids]) });
   let progress: ChatProgress = { sequence: -1, phase: 'sending', status: '发送中…', content: '' };
   let disposed = false;
@@ -124,6 +127,9 @@ export function createChatStreamController(options: Options) {
           removedMessageIds: Array.isArray(body.removed_message_ids) ? body.removed_message_ids : undefined,
           assistantCreatedAt: typeof body.message_created_at === 'string' ? body.message_created_at : undefined,
           assistantId: body.message_id, phase: 'replying', status: '正在回复…' });
+        break;
+      case 'text_start':
+        if (body.replace === true) publish({ content: '', phase: 'replying', status: '正在查询资料…' });
         break;
       case 'text_delta':
         if (typeof body.delta !== 'string') throw new ChatTransportError('invalid_response', '回复片段格式不正确。');

@@ -6,6 +6,7 @@ import { ReadingText } from './ChatReadingMetrics';
 import { Icon } from './visuals';
 import { codeLanguage, highlightCode, type CodeToken } from './codeHighlight';
 import type { MarkdownBlock } from './markdownBlocks';
+import { useMessageLongPress } from './MessageLongPress';
 
 type Block = Extract<MarkdownBlock, { kind: 'code' }>;
 type CodeRow = { index: number; text: string; tokens: CodeToken[] };
@@ -45,6 +46,7 @@ function Tool({ label, children, onPress, active, disabled, testID }: {
 
 /** Native text only. No HTML, browser, evaluator, provider request or syntax dependency. */
 export const NativeCodeBlock = memo(function NativeCodeBlock({ block }: { block: Block }) {
+  const onLongPress = useMessageLongPress();
   const { width, fontScale } = useWindowDimensions();
   const [wrap, setWrap] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -121,7 +123,7 @@ export const NativeCodeBlock = memo(function NativeCodeBlock({ block }: { block:
     <ScrollView testID="code-card-scroll" horizontal={!wrapping} nestedScrollEnabled
       showsHorizontalScrollIndicator={!wrapping && codeWidth > available + 1} style={css.cardScroll}>
       {rows.length ? <View style={wrapping ? { width: available } : { width: codeWidth }}>
-        <ReadingText testID="code-card-source" readingText={visibleSource} selectable maxFontSizeMultiplier={2.5}
+        <ReadingText testID="code-card-source" readingText={visibleSource} selectable={!onLongPress} onLongPress={onLongPress} maxFontSizeMultiplier={2.5}
           style={[css.codeText, css.cardSource, { fontSize, lineHeight }]}>
           {visible.map((row, index) => <React.Fragment key={row.index}>{index ? '\n' : ''}{paint(row.tokens)}</React.Fragment>)}
         </ReadingText>

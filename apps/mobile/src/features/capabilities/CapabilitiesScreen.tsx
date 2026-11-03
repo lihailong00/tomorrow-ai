@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Modal,
@@ -27,7 +27,13 @@ import { CloudConnection } from '../integrations/IntegrationsScreen';
 import { MailConnectionSheet } from '../integrations/MailConnection';
 import { healthApi } from '../health/api';
 import { personalMcpApi } from '../personal-mcp/api';
+import { PersonalMcpConnections } from '../personal-mcp/PersonalMcpConnections';
+import type { PersonalMcpConnection } from '../personal-mcp/types';
+import { readWalletMetadata } from '../personal-mcp/walletModel';
 import { PhoneSourcesEntry } from '../phone-sources/PhoneSourcesEntry';
+import { PhoneAlarmLauncher } from '../phone-alarms/PhoneAlarmCard';
+import { mentionsAlarm } from '../phone-alarms/alarmProposal';
+import { phoneAlarms } from '../../platform/phoneAlarms';
 import {
   buildHubEntries,
   capabilityAppearance as c,
@@ -86,6 +92,20 @@ export function CapabilitiesScreen() {
     [healthClient, revision],
   );
   const mcp = useResource(() => mcpClient.list(), [mcpClient, revision]);
+  const wallet = useResource(async () => readWalletMetadata(await api.request('/personal-wallet/alipay', 'GET', undefined, owner.controller.signal)), [api, owner, revision]);
+  const setMcpValue = mcp.setValue;
+  const receiveMcp = useCallback(
+    (item: PersonalMcpConnection) => {
+      if (!owner.active) return;
+      setMcpValue(previous => ({
+        items: [
+          ...(previous?.items || []).filter(value => value.id !== item.id),
+          item,
+        ],
+      }));
+    },
+    [owner, setMcpValue],
+  );
   const notifications = useResource(
     () => appInputs.getStatus(),
     [api, user?.id, revision],
@@ -117,7 +137,7 @@ export function CapabilitiesScreen() {
   const [opened, setOpened] = useState<string | null>(null);
   const [notice, setNotice] = useState('');
   const action = useAction();
-  const resources = [legacy, domestic, health, mcp, notifications, phone];
+  const resources = [legacy, domestic, health, mcp, wallet, notifications, phone];
   const refresh = () => resources.forEach(resource => resource.refresh());
   useEffect(
     () =>
@@ -126,6 +146,7 @@ export function CapabilitiesScreen() {
         domestic.refresh();
         health.refresh();
         mcp.refresh();
+        wallet.refresh();
         notifications.refresh();
         phone.refresh();
       }),
@@ -136,6 +157,7 @@ export function CapabilitiesScreen() {
       domestic.refresh,
       health.refresh,
       mcp.refresh,
+      wallet.refresh,
       notifications.refresh,
       phone.refresh,
     ],
@@ -147,6 +169,7 @@ export function CapabilitiesScreen() {
         integrations: domestic.value?.items,
         health: health.value ?? undefined,
         mcp: mcp.value?.items,
+        wallet: wallet.value,
         notifications: notifications.value,
         phone: phone.value,
       }),
@@ -155,11 +178,14 @@ export function CapabilitiesScreen() {
       domestic.value,
       health.value,
       mcp.value,
+      wallet.value,
       notifications.value,
       phone.value,
     ],
   );
   const groups = splitHubEntries(entries, query, category);
+  const showPhoneAlarm = phoneAlarms.supported && (!query.trim() || mentionsAlarm(query)) &&
+    (Boolean(query.trim()) || category === '全部' || category === '手机');
   const selected = entries.find(entry => entry.key === opened);
   const mailToConnect =
     selected?.kind === 'integration' &&
@@ -326,8 +352,8 @@ export function CapabilitiesScreen() {
             <TextInput
               value={query}
               onChangeText={setQuery}
-              accessibilityLabel="搜索未连接的应用或用途"
-              placeholder="搜索未连接的应用或用途"
+              accessibilityLabel="搜索应用或用途"
+              placeholder="搜索应用或用途（含已连接）"
               placeholderTextColor="#858DA0"
               style={v.input}
               autoCorrect={false}
@@ -354,17 +380,32 @@ export function CapabilitiesScreen() {
               </Pressable>
             ))}
           </View>
+          {showPhoneAlarm && <PhoneAlarmLauncher />}
           {available.length ? (
             <View style={v.group}>{available.map(row)}</View>
+          ) : showPhoneAlarm ? null : query.trim() && groups.connected.length ? (
+            <View style={v.empty}>
+              <Text style={v.emptyTitle}>已找到已连接的服务</Text>
+              <Text style={v.emptyBody}>可以直接管理匹配的连接。</Text>
+              {groups.connected.map(entry => (
+                <Button
+                  key={entry.key}
+                  accessibilityLabel={'管理' + entry.name + '连接'}
+                  onPress={() => open(entry.key)}
+                >
+                  管理{entry.name}连接
+                </Button>
+              ))}
+            </View>
           ) : (
             <View style={v.empty}>
               <Text style={v.emptyTitle}>
                 {query.trim()
-                  ? '没有找到可添加的连接'
+                  ? '没有找到匹配的连接'
                   : '这个分类暂无可添加的连接'}
               </Text>
               <Text style={v.emptyBody}>
-                试试其他名称或分类，已连接的工具在上方管理。
+                试试中文名称、英文名称或其他用途。
               </Text>
             </View>
           )}
@@ -599,8 +640,12 @@ export function CapabilitiesScreen() {
                   管理健康数据与授权
                 </Button>
               ) : null}
-              {selected?.kind === 'mcp' ? (
-                <Button onPress={goToManager}>管理这个账号的连接</Button>
+              {selected?.kind === 'mcp' || selected?.kind === 'wallet' ? (
+                <PersonalMcpConnections
+                  key={selected.key}
+                  providerId={selected.source.id}
+                  onConnectionChange={receiveMcp}
+                />
               ) : null}
             </ScrollView>
           </SafeAreaView>

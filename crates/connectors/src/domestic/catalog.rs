@@ -19,7 +19,7 @@ pub const CATALOG: &[Integration] = &[
     Integration { id: "netease126", name: "126 邮箱", category: "邮件", mode: "mail", detail: "查找邮件，梳理重点；写好邮件后由你确认发送", import_supported: true, notification_supported: false },
     Integration { id: "tencent_docs", name: "腾讯文档", category: "办公", mode: "oauth", detail: "授权范围内读取文件；也可导入导出的文件与分享文字", import_supported: true, notification_supported: true },
     Integration { id: "wps", name: "WPS / 金山文档", category: "办公", mode: "oauth", detail: "授权范围内读取文件；支持选取本机文档导入", import_supported: true, notification_supported: true },
-    Integration { id: "amap", name: "高德地图", category: "出行", mode: "map", detail: "地点搜索、路线查询，并在你点击后打开导航；不读取私人搜索记录", import_supported: true, notification_supported: false },
+    Integration { id: "amap", name: "高德地图", category: "出行", mode: "map", detail: "使用你自己的高德 Web 服务 Key 查询地点、路线和天气；不读取高德账号的私人记录", import_supported: true, notification_supported: false },
     Integration { id: "xiaohongshu", name: "小红书", category: "内容", mode: "import", detail: "导入你分享的文字、链接和截图；链接本身不代表已读取正文", import_supported: true, notification_supported: true },
     Integration { id: "bilibili", name: "哔哩哔哩", category: "内容", mode: "import", detail: "导入分享的链接、文字与资料；不自动同步观看记录", import_supported: true, notification_supported: true },
     Integration { id: "douyin", name: "抖音", category: "内容", mode: "import", detail: "导入分享的链接与文字；视频音画不会自动解析", import_supported: true, notification_supported: true },

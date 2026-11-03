@@ -66,6 +66,7 @@ import { chatAppearance } from './src/ui/ChatAppearance';
 import { AmbientBackground, AssistantOrb, Icon } from './src/ui/visuals';
 import { SidebarNavigation } from './src/features/navigation/SidebarNavigation';
 import { HelpScreen } from './src/features/navigation/HelpScreen';
+import { LocationProvider } from './src/features/location/LocationProvider';
 
 function Application() {
   const [booting, setBooting] = useState(true);
@@ -545,6 +546,7 @@ function Application() {
           ),
       }}
     >
+      <LocationProvider>
       <GrowthProvider>
       <View style={[s.screen, chatSurface && shell.chatCanvas, capabilitiesSurface && {backgroundColor:capabilityAppearance.background}]}>
         {!capabilitiesSurface && <AmbientBackground />}
@@ -696,6 +698,7 @@ function Application() {
           }} />}
       </View>
       </GrowthProvider>
+      </LocationProvider>
     </AppProvider>
   );
 }

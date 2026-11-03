@@ -18,7 +18,7 @@ fn credentials() -> Credentials {
     Credentials {
         token: "ntn-synthetic-only-not-a-real-token".into(),
         environment: "production".into(),
-        server_url: None,
+        server_url: None, account: None, client_id: None,
     }
 }
 fn page() -> Value {

@@ -1,6 +1,6 @@
 [package]
 name = "tada-desktop"
-version = "0.1.0"
+version = "0.1.2"
 description = "妥啦 desktop client"
 edition = "2024"
 rust-version = "1.92"

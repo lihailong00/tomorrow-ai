@@ -7,21 +7,11 @@ import { Button, Card, ErrorNotice, Pill } from '../../ui/components';
 import { Text } from '../../ui/Text';
 import { styles as s } from '../../ui/theme';
 import { walletDocumentationUrl } from './walletLinks';
+import { AlipayWalletActions } from './AlipayWalletActions';
+import { readWalletMetadata, walletStatusLabel, type WalletConnectionStatus } from './walletModel';
+export type { WalletConnectionStatus } from './walletModel';
 
-export interface WalletConnectionStatus {
-  id: 'alipay';
-  name: string;
-  kind: 'wallet';
-  status: 'not_configured';
-  description: string;
-  reason: string;
-  help_url: string;
-  qualification_url: string;
-  binding_available: false;
-  payment_available: false;
-}
-
-/** The official mobile wallet channel is not enabled; this is a truthful entry only. */
+/** Availability and account state are always obtained from this server. */
 export function AlipayWalletConnection({ api }: { api: ApiClient }) {
   const scope = useMemo(
     () => ({
@@ -55,34 +45,13 @@ export function AlipayWalletConnection({ api }: { api: ApiClient }) {
       loading: true,
     }));
     try {
-      const metadata = await api.request<WalletConnectionStatus>(
+      const metadata = readWalletMetadata(await api.request<unknown>(
         '/personal-wallet/alipay',
         'GET',
         undefined,
         scope.controller.signal,
-      );
+      ));
       if (!scope.active || sequence !== scope.sequence) return;
-      if (
-        !metadata ||
-        typeof metadata !== 'object' ||
-        typeof metadata.description !== 'string' ||
-        typeof metadata.reason !== 'string' ||
-        typeof metadata.help_url !== 'string' ||
-        typeof metadata.qualification_url !== 'string'
-      ) {
-        throw new Error('暂时无法识别支付宝接入状态，请确认服务器已升级。');
-      }
-      if (
-        metadata.id !== 'alipay' ||
-        metadata.kind !== 'wallet' ||
-        metadata.status !== 'not_configured' ||
-        metadata.binding_available !== false ||
-        metadata.payment_available !== false
-      ) {
-        throw new Error(
-          '当前版本尚未支持此服务器提供的钱包绑定流程，请更新客户端后重试。',
-        );
-      }
       setState({ scope, metadata, error: '', loading: false });
     } catch (failure) {
       if (scope.active && sequence === scope.sequence)
@@ -125,22 +94,23 @@ export function AlipayWalletConnection({ api }: { api: ApiClient }) {
       <View style={s.between}>
         <Text style={s.cardTitle}>支付宝</Text>
         <Pill tone="neutral">
-          {current.loading ? '检查中' : metadata ? '待配置' : '状态未知'}
+          {current.loading ? '检查中' : metadata ? walletStatusLabel[metadata.status] : '状态未知'}
         </Pill>
       </View>
       {metadata ? (
         <>
           <Text style={s.body}>{metadata.description}</Text>
           <Text style={s.small}>{metadata.reason}</Text>
-          <Text style={s.small}>开通前不会请求你的绑定码或付款信息。</Text>
-          <Button
+          {metadata.binding_available ? <AlipayWalletActions api={api} metadata={metadata} onStatus={value => {
+            if (scope.active) setState({ scope, metadata: readWalletMetadata(value), error: '', loading: false });
+          }} /> : <><Text style={s.small}>开通前不会请求你的绑定码或付款信息。</Text><Button
             variant="secondary"
             disabled
             onPress={() => undefined}
             accessibilityLabel="支付宝待配置"
           >
             连接账号（待配置）
-          </Button>
+          </Button></>}
           {walletDocumentationUrl(metadata.help_url) ? (
             <Button
               variant="ghost"

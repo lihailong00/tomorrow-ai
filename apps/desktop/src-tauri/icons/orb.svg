@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  妥啦 Orb: vector counterpart of apps/client/src/styles.css .orb/.orb:after.
+  Uses the existing blue/lilac/pink sphere, upper-left light and white lower arc.
+  Transparent outside the sphere; no Android launcher or third-party mark.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <radialGradient id="sphere" cx="0.35" cy="0.23" r="0.94" gradientUnits="objectBoundingBox">
+      <stop offset="0.02" stop-color="#ffffff"/>
+      <stop offset="0.17" stop-color="#eef8ff"/>
+      <stop offset="0.37" stop-color="#bdd9fc"/>
+      <stop offset="0.62" stop-color="#afadf5"/>
+      <stop offset="0.82" stop-color="#ddb4d8"/>
+      <stop offset="1" stop-color="#f1d9f1"/>
+    </radialGradient>
+    <radialGradient id="depth" cx="0.2" cy="0.13" r="1.02" gradientUnits="objectBoundingBox">
+      <stop offset="0.5" stop-color="#8f7ed0" stop-opacity="0"/>
+      <stop offset="1" stop-color="#8f7ed0" stop-opacity="0.24"/>
+    </radialGradient>
+    <linearGradient id="edge" x1="163" y1="149" x2="822" y2="878" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9ec3f1" stop-opacity="0.85"/>
+      <stop offset="0.55" stop-color="#a9b6ed" stop-opacity="0.3"/>
+      <stop offset="1" stop-color="#d5b4e4" stop-opacity="0.65"/>
+    </linearGradient>
+    <linearGradient id="arc" x1="230" y1="686" x2="836" y2="718" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff" stop-opacity="0.4"/>
+      <stop offset="0.3" stop-color="#ffffff" stop-opacity="0.92"/>
+      <stop offset="0.8" stop-color="#ffffff" stop-opacity="0.78"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.25"/>
+    </linearGradient>
+  </defs>
+  <circle cx="512" cy="512" r="452" fill="url(#sphere)"/>
+  <circle cx="512" cy="512" r="452" fill="url(#depth)"/>
+  <circle cx="512" cy="512" r="450" stroke="url(#edge)" stroke-width="7"/>
+  <path d="M 193 627 C 249 796 419 892 588 865 C 727 843 827 745 864 623" stroke="url(#arc)" stroke-width="18" stroke-linecap="round"/>
+</svg>

@@ -7,6 +7,8 @@ export interface TransportRequest {
 export interface TransportResponse { status: number; headers: Record<string, string>; body: string; url?: string }
 export interface ClientTransport { request(input: TransportRequest): Promise<TransportResponse> }
 const RESPONSE_LIMIT = 2 * 1024 * 1024;
+// The invoke result and ordered Channel messages use separate IPC deliveries.
+const CHANNEL_DRAIN_TIMEOUT_MS = 5000;
 export function isEventStream(headers: Record<string, string>): boolean {
   return (headers['content-type'] ?? '').toLowerCase().split(';')[0].trim() === 'text/event-stream';
 }
@@ -80,6 +82,7 @@ export function createDesktopTransport(bridge: DesktopBridge): ClientTransport {
       let rejectAbort: (error: unknown) => void = () => {};
       const abortPromise = new Promise<never>((_, reject) => { rejectAbort = reject; });
       let finished = false;
+      let drainTimer: ReturnType<typeof setTimeout> | undefined;
       const cancel = () => {
         if (finished) return;
         void bridge.invoke('desktop_cancel', { requestId }).catch(() => {});
@@ -98,6 +101,8 @@ export function createDesktopTransport(bridge: DesktopBridge): ClientTransport {
           let gotHeaders = false;
           let channelError: unknown;
           let ended = false;
+          let finishChannel!: () => void;
+          const channelDone = new Promise<void>(resolve => {finishChannel = resolve;});
           const append = (chunk: string) => {
             if (response.status >= 200 && response.status < 300 && isEventStream(response.headers)) input.onChunk!(chunk);
             else { response.body += chunk; if (response.body.length > RESPONSE_LIMIT) throw new ApiError('response_too_large', '服务返回的数据过大。'); }
@@ -114,7 +119,8 @@ export function createDesktopTransport(bridge: DesktopBridge): ClientTransport {
                 if (!gotHeaders) throw new ApiError('invalid_response', '回复通道缺少响应头。');
                 append(decoder.decode(Uint8Array.from(event.bytes), { stream: true }));
               } else if (event.type === 'end') {
-                append(decoder.decode()); ended = true;
+                if (!gotHeaders) throw new ApiError('invalid_response', '回复通道缺少响应头。');
+                append(decoder.decode()); ended = true; finishChannel();
               }
             } catch (error) {
               channelError = error;
@@ -122,7 +128,14 @@ export function createDesktopTransport(bridge: DesktopBridge): ClientTransport {
               rejectAbort(error);
             }
           });
-          operation = bridge.invoke<void>('desktop_stream', { requestId, request, onEvent: channel }).then(() => {
+          operation = bridge.invoke<void>('desktop_stream', { requestId, request, onEvent: channel }).then(async () => {
+            if (finished || input.signal?.aborted) throw cancelled();
+            if (channelError) throw channelError;
+            // A successful invoke does not mean the WebView has processed the
+            // final channel message. Drain it before closing/ignoring callbacks.
+            if (!ended) await Promise.race([channelDone, new Promise<never>((_, reject) => {
+              drainTimer = setTimeout(() => reject(new ApiError('network', '回复连接已中断，收到的内容已保留。')), CHANNEL_DRAIN_TIMEOUT_MS);
+            })]);
             if (channelError) throw channelError;
             if (!gotHeaders || !ended) throw new ApiError('network', '回复连接已中断，收到的内容已保留。');
             return response;
@@ -134,6 +147,7 @@ export function createDesktopTransport(bridge: DesktopBridge): ClientTransport {
         return { ...response, url: response.url ?? input.url, headers: normalizeHeaders(response.headers) };
       } finally {
         finished = true;
+        if (drainTimer !== undefined) clearTimeout(drainTimer);
         input.signal?.removeEventListener('abort', cancel);
       }
     },

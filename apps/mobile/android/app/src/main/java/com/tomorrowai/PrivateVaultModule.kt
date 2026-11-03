@@ -151,6 +151,36 @@ class PrivateVaultModule(private val context: ReactApplicationContext) : ReactCo
       .put("revision", UUID.randomUUID().toString())
     write(scope, outer)
   }
+  /** Validate and decrypt first. A bad key must not initialize a blank vault. */
+  private fun restoreDocument(scope: String, input: JSONObject): String {
+    val recoveryKey = VaultCrypto.recoveryKey(input.getString("recovery_key"))
+    try {
+      val remoteVersion = input.getLong("remote_version")
+      require(remoteVersion in 1..9007199254740991L) { "备份版本无效" }
+      val restored = document(JSONObject().put("data", input.getJSONObject("envelope")), recoveryKey)
+      val validated = JSONArray()
+      val restoredItems = restored.getJSONArray("items")
+      val seen = mutableSetOf<String>()
+      for (index in 0 until restoredItems.length()) {
+        val item = restoredItems.getJSONObject(index); val id = item.getString("id")
+        require(id.length in 1..80 && seen.add(id)) { "备份中的资料编号无效" }
+        validated.put(validateItem(item, id))
+      }
+      restored.put("items", validated)
+      val existing = read(scope)
+      if (existing != null) {
+        val oldKey = unwrap(scope, existing)
+        try { require(document(existing, oldKey).getJSONArray("items").length() == 0) { "恢复不会覆盖已有本机资料" } }
+        finally { oldKey.fill(0) }
+      }
+      val outer = existing ?: JSONObject().put("format", 1)
+      outer.put("wrapped_key", wrap(scope, recoveryKey)).put("backup_enabled", false)
+        .put("recovery_ready", true).put("recovery_shown", true).put("remote_version", remoteVersion)
+        .put("synced_revision", "").put("consent_epoch", outer.optLong("consent_epoch") + 1)
+      saveDocument(scope, outer, recoveryKey, restored)
+      return summaries(restored)
+    } finally { recoveryKey.fill(0) }
+  }
   private fun summaries(doc: JSONObject): String {
     val result = JSONArray()
     val records = doc.getJSONArray("items")
@@ -282,6 +312,11 @@ class PrivateVaultModule(private val context: ReactApplicationContext) : ReactCo
               return@execute
             }
             val input = JSONObject(payload)
+            if (operation == "restore") {
+              val restored = restoreDocument(scope, input)
+              main.post { if (generation == epoch && protectedScope == scope) finishSuccess(restored, promise) else finishError("操作已取消", promise) }
+              return@execute
+            }
             val (outer, key) = load(scope)
             try {
               val doc = document(outer, key)
@@ -331,26 +366,6 @@ class PrivateVaultModule(private val context: ReactApplicationContext) : ReactCo
                   require(remoteVersion in 0..9007199254740991L)
                   outer.put("remote_version", remoteVersion).put("recovery_ready", true)
                   outer.put("backup_enabled", true).put("consent_epoch", outer.optLong("consent_epoch") + 1); write(scope, outer)
-                }
-                "restore" -> {
-                  require(items.length() == 0) { "请先处理已有本机资料；恢复不会覆盖它们" }
-                  val recoveryKey = VaultCrypto.recoveryKey(input.getString("recovery_key"))
-                  try {
-                    val source = input.getJSONObject("envelope")
-                    val restored = document(JSONObject().put("data", source), recoveryKey)
-                    val validated = JSONArray()
-                    val restoredItems = restored.getJSONArray("items")
-                    val seen = mutableSetOf<String>()
-                    for (index in 0 until restoredItems.length()) {
-                      val item = restoredItems.getJSONObject(index); val id = item.getString("id")
-                      require(id.length in 1..80 && seen.add(id)) { "备份中的资料编号无效" }
-                      validated.put(validateItem(item, id))
-                    }
-                    restored.put("items", validated)
-                    outer.put("wrapped_key", wrap(scope, recoveryKey)).put("backup_enabled", false).put("recovery_ready", true).put("recovery_shown", true)
-                      .put("remote_version", input.getLong("remote_version")).put("consent_epoch", outer.optLong("consent_epoch") + 1)
-                    saveDocument(scope, outer, recoveryKey, restored); result = summaries(restored)
-                  } finally { recoveryKey.fill(0) }
                 }
               }
               main.post { if (generation == epoch && protectedScope == scope) finishSuccess(result, promise) else finishError("操作已取消", promise) }

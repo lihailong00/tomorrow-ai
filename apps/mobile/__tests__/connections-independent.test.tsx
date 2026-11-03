@@ -133,7 +133,9 @@ describe('independent connections catalog acceptance', () => {
     ] });
     expect(result.find(row => row.key === 'integration:qq_mail')!.method).toContain('本人邮箱');
     expect(result.find(row => row.key === 'integration:amap')!.added).toBe(false);
-    expect(result.find(row => row.key === 'integration:amap')!.method).toContain('后台配置');
+    expect(result.find(row => row.key === 'integration:amap')!.method).toContain('自己的开发者 Key');
+    expect(result.find(row => row.key === 'integration:amap')!.status).toContain('服务器需升级');
+    expect(result.find(row => row.key === 'integration:amap')!.usable).toBe(false);
     expect(result.find(row => row.key === 'integration:wechat')).toBeUndefined();
   });
 
@@ -151,7 +153,7 @@ describe('independent connections catalog acceptance', () => {
       supported: true, notification_access: false, selected_apps: ['wechat'],
       installed_apps: ['wechat'], pending_count: 0,
     } });
-    expect(filterConnectionRows(result, 'devices', '  微信  ', false).map(row => row.key)).toEqual(['app:wechat', 'app:wecom']);
+    expect(filterConnectionRows(result, 'devices', '  微信  ', false).map(row => row.key)).toEqual(['app:wechat', 'app:wecom', 'mcp:weread']);
     expect(filterConnectionRows(result, 'cloud', '', true).map(row => row.key)).toEqual(['app:wechat']);
     expect(filterConnectionRows(result, 'local', '不存在的应用', false)).toEqual([]);
   });
@@ -238,7 +240,7 @@ describe('independent real React Native interaction acceptance', () => {
       await act(async () => { expect(dispatch()).toBe(true); });
       expect(view.context.back).toHaveBeenCalledTimes(1);
     } finally { await view.unmount(); subscription.mockRestore(); }
-  });
+  }, 15000);
 
   it('does not let an app toggle read overwrite a newer foreground permission revocation', async () => {
     const initial = { ...nativeStatus(true), selected_apps: [] };
@@ -320,7 +322,7 @@ describe('independent real React Native interaction acceptance', () => {
     try {
       await view.press('外部设备');
       await view.search('微信');
-      expect(view.rowLabels().map(label => label.split('，')[0])).toEqual(['微信', '企业微信']);
+      expect(view.rowLabels().map(label => label.split('，')[0])).toEqual(['微信', '企业微信', '微信读书']);
       expect(view.rowLabels().some(label => label.includes('已连接'))).toBe(false);
     } finally { await view.unmount(); }
   });

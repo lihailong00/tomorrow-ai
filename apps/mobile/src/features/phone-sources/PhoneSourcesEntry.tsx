@@ -873,7 +873,7 @@ function PhoneSourcesForOwner({
             <Card style={{ marginTop: 16 }}>
               <Text style={s.cardTitle}>其他手机资料</Text>
               <Text style={[s.small, s.topGap]}>
-                健康记录、选定应用的新通知、备忘录分享，以及手动选择的录音和文件，也可以连接。系统闹钟、浏览器历史和第三方
+                健康记录、选定应用的新通知、备忘录分享，以及手动选择的录音和文件，也可以连接。浏览器历史和第三方
                 App 的私人数据库不能通用读取。
               </Text>
               <Button

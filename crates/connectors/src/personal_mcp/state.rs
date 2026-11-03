@@ -22,6 +22,14 @@ use tomorrow_domain::{Repository, now, timestamp};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(40);
 const TOOL_BYTES: usize = 256 * 1024;
+
+fn storage_byte_limit(provider: &str, purpose: &str) -> usize {
+    if purpose == "personal_mcp_tools" {
+        catalog::discovery_limits(provider).1
+    } else {
+        TOOL_BYTES
+    }
+}
 const RESULT_BYTES: usize = 96 * 1024;
 const ARGUMENT_BYTES: usize = 16 * 1024;
 const NOTE_ARGUMENT_BYTES: usize = 48 * 1024;
@@ -154,7 +162,9 @@ impl PersonalMcpState {
             crypto,
             transport,
             requests: Arc::new(Semaphore::new(8)),
-            baidu_experience_enabled: std::env::var("BAIDU_NETDISK_EXPERIENCE_ENABLED").ok().is_some_and(|value| matches!(value.as_str(), "true" | "1")),
+            baidu_experience_enabled: std::env::var("BAIDU_NETDISK_EXPERIENCE_ENABLED")
+                .ok()
+                .is_some_and(|value| matches!(value.as_str(), "true" | "1")),
             #[cfg(test)]
             fixture_runtime: false,
         })))
@@ -168,13 +178,17 @@ impl PersonalMcpState {
                 .and_then(|v| Crypto::from_hex(v).ok()),
             transport: self.0.transport.clone(),
             requests: self.0.requests.clone(),
-            baidu_experience_enabled: values.get("BAIDU_NETDISK_EXPERIENCE_ENABLED").is_some_and(|value| matches!(value.as_str(), "true" | "1")),
+            baidu_experience_enabled: values
+                .get("BAIDU_NETDISK_EXPERIENCE_ENABLED")
+                .is_some_and(|value| matches!(value.as_str(), "true" | "1")),
             #[cfg(test)]
             fixture_runtime: self.0.fixture_runtime,
         }))
     }
     fn available(&self, id: &str) -> bool {
-        if id == "baidu_netdisk" && !self.0.baidu_experience_enabled { return false; }
+        if id == "baidu_netdisk" && !self.0.baidu_experience_enabled {
+            return false;
+        }
         #[cfg(test)]
         if self.0.fixture_runtime {
             return catalog::find(id).is_ok();
@@ -219,7 +233,7 @@ impl PersonalMcpState {
         value: &impl serde::Serialize,
     ) -> Result<String> {
         let bytes = serde_json::to_vec(value).map_err(|_| invalid())?;
-        if bytes.len() > TOOL_BYTES {
+        if bytes.len() > storage_byte_limit(provider, purpose) {
             return Err(invalid());
         }
         // Existing vault envelopes intentionally cap each item at 64KiB. Bind
@@ -247,11 +261,17 @@ impl PersonalMcpState {
         encrypted: &str,
     ) -> Result<T> {
         let value = if let Some(encoded) = encrypted.strip_prefix("chunks-v1:") {
-            if encoded.len() > TOOL_BYTES * 2 {
+            let byte_limit = storage_byte_limit(provider, purpose);
+            if encoded.len() > byte_limit * 2 {
                 return Err(required());
             }
             let chunks: Vec<String> = serde_json::from_str(encoded).map_err(|_| required())?;
-            if chunks.is_empty() || chunks.len() > 16 {
+            let max_chunks = if provider == "tencent_docs" && purpose == "personal_mcp_tools" {
+                byte_limit.div_ceil(24 * 1024)
+            } else {
+                16
+            };
+            if chunks.is_empty() || chunks.len() > max_chunks {
                 return Err(required());
             }
             let mut bytes = Vec::new();
@@ -267,7 +287,7 @@ impl PersonalMcpState {
                         .map_err(|_| required())?,
                 );
             }
-            if bytes.len() > TOOL_BYTES {
+            if bytes.len() > byte_limit {
                 return Err(required());
             }
             bytes
@@ -338,7 +358,11 @@ impl PersonalMcpState {
             })
             .unwrap_or_default();
         value["status"] = json!(status);
-        value["has_credentials"] = json!(account.as_ref().is_some_and(|account| !account.encrypted.is_empty()));
+        value["has_credentials"] = json!(
+            account
+                .as_ref()
+                .is_some_and(|account| !account.encrypted.is_empty())
+        );
         value["tool_count"] = json!(if credentials_valid { tools.len() } else { 0 });
         value["checked_at"] = json!(
             account
@@ -346,18 +370,35 @@ impl PersonalMcpState {
                 .filter(|a| a.checked > 0)
                 .map(|a| timestamp(a.checked))
         );
-        value["environment"] = if id == "baidu_netdisk" { json!("experience") } else { json!(
-            account
-                .as_ref()
-                .map(|a| a.environment.as_str())
-                .unwrap_or("production")
-        ) };
+        value["environment"] = if id == "baidu_netdisk" {
+            json!("experience")
+        } else {
+            json!(
+                account
+                    .as_ref()
+                    .map(|a| a.environment.as_str())
+                    .unwrap_or("production")
+            )
+        };
         value["experience_only"] = json!(id == "baidu_netdisk");
         value["credential_kind"] = json!("token");
         value["requires_server_url"] = json!(id == "memos");
+        value["requires_account"] = json!(id == "jianguoyun");
+        value["requires_client_id"] = json!(id == "ima");
         if id == "memos" {
-            let address = account.as_ref().and_then(|account| self.decode::<Credentials>(user, id, "personal_mcp_credentials", &account.encrypted).ok())
-                .and_then(|credentials| credentials.server_url).or_else(super::memos::default_server_url);
+            let address = account
+                .as_ref()
+                .and_then(|account| {
+                    self.decode::<Credentials>(
+                        user,
+                        id,
+                        "personal_mcp_credentials",
+                        &account.encrypted,
+                    )
+                    .ok()
+                })
+                .and_then(|credentials| credentials.server_url)
+                .or_else(super::memos::default_server_url);
             value["server_url"] = json!(address);
         }
         value["supports_sandbox"] = json!(id == "didi");
@@ -483,8 +524,16 @@ impl PersonalMcpState {
         arguments: Value,
         operation_key: &str,
     ) -> Result<Value> {
-        let arguments = if provider == "memos" { super::memos::prepare_arguments(tool, arguments)? } else { arguments };
-        let argument_limit = if matches!(provider, "notion" | "memos" | "yuque") { NOTE_ARGUMENT_BYTES } else { ARGUMENT_BYTES };
+        let arguments = if provider == "memos" {
+            super::memos::prepare_arguments(tool, arguments)?
+        } else {
+            arguments
+        };
+        let argument_limit = if matches!(provider, "notion" | "memos" | "yuque") {
+            NOTE_ARGUMENT_BYTES
+        } else {
+            ARGUMENT_BYTES
+        };
         if !arguments.is_object()
             || arguments.to_string().len() > argument_limit
             || tool.is_empty()
@@ -508,7 +557,24 @@ impl PersonalMcpState {
             return Err(missing());
         }
         reject_secrets(&arguments, &credentials)?;
-        if provider == "notion" { super::notion::validate_arguments(tool, &arguments)?; }
+        if provider == "notion" {
+            super::notion::validate_arguments(tool, &arguments)?;
+        }
+        if provider == "fliggy" {
+            super::fliggy::validate_arguments(tool, &arguments)?;
+        }
+        if provider == "jianguoyun" {
+            super::jianguoyun::validate_arguments(tool, &arguments)?;
+        }
+        if provider == "ima" {
+            super::ima::validate_arguments(tool, &arguments)?;
+        }
+        if provider == "weread" {
+            super::weread::validate_arguments(tool, &arguments)?;
+        }
+        if provider == "qq_music" {
+            super::qq_music::validate_arguments(tool, &arguments)?;
+        }
         if !catalog::is_read_only(provider, tool) {
             return self
                 .pending_action(
@@ -734,7 +800,10 @@ fn reject_secrets(value: &Value, credentials: &Credentials) -> Result<()> {
     }
     // Memos instance URLs cannot contain credentials or query strings. They are
     // public connection metadata and can legitimately occur in note links.
-    for secret in [credentials.token.as_str()].into_iter().filter(|s| !s.is_empty()) {
+    for secret in std::iter::once(credentials.token.as_str())
+        .chain(credentials.client_id.as_deref())
+        .filter(|s| !s.is_empty())
+    {
         let encoded: String = reqwest::Url::parse("https://example.invalid")
             .expect("static url")
             .query_pairs_mut()
@@ -751,9 +820,10 @@ fn reject_secrets(value: &Value, credentials: &Credentials) -> Result<()> {
     Ok(())
 }
 fn clean_tools(provider: &str, credentials: &Credentials, tools: Vec<Value>) -> Result<Vec<Value>> {
-    if tools.len() > 128
+    let (max_tools, max_bytes) = catalog::discovery_limits(provider);
+    if tools.len() > max_tools
         || tools.is_empty()
-        || serde_json::to_vec(&tools).map_err(|_| invalid())?.len() > TOOL_BYTES
+        || serde_json::to_vec(&tools).map_err(|_| invalid())?.len() > max_bytes
     {
         return Err(provider_failed());
     }
@@ -893,3 +963,7 @@ async fn cancel(
 #[cfg(test)]
 #[path = "notes_live_tests.rs"]
 mod notes_live_tests;
+
+#[cfg(test)]
+#[path = "docs_storage_capacity_tests.rs"]
+mod docs_capacity_tests;

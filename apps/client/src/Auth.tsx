@@ -38,7 +38,9 @@ export function Auth({api, manifest, connectionError, onLogin, onServer}: {api: 
 }
 
 export function ServerDialog({platform, current, onClose, onChoose}: {platform: Platform; current: ServerChoice; onClose(): void; onChoose(value: ServerChoice, manifest: InstanceManifest): Promise<void>}) {
-  const [url, setUrl] = useState(current.url);
+  const currentIsOfficial = (() => {try {return normalizeServerUrl(current.url, true) === OFFICIAL_SERVER;} catch {return false;}})();
+  const [mode, setMode] = useState<'official' | 'self_hosted'>(currentIsOfficial ? 'official' : 'self_hosted');
+  const [url, setUrl] = useState(currentIsOfficial ? '' : current.url);
   const [allowLan, setAllowLan] = useState(current.allowInsecureLan ?? false);
   const [checked, setChecked] = useState<{choice: ServerChoice; manifest: InstanceManifest} | null>(null);
   const [busy, setBusy] = useState(false);
@@ -46,7 +48,7 @@ export function ServerDialog({platform, current, onClose, onChoose}: {platform: 
   const [saving, setSaving] = useState(false);
   const sequence = useRef(0);
   const probe = useRef<ApiClient | null>(null);
-  useEffect(() => {++sequence.current; setChecked(null); setError('');}, [url, allowLan]);
+  useEffect(() => {++sequence.current; setChecked(null); setError('');}, [mode, url, allowLan]);
   useEffect(() => () => {++sequence.current; probe.current?.dispose();}, []);
   async function check(event: FormEvent) {
     event.preventDefault(); if (busy) return;
@@ -54,16 +56,18 @@ export function ServerDialog({platform, current, onClose, onChoose}: {platform: 
     setBusy(true); setError(''); setChecked(null);
     let api: ApiClient | undefined;
     try {
-      const choice = {url: normalizeServerUrl(url, allowLan), allowInsecureLan: allowLan};
-      api = new ApiClient(choice.url, {transport: platform.transport, allowInsecureLan: allowLan});
+      const choice = mode === 'official'
+        ? {url: OFFICIAL_SERVER, allowInsecureLan: false}
+        : {url: normalizeServerUrl(url, allowLan), allowInsecureLan: allowLan};
+      api = new ApiClient(choice.url, {transport: platform.transport, allowInsecureLan: choice.allowInsecureLan});
       probe.current = api;
       const manifest = await api.inspectInstance(); if (scope === sequence.current) setChecked({choice: {...choice, instanceId: manifest.id, autoRestore: false}, manifest});
     } catch (err) {if (scope === sequence.current) setError(errorText(err));} finally {api?.dispose(); if (scope === sequence.current) setBusy(false);}
   }
   return <div className="modal-overlay" role="presentation" onClick={onClose}><section className="modal server-modal" role="dialog" aria-modal="true" aria-labelledby="server-heading" onClick={e => e.stopPropagation()} onKeyDown={e => {if (e.key === 'Escape' && !saving) onClose();}}><div className="modal-heading"><div><div className="eyebrow">你的数据，你的选择</div><h2 id="server-heading">连接服务器</h2></div><button aria-label="关闭服务器设置" className="icon-button" onClick={onClose}><X size={20}/></button></div>
-      <div className="server-presets"><button disabled={busy || saving} className={url === OFFICIAL_SERVER ? 'active' : ''} onClick={() => {setUrl(OFFICIAL_SERVER); setAllowLan(false);}}><Orb small/><span>妥啦官方服务<small>直接使用，简单开始</small></span></button><button disabled={busy || saving} className={url !== OFFICIAL_SERVER ? 'active' : ''} onClick={() => {setUrl(''); setChecked(null);}}><Server size={24}/><span>自建服务器<small>连接你自己的后端</small></span></button></div>
-      <form onSubmit={check}><label>服务地址<input aria-label="服务地址" disabled={busy || saving} value={url} onChange={e => setUrl(e.target.value)} placeholder="https://tada.example.com" autoFocus type="url" required/></label><label className="checkbox-label"><input type="checkbox" disabled={busy || saving} checked={allowLan} onChange={e => setAllowLan(e.target.checked)}/>允许局域网 HTTP（仅适用于你信任的内网）</label><button className="secondary" disabled={busy || saving}>{busy ? <LoaderCircle className="spin" size={16}/> : <ShieldCheck size={16}/>} {busy ? '正在检查…' : '检查连接'}</button></form>
-      {error && <Notice>{error}</Notice>}{checked && <div className="checked-server"><CheckCircle2 size={20}/><div><strong>{checked.manifest.name}</strong><p>{serviceLabel(checked.choice.url, checked.manifest)} · API v{checked.manifest.api_version}</p><p>支持{checked.manifest.auth_methods.map(x => x === 'phone_password' ? '手机号密码' : '邮箱密码').join('、')}登录</p><code>实例 {checked.manifest.id}</code></div></div>}
+      <div className="server-presets"><button type="button" disabled={busy || saving} aria-pressed={mode === 'official'} className={mode === 'official' ? 'active' : ''} onClick={() => setMode('official')}><Orb small/><span>妥啦官方服务<small>直接使用，简单开始</small></span></button><button type="button" disabled={busy || saving} aria-pressed={mode === 'self_hosted'} className={mode === 'self_hosted' ? 'active' : ''} onClick={() => setMode('self_hosted')}><Server size={24}/><span>自建服务器<small>连接你自己的后端</small></span></button></div>
+      <form onSubmit={check}>{mode === 'official' ? <div className="checked-server"><ShieldCheck size={20}/><div><strong>官方服务由妥啦维护</strong><p>自动连接官方服务器，无需填写或修改地址。</p></div></div> : <><label>服务地址<input aria-label="服务地址" disabled={busy || saving} value={url} onChange={e => setUrl(e.target.value)} placeholder="https://tada.example.com" autoFocus type="url" required/></label><label className="checkbox-label"><input type="checkbox" disabled={busy || saving} checked={allowLan} onChange={e => setAllowLan(e.target.checked)}/>允许局域网 HTTP（仅适用于你信任的内网）</label></>}<button className="secondary" disabled={busy || saving}>{busy ? <LoaderCircle className="spin" size={16}/> : <ShieldCheck size={16}/>} {busy ? '正在检查…' : '检查连接'}</button></form>
+      {error && <Notice>{error}</Notice>}{checked && <div className="checked-server"><CheckCircle2 size={20}/><div><strong>{checked.manifest.name}</strong><p>{serviceLabel(checked.choice.url, checked.manifest)} · 连接正常</p><p>支持{checked.manifest.auth_methods.map(x => x === 'phone_password' ? '手机号密码' : '邮箱密码').join('、')}登录</p></div></div>}
       <p className="privacy-note">确认后将退出当前账号。新服务使用独立账号与数据；连接失败时不会自动切换到其他服务器。</p><button className="primary full-width" disabled={!checked || saving} onClick={async () => {if (!checked || saving) return; setSaving(true); try {await onChoose(checked.choice, checked.manifest);} catch (e) {setError(errorText(e)); setSaving(false);}}}>{saving ? '正在切换…' : '确认使用这台服务器'}</button>
     </section></div>;
 }

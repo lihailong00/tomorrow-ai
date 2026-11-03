@@ -800,6 +800,13 @@ impl Repository {
         }).await.map_err(|_| DomainError::Internal("消息请求预留中断".into()))?
     }
 
+    /// Presence only; used for freshness checks without exposing a request's body.
+    pub async fn has_chat_request(&self, user_id: &str, request_id: &str) -> Result<bool, DomainError> {
+        let key = chat_request_key(user_id, request_id)?;
+        Ok(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM chat_requests WHERE request_key=$1 AND user_id=$2")
+            .bind(key).bind(user_id).fetch_one(&self.pool).await? > 0)
+    }
+
     async fn acquire_chat_owned(
         &self,
         user_id: &str,

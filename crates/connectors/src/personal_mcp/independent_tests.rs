@@ -42,7 +42,7 @@ impl McpTransport for Fixture {
         })
     }
 }
-fn credentials(token: &str) -> Credentials { Credentials { token: token.into(), environment: "sandbox".into(), server_url: None } }
+fn credentials(token: &str) -> Credentials { Credentials { token: token.into(), environment: "sandbox".into(), server_url: None, account: None, client_id: None } }
 async fn fixture() -> (PersonalMcpState, Repository, String, Arc<Fixture>) {
     let repo = Repository::connect("sqlite::memory:").await.unwrap();
     let user = repo.create_user("independent-mcp@example.test", "unused", "Tester", "Asia/Shanghai").await.unwrap();

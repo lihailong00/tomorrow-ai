@@ -12,6 +12,13 @@ export type ConnectionGuide = {
 };
 
 const guides: Readonly<Record<string, ConnectionGuide>> = {
+  amap: {
+    before: '请先在',
+    linkText: '高德开放平台申请 Key',
+    url: 'https://lbs.amap.com/api/mcp-server/create-project-and-key',
+    after:
+      '，服务平台选择「Web 服务」，然后填写你自己的 Key。它用于地图查询，不授权读取高德账号的收藏、历史记录或订单。',
+  },
   qq_mail: {
     before: '请先在 QQ 邮箱设置中',
     linkText: '开启 IMAP',

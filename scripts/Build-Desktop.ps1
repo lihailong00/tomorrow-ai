@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$NodePath,
+  [string]$TauriConfigPath,
   [ValidateSet('Debug','Release')][string]$BuildType = 'Release',
   [ValidateSet('x86_64-pc-windows-msvc','aarch64-pc-windows-msvc')][string]$RustTarget = 'x86_64-pc-windows-msvc',
   [switch]$NoBundle,
@@ -111,6 +112,12 @@ try {
   Invoke-Checked 'pnpm.cmd' @('--dir',(Join-Path $repoPath 'apps/client'),'typecheck')
   if ($RunRustTests) { Invoke-Checked 'cargo.exe' @('test','--manifest-path',(Join-Path $nativePath 'Cargo.toml'),'--locked','--target',$RustTarget) }
   $arguments = @('--dir',$desktopPath,'build','--target',$RustTarget)
+  if ($TauriConfigPath) {
+    $resolvedConfig = (Resolve-Path -LiteralPath $TauriConfigPath -ErrorAction Stop).Path
+    Assert-TadaPlainPath $resolvedConfig
+    if (-not (Test-Path -LiteralPath $resolvedConfig -PathType Leaf)) { throw 'TauriConfigPath must point to a configuration file.' }
+    $arguments += @('--config',$resolvedConfig)
+  }
   if ($BuildType -eq 'Debug') { $arguments += '--debug' }
   if ($NoBundle) { $arguments += '--no-bundle' } else { $arguments += @('--bundles','nsis') }
   Invoke-Checked 'pnpm.cmd' $arguments
@@ -150,7 +157,11 @@ try {
   $failure = $_.Exception.Message
   Write-Host ('Desktop build failed: ' + $failure)
 } finally {
-  if ($CleanBuildCache -and $lease -and $succeeded) {
+  # Measure only after the build returned; preserve warm caches below the limit.
+  if ($lease) {
+    try { $after = Get-TadaStorageUsage -RepoPath $repoPath } catch { $cleanup.Add('Post-build accounting failed: ' + $_.Exception.Message) }
+  }
+  if ($lease -and ($CleanBuildCache -or ($after -and $after.TotalBytes -gt $after.BudgetBytes))) {
     if (@(Get-TadaActiveBuildProcesses).Count -eq 0 -and (Test-Path -LiteralPath (Join-Path $targetPath 'CACHEDIR.TAG'))) {
       $resolvedTarget = Get-TadaFullPath $targetPath
       if ($resolvedTarget -eq (Get-TadaFullPath (Join-Path $nativePath 'target')) -and (Test-TadaPathInside $resolvedTarget $desktopPath)) {
@@ -166,15 +177,17 @@ try {
           if ($active.Count -gt 0) { throw 'An application or test is running from the desktop target; cache is active.' }
           Remove-Item -LiteralPath $resolvedTarget -Recurse -Force
           $removedBytes = $scan.Bytes
-          $cleanup.Add('Removed verified owned desktop target after candidate publication/copy.')
+          $cleanup.Add('Removed verified owned desktop target after the build finished.')
         } catch { $cleanup.Add('Preserved desktop build cache: ' + $_.Exception.Message) }
       }
     } else { $cleanup.Add('Preserved active, unmarked or unknown-owner desktop build cache.') }
   } else { $cleanup.Add('Warm desktop build cache retained for fast incremental builds; no shared caches were removed.') }
   if ($lease) {
-    try { $after = Get-TadaStorageUsage -RepoPath $repoPath } catch { $cleanup.Add('Post-build accounting failed: ' + $_.Exception.Message) }
+    if ($removedBytes -gt 0) {
+      try { $after = Get-TadaStorageUsage -RepoPath $repoPath } catch { $cleanup.Add('Post-cleanup accounting failed: ' + $_.Exception.Message); $after = $null }
+    }
     New-Item -ItemType Directory -Path (Join-Path $repoPath 'artifacts') -Force | Out-Null
-    $report = [ordered]@{ schema_version=1; retained_target_bytes=10000000000; temporary_excess_allowed=$true; actual_peak_bytes=$null; estimated_growth_bytes=$EstimatedBuildBytes; before=$before; after=$after; succeeded=$succeeded; error=$failure; delivery=$delivery; cleanup=$cleanup.ToArray(); removed_bytes=$removedBytes }
+    $report = [ordered]@{ schema_version=1; retained_target_bytes=20000000000; temporary_excess_allowed=$true; retained_limit_status=$(if (-not $after -or $after.Status -eq 'incomplete') { 'unverified' } elseif ($after.TotalBytes -gt $after.BudgetBytes) { 'exceeded' } else { 'met' }); actual_peak_bytes=$null; estimated_growth_bytes=$EstimatedBuildBytes; before=$before; after=$after; succeeded=$succeeded; error=$failure; delivery=$delivery; cleanup=$cleanup.ToArray(); removed_bytes=$removedBytes }
     [IO.File]::WriteAllText((Join-Path $repoPath 'artifacts/desktop-storage.json'), ($report | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
     $lease.Stream.Dispose()
   }
@@ -182,7 +195,7 @@ try {
   $env:CARGO_TARGET_DIR = $oldTarget
   if ($after) {
     Write-Host ('Retained project paths after build: {0:N2} GB ({1}). See artifacts/desktop-storage.json.' -f ($after.TotalBytes / 1e9), $after.Status)
-    if ($after.TotalBytes -gt 10000000000) { Write-Warning 'Retained project paths remain above the 10 GB housekeeping target; preserve active/necessary outputs and review the recorded totals.' }
+    if ($after.TotalBytes -gt $after.BudgetBytes) { Write-Warning 'Retained project paths remain above the 20 GB housekeeping limit; preserve active/necessary outputs and review the recorded totals.' }
   }
 }
 if (-not $succeeded) { throw $failure }

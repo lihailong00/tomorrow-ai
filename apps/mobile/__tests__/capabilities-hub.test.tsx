@@ -12,6 +12,19 @@ import { appInputs } from '../src/platform/appInputs';
 import { phoneSources } from '../src/platform/phoneSources';
 import { platform } from '../src/platform/ports';
 import { Button } from '../src/ui/components';
+import { phoneAlarms } from '../src/platform/phoneAlarms';
+import { unavailableWallet } from '../src/features/personal-mcp/walletModel';
+
+jest.mock('../src/platform/phoneAlarms', () => ({ phoneAlarms: {
+  supported: true, list: jest.fn().mockResolvedValue([]),
+  availability: jest.fn().mockResolvedValue({ exact: true, notifications: true, system_clock: true }),
+  schedule: jest.fn(), cancel: jest.fn(), openExactSettings: jest.fn(), openNotificationSettings: jest.fn(),
+  openSystemClock: jest.fn(), createSystemAlarm: jest.fn(),
+} }));
+
+
+import { PersonalMcpConnections } from '../src/features/personal-mcp/PersonalMcpConnections';
+import type { PersonalMcpConnection } from '../src/features/personal-mcp/types';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn(),
@@ -75,7 +88,15 @@ function deferred<T>() {
   });
   return { promise, resolve };
 }
-async function setup() {
+function textChildren(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number')
+    return String(value);
+  if (Array.isArray(value)) return value.map(textChildren).join('');
+  return React.isValidElement<{ children?: React.ReactNode }>(value)
+    ? textChildren(value.props.children)
+    : '';
+}
+async function setup(mcpCatalog: PersonalMcpConnection[] = []) {
   let catalog = [
     {
       id: 'qq_mail',
@@ -102,8 +123,10 @@ async function setup() {
         throw new Error('连接目录暂时离线');
       if (path === '/integrations')
         return { items: catalog.map(item => ({ ...item })) };
-      if (path === '/health/connections' || path === '/personal-mcp')
-        return { items: [] };
+      if (path === '/personal-mcp')
+        return { items: mcpCatalog.map(item => ({ ...item })) };
+      if (path === '/personal-wallet/alipay') return unavailableWallet;
+      if (path === '/health/connections') return { items: [] };
       if (path === '/integrations/netease163/connect') {
         if (pending) await pending;
         catalog = catalog.map(item =>
@@ -200,6 +223,11 @@ async function setup() {
     tree,
     context,
     sources,
+    text: () =>
+      tree.root
+        .findAllByType(Text)
+        .map(node => textChildren(node.props.children))
+        .join(' '),
     click,
     button,
     setFailure: () => {
@@ -244,13 +272,16 @@ it('shows actual connected sources once and never treats an existing system perm
   ).toBe(true);
   await view.unmount();
 });
-it('filters only the add section and preserves connected account management and import routes', async () => {
+it('searches both groups while preserving account management and import routes', async () => {
   const view = await setup();
-  await view.field('搜索未连接的应用或用途', '网易');
-  expect(view.sources('available')).toEqual([
-    'capability-source-integration:netease163',
-  ]);
-  expect(view.sources('connected')).toContain(
+  await view.field('搜索应用或用途', '网易');
+  expect(view.sources('available')).toEqual(
+    expect.arrayContaining([
+      'capability-source-integration:netease163',
+      'capability-source-integration:netease126',
+    ]),
+  );
+  expect(view.sources('connected')).not.toContain(
     'capability-source-integration:qq_mail',
   );
   await view.click('导入 AI 对话');
@@ -372,15 +403,129 @@ it('keeps expired grants above and one-off imports below, with no duplicate keys
       },
     ],
   });
+  const all = splitHubEntries([...entries, ...entries]);
   const groups = splitHubEntries([...entries, ...entries], '微信', '文件');
-  expect(groups.connected.map(entry => entry.key)).toEqual([
+  expect(all.connected.map(entry => entry.key)).toEqual([
     'phone',
     'notifications',
   ]);
-  expect(groups.connected.every(entry => entry.state === 'reconnect')).toBe(
-    true,
-  );
+  expect(all.connected.every(entry => entry.state === 'reconnect')).toBe(true);
   expect(groups.available.map(entry => entry.key)).toEqual([
     'integration:wechat',
+    'mcp:weread',
   ]);
+  expect(groups.connected).toEqual([]);
+});
+
+const searchableProviders = [
+  ['mcp', 'dida365', '滴答清单', 'DIDA365'],
+  ['mcp', 'fliggy', '飞猪', 'FLIGGY'],
+  ['mcp', 'jianguoyun', '坚果云', 'NUTSTORE'],
+  ['integration', 'amap', '高德地图', 'AMAP'],
+  ['mcp', 'baidu_maps', '百度地图', 'BAIDU MAPS'],
+  ['integration', 'qq_mail', 'QQ邮箱', 'QQ_MAIL'],
+  ['integration', 'netease163', '163邮箱', 'NETEASE163'],
+  ['integration', 'netease126', '126邮箱', 'NETEASE126'],
+  ['mcp', 'tencent_docs', '腾讯文档', 'TENCENT DOCS'],
+  ['mcp', 'tencent_meeting', '腾讯会议', 'TENCENT MEETING'],
+  ['mcp', 'didi', '滴滴出行', 'DIDI'],
+  ['mcp', 'mcdonalds', '麦当劳', 'MCDONALDS'],
+  ['mcp', 'notion', 'Notion', 'NOTION'],
+  ['mcp', 'memos', 'Memos', 'MEMOS'],
+  ['mcp', 'weread', '微信读书', 'WEREAD'],
+  ['mcp', 'weiyun', '腾讯微云', 'WEIYUN'],
+  ['mcp', 'luckin', '瑞幸咖啡', 'LUCKIN COFFEE'],
+  ['mcp', 'qq_music', 'QQ音乐', 'QQ MUSIC'],
+  ['mcp', 'ima', 'ima', 'IMA'],
+] as const;
+
+it('searches all nineteen Chinese and English service names on the actual primary page even with an older catalog', async () => {
+  const view = await setup();
+  try {
+    await view.click('健康连接');
+    for (const [kind, id, chinese, english] of searchableProviders) {
+      for (const query of [chinese, english]) {
+        await view.field('搜索应用或用途', query);
+        expect([
+          ...view.sources('connected'),
+          ...view.sources('available'),
+        ]).toContain('capability-source-' + kind + ':' + id);
+        expect(view.text()).not.toContain('没有找到匹配的连接');
+      }
+    }
+    await view.field('搜索应用或用途', '飞猪');
+    expect(view.text()).toContain('暂不可用');
+    expect(view.sources('connected')).toEqual([]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+const fliggy = (
+  status: 'connected' | 'not_connected',
+): PersonalMcpConnection => ({
+  id: 'fliggy',
+  name: '飞猪',
+  description: '本人授权的旅行服务',
+  help_url: 'https://example.invalid/fliggy',
+  credential_label: '飞猪个人 Token',
+  transport: 'official_skill',
+  status,
+  tool_count: status === 'connected' ? 2 : 0,
+  environment: 'production',
+});
+
+it('searching an already connected Fliggy offers direct management instead of a false no-results state', async () => {
+  const view = await setup([fliggy('connected')]);
+  try {
+    await view.field('搜索应用或用途', 'FLIGGY');
+    expect(view.sources('connected')).toEqual(['capability-source-mcp:fliggy']);
+    expect(view.sources('available')).toEqual([]);
+    expect(view.text()).toContain('已找到已连接的服务');
+    expect(view.text()).not.toContain('没有找到');
+    await view.click('管理飞猪连接');
+    expect(
+      view.tree.root.findByType(PersonalMcpConnections).props.providerId,
+    ).toBe('fliggy');
+    expect(view.context.navigate).not.toHaveBeenCalled();
+  } finally {
+    await view.unmount();
+  }
+});
+
+it('opens the actual provider credential form directly from primary-page Fliggy search', async () => {
+  const view = await setup([fliggy('not_connected')]);
+  try {
+    await view.field('搜索应用或用途', '飞猪');
+    await view.click('飞猪，连接');
+    expect(
+      view.tree.root.findByType(PersonalMcpConnections).props.providerId,
+    ).toBe('fliggy');
+    await view.click('连接飞猪账号');
+    const token = view.tree.root
+      .findAllByType(TextInput)
+      .find(input => input.props.accessibilityLabel === '飞猪个人 Token');
+    expect(token?.props.value).toBe('');
+    expect(token?.props.secureTextEntry).toBe(true);
+    expect(view.request.mock.calls.some(call => call[1] === 'POST')).toBe(
+      false,
+    );
+    expect(view.context.navigate).not.toHaveBeenCalled();
+  } finally {
+    await view.unmount();
+  }
+});
+
+it('finds the actual local alarm launcher without a server connector and opens the editable form', async () => {
+  const view = await setup();
+  for (const query of ['闹钟', '闹铃', 'ALARM']) {
+    await act(async () => view.tree.root.findAllByType(TextInput).find(node => /搜索.*应用.*用途/.test(node.props.accessibilityLabel ?? ''))!.props.onChangeText(query));
+    expect(view.tree.root.findAll(node => node.props.accessibilityLabel === '设置和管理本机闹铃').length).toBeGreaterThan(0);
+    expect(view.tree.root.findAllByType(Text).some(node => typeof node.props.children === 'string' && /没有找到.*连接/.test(node.props.children))).toBe(false);
+  }
+  await view.click('设置和管理本机闹铃');
+  expect(view.tree.root.findAllByType(TextInput).some(node => node.props.accessibilityLabel === '闹铃日期')).toBe(true);
+  expect(phoneAlarms.schedule).not.toHaveBeenCalled();
+  expect(view.request.mock.calls.every(call => !call[1] || call[1] === 'GET')).toBe(true);
+  await view.unmount();
 });

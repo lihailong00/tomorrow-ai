@@ -142,6 +142,16 @@ export type Today = {
 };
 export type CapabilityResponse = { items: Capability[]; runtime: RuntimeInfo };
 export type ReasoningEffort = 'off' | 'low' | 'high' | 'max';
+export type ChatLocationContext = Readonly<{
+  source: 'device' | 'manual';
+  latitude?: number;
+  longitude?: number;
+  accuracy_m?: number;
+  observed_at: string;
+  label?: string;
+  coordinate_system?: 'wgs84' | 'gcj02';
+}>;
+export type ChatClientContext = Readonly<{ timezone: string; location?: ChatLocationContext }>;
 export type ChatIntent = {
   message: string;
   conversation_id: string | null;
@@ -150,6 +160,7 @@ export type ChatIntent = {
   upload_ids: readonly string[];
   replace_message_id?: string;
   reasoning_effort?: ReasoningEffort;
+  client_context?: ChatClientContext;
 };
 export type ChatResponse = {
   conversation_id: string;

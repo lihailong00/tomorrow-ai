@@ -10,6 +10,27 @@ const response: ChatResponse = { conversation_id: 'conversation', message: {
 } };
 const event = (id: number, kind: string, data: Record<string, unknown>): SseEvent => ({ id, event: kind, data });
 
+test('a tool preamble is retracted immediately and final tokens continue streaming without duplication', async () => {
+  const changes: string[] = [];
+  const api = { chatStream: jest.fn(async (_intent, receive) => {
+    receive(event(0,'snapshot',{status:'running',content:''}));
+    receive(event(1,'text_delta',{delta:'我先查一下。'}));
+    receive(event(2,'text_start',{turn:1,replace:true}));
+    receive(event(3,'tool_start',{tool:'call_mcp_tool'}));
+    receive(event(4,'tool_end',{tool:'call_mcp_tool',is_error:false}));
+    receive(event(5,'text_delta',{turn:2,delta:'完整',replace:true}));
+    receive(event(6,'text_delta',{turn:2,delta:'回复'}));
+    receive(event(7,'done',{response}));
+  }) };
+  const controller=createChatStreamController({api,intent,isCurrent:()=>true,onChange:p=>changes.push(p.content),onComplete:jest.fn()});
+  await controller.start();
+  expect(changes).toContain('我先查一下。');
+  expect(changes.slice(changes.indexOf('我先查一下。')+1)).toContain('');
+  expect(changes).toContain('完整');
+  expect(controller.getSnapshot().content).toBe('完整回复');
+  controller.dispose();
+});
+
 test('research progress reflects actual planning, source reading and review events', async () => {
   const changes: string[] = [];
   const api = { chatStream: jest.fn(async (_intent, receive) => {

@@ -44,6 +44,7 @@ import type { ImportedContent, Integration, IntegrationResult } from './types';
 import { extractTodos } from '../todos/api';
 import { PersonalMcpConnections } from '../personal-mcp/PersonalMcpConnections';
 import { MailConnectionForm, MailComposer } from './MailConnection';
+import { connectionGuide } from './connectionGuides';
 import {
   ConnectionsHub,
   type ConnectionBrowseState,
@@ -1112,18 +1113,30 @@ export function CloudConnection({
   );
   const action = useAction();
   const [credential, setCredential] = useState('');
+  const [replacingMapKey, setReplacingMapKey] = useState(false);
   const [corp, setCorp] = useState('');
   const [query, setQuery] = useState('');
   const [city, setCity] = useState('');
   const [drive, setDrive] = useState('');
   const [results, setResults] = useState<IntegrationResult[]>([]);
   const [read, setRead] = useState(false);
-  const configured = item.status !== 'not_configured';
+  const userMapSupported =
+    item.mode !== 'map' || item.credential_scope === 'user';
+  const configured = item.status !== 'not_configured' && userMapSupported;
   const connected = item.status === 'connected';
+  const mapGuide = connectionGuide('amap')!;
+  useEffect(() => {
+    setCredential('');
+    setReplacingMapKey(false);
+    setResults([]);
+    setRead(false);
+  }, [scope]);
   const connect = () =>
     action.run(async () => {
       const fields: Record<string, string> =
-        item.id === 'wecom'
+        item.mode === 'map'
+          ? { web_api_key: credential.trim() }
+          : item.id === 'wecom'
           ? { corp_id: corp.trim(), agent_secret: credential }
           : { token: credential };
       if (!credential || (item.id === 'wecom' && !corp.trim())) {
@@ -1135,6 +1148,9 @@ export function CloudConnection({
           return;
         }
         onNotice('连接已验证。');
+        setReplacingMapKey(false);
+        setResults([]);
+        setRead(false);
         await onChanged();
       } finally {
         // Never persist credentials on the phone or leave them visible after a request.
@@ -1146,6 +1162,11 @@ export function CloudConnection({
   return (
     <View style={{ marginTop: 12 }}>
       <ErrorNotice message={action.error} />
+      {!userMapSupported && (
+        <Text style={[s.small, { marginVertical: 12 }]}>
+          当前服务器尚不支持按用户保存高德 Key，请升级服务器后再配置。
+        </Text>
+      )}
       {configured && !connected && item.mode === 'mail' && (
         <MailConnectionForm
           item={item}
@@ -1155,38 +1176,77 @@ export function CloudConnection({
           }}
         />
       )}
-      {configured && !connected && item.mode === 'token' && (
-        <>
-          {item.id === 'wecom' && (
+      {configured &&
+        ((!connected && item.mode === 'token') ||
+          (item.mode === 'map' && (!connected || replacingMapKey))) && (
+          <>
+            {item.mode === 'map' && (
+              <Text style={[s.small, { marginVertical: 12 }]}>
+                {mapGuide.before}
+                <Text
+                  style={{ color: colors.action }}
+                  accessibilityRole="link"
+                  accessibilityLabel={mapGuide.linkText}
+                  onPress={() => {
+                    void action.run(() => platform.openUrl(mapGuide.url));
+                  }}
+                >
+                  {mapGuide.linkText}
+                </Text>
+                {mapGuide.after}
+              </Text>
+            )}
+            {item.id === 'wecom' && (
+              <Field
+                label="企业 ID"
+                value={corp}
+                onChangeText={setCorp}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+            )}
             <Field
-              label="企业 ID"
-              value={corp}
-              onChangeText={setCorp}
+              label={
+                item.mode === 'map'
+                  ? '我的高德 Web 服务 Key'
+                  : item.id === 'wecom'
+                  ? '企业应用 Secret'
+                  : '个人访问令牌'
+              }
+              value={credential}
+              onChangeText={setCredential}
+              secureTextEntry
+              autoComplete={item.mode === 'map' ? 'off' : undefined}
+              maxLength={item.mode === 'map' ? 256 : undefined}
               autoCapitalize="none"
               autoCorrect={false}
             />
-          )}
-          <Field
-            label={item.id === 'wecom' ? '企业应用 Secret' : '个人访问令牌'}
-            value={credential}
-            onChangeText={setCredential}
-            secureTextEntry
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
-          <Text style={[s.small, { marginVertical: 12 }]}>
-            仅在你已有相应账号和权限时使用。凭据交由后端保管，不会写入手机存储。
-          </Text>
-          <Button
-            loading={action.busy}
-            onPress={() => {
-              void connect();
-            }}
-          >
-            验证并连接
-          </Button>
-        </>
-      )}
+            <Text style={[s.small, { marginVertical: 12 }]}>
+              {item.mode === 'map'
+                ? 'Key 仅供当前登录用户使用，加密保存在当前服务器，保存后不再显示。不会写入手机存储。'
+                : '仅在你已有相应账号和权限时使用。凭据交由后端保管，不会写入手机存储。'}
+            </Text>
+            <Button
+              loading={action.busy}
+              onPress={() => {
+                void connect();
+              }}
+            >
+              {replacingMapKey ? '验证并替换 Key' : '验证并连接'}
+            </Button>
+            {replacingMapKey && (
+              <Button
+                variant="ghost"
+                onPress={() => {
+                  setCredential('');
+                  setReplacingMapKey(false);
+                }}
+              >
+                取消替换
+              </Button>
+            )}
+          </>
+        )}
       {configured && !connected && item.mode === 'oauth' && (
         <Button
           loading={action.busy}
@@ -1203,8 +1263,18 @@ export function CloudConnection({
           前往账号授权
         </Button>
       )}
-      {(connected || (configured && item.mode === 'map')) && (
+      {configured && connected && (
         <>
+          {item.mode === 'map' && !replacingMapKey && (
+            <>
+              <Text style={[s.small, { marginVertical: 12 }]}>
+                你的高德 Key 已加密保存。地点、路线和天气查询使用这份 Key。
+              </Text>
+              <Button variant="ghost" onPress={() => setReplacingMapKey(true)}>
+                替换我的 Key
+              </Button>
+            </>
+          )}
           {connected && item.mode === 'mail' ? (
             <MailComposer key={item.id} item={item} />
           ) : null}
@@ -1329,6 +1399,8 @@ export function CloudConnection({
                             return;
                           }
                           setResults([]);
+                          setRead(false);
+                          setReplacingMapKey(false);
                           await onChanged();
                         });
                       },

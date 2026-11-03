@@ -9,11 +9,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "test": "tsc -p tsconfig.json && node --test dist/runtime.test.js dist/config.test.js dist/web.test.js dist/research.test.js dist/runtime-settings.test.js dist/server.test.js dist/usage.test.js"
+    "test": "tsc -p tsconfig.json && node --test dist/runtime.test.js dist/config.test.js dist/web.test.js dist/research.test.js dist/runtime-settings.test.js dist/server.test.js dist/usage.test.js dist/connected-tools.test.js dist/tool-media.test.js dist/tool-search.test.js"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "1.4.0",
     "@earendil-works/pi-ai": "1.4.0",
+    "@fly-ai/flyai-cli": "1.0.16",
     "dotenv": "16.6.1",
     "yuque-mcp": "1.0.0"
   },

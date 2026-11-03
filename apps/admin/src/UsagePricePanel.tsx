@@ -55,7 +55,7 @@ export function UsagePriceSourceNote({ source }: { source: UsagePricing["source"
   const message = {
     environment: "当前使用部署环境中的单价。保存后将保留其他生效单价，并改用后台保存的价格表；之后修改环境单价将不再自动生效。",
     database: "当前使用后台保存的价格表，优先于部署环境中的单价。",
-    unconfigured: "尚未配置价格表，空白单价对应的费用保持未知。",
+    unconfigured: "未保存自定义价格；支持的官方模型自动采用已核对的参考价，其他模型的费用保持未知。",
   }[source];
   return <p className="input-help" role="status">{message}</p>;
 }
@@ -108,6 +108,7 @@ export function UsagePricePanel({ session, configRevision, hasConfigurationEdits
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const pending = useRef(false);
+  const backfillProgress = useRef<{ revision: number; cursor: [string, string] | null } | null>(null);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const replace = (result: UsagePricing) => {
@@ -148,25 +149,60 @@ export function UsagePricePanel({ session, configRevision, hasConfigurationEdits
     } finally { pending.current = false; if (mounted.current) setBusy(false); }
   }
   const stale = snapshot !== null && configRevision !== undefined && snapshot.config_revision !== configRevision;
+  async function resetOfficial(key: string) {
+    if (!snapshot || pending.current || stale || hasConfigurationEdits) return;
+    pending.current = true; setBusy(true); setError("");
+    try {
+      const result = await request<UsagePricing>("/usage-pricing", { method: "PATCH", csrf: session.csrf_token,
+        body: { expected_revision: snapshot.revision, expected_config_revision: snapshot.config_revision, changes: {}, use_official: [key] } });
+      if (mounted.current) { replace(result); onNotice("已恢复官方参考价，新请求按发生时间选择价格。"); }
+    } catch (err) { if (mounted.current) setError(err instanceof Error ? err.message : "恢复预设失败"); }
+    finally { pending.current = false; if (mounted.current) setBusy(false); }
+  }
+  async function backfill() {
+    if (!snapshot || pending.current || stale || hasConfigurationEdits) return;
+    pending.current = true; setBusy(true); setError("");
+    let cursor: [string, string] | null = backfillProgress.current?.revision === snapshot.revision ? backfillProgress.current.cursor : null, total = 0, skipped = 0;
+    try {
+      for (let batch = 0; batch < 20; batch++) {
+        const result: { updated: number; skipped: number; next_cursor: [string, string] | null } = await request("/usage-pricing/backfill", {
+          method: "POST", csrf: session.csrf_token, body: { expected_revision: snapshot.revision,
+            expected_config_revision: snapshot.config_revision, cursor } });
+        total += result.updated; skipped += result.skipped; cursor = result.next_cursor;
+        backfillProgress.current = { revision: snapshot.revision, cursor };
+        if (!mounted.current || !cursor) break;
+      }
+      if (mounted.current) onNotice(`已补算 ${total} 条缺价记录，${skipped} 条暂缺价格或完整用量，已有价格快照保留。${cursor ? "本次已达批次上限，可再次点击继续。" : ""}补算采用参考价，不代表历史实扣账单。`);
+    } catch (err) { if (mounted.current) setError(`补算中断，已完成 ${total} 条保留。${err instanceof Error ? err.message : "请重试"}`); }
+    finally { pending.current = false; if (mounted.current) setBusy(false); }
+  }
   return <section className="card usage-price-card">
     <button type="button" className="usage-price-toggle" aria-expanded={open} aria-controls="usage-price-content"
       onClick={() => { setOpen(!open); if (!open && !snapshot) void load(); }}>
       <span><strong>费用估算单价</strong><small>按已保存的模型配置填写人民币单价</small></span><span aria-hidden="true">{open ? "−" : "+"}</span>
     </button>
     {open && <div id="usage-price-content" className="usage-price-content">
-      <p className="input-help">请以服务商当前报价和计价单位为准，最多保留 6 位小数。空白表示未配置，填写 0 表示确认免费。这里只用于估算，不是账单；保存后仅用于新请求，历史记录保留当时的单价。</p>
+      <p className="input-help">请以服务商当前报价和计价单位为准，最多保留 6 位小数。空白表示未配置，填写 0 表示确认免费。这里只用于估算，不是账单；保存用于新请求。历史缺价记录可单独补算，已有价格快照不会改写。官方参考价标注核对日期，不含个人优惠和赠送额度。</p>
       {snapshot && <UsagePriceSourceNote source={snapshot.source} />}
       {(hasConfigurationEdits || stale) && <p className="input-help danger-text" role="status">
         {hasConfigurationEdits ? "模型服务有未保存的修改，请先保存或放弃服务配置，再重新加载单价。" : "模型配置已变化，请重新加载单价后再保存。"}
       </p>}
       {error && <div className="alert alert-error" role="alert">{error}</div>}
       {busy && !snapshot && <p role="status">正在加载模型单价…</p>}
-      {snapshot?.models.map(model => <UsagePriceFields key={model.model_key} model={model}
-        draft={drafts[model.model_key]} disabled={busy || stale || hasConfigurationEdits}
-        onChange={draft => setDrafts(current => ({ ...current, [model.model_key]: draft }))} />)}
+      {snapshot?.models.map(model => <div key={model.model_key}>
+        <p className="input-help">{model.rates_source === "official" ? "官方参考价格 · 按请求时间计价" : model.rates_source === "custom" ? "自定义价格" : "尚未匹配单价"}
+          {model.preset_source_url && <> · <a href={model.preset_source_url} target="_blank" rel="noreferrer">查看官方价格</a></>}
+          {model.preset_version && <> · {model.preset_version}</>}</p>
+        <UsagePriceFields model={model} draft={drafts[model.model_key]} disabled={busy || stale || hasConfigurationEdits}
+          onChange={draft => setDrafts(current => ({ ...current, [model.model_key]: draft }))} />
+        {model.preset_version && model.rates_source === "custom" && <button className="button button-secondary" disabled={busy || stale || hasConfigurationEdits}
+          onClick={() => void resetOfficial(model.model_key)}>恢复官方参考价格</button>}
+      </div>)}
       {snapshot?.models.length === 0 && <p className="input-help">请先配置并保存可用的模型服务，再填写单价。</p>}
       <div className="usage-price-actions">
         <button className="button button-secondary" type="button" disabled={busy || hasConfigurationEdits} onClick={() => void load()}>重新加载{snapshot ? "（放弃单价修改）" : ""}</button>
+        <button className="button button-secondary" type="button" disabled={busy || stale || hasConfigurationEdits || !snapshot}
+          onClick={() => void backfill()}>补算历史缺价记录</button>
         <button className="button button-primary" type="button" disabled={busy || stale || hasConfigurationEdits || !snapshot?.models.length} onClick={() => void save()}>{busy ? "处理中…" : "保存单价"}</button>
       </div>
     </div>}

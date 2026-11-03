@@ -177,6 +177,7 @@ describe('服务选择与账号隔离', () => {
     vi.mocked(ApiClient.prototype.request).mockImplementation(async (path: string) => {if (path === '/auth/logout') throw new Error('offline'); return {items: []};});
     fireEvent.click(screen.getByRole('button', {name: /测试用户/}));
     fireEvent.click(await screen.findByRole('button', {name: '退出登录'}));
+    fireEvent.click(await screen.findByRole('button', {name: '确认退出登录'}));
     await screen.findByText(/系统凭据清理和远端会话撤销尚未确认/);
     expect(JSON.parse(localStorage.getItem('tada.client.server.v1')!).autoRestore).toBe(false);
     view.unmount();

@@ -52,6 +52,6 @@ node node_modules/jest/bin/jest.js --runInBand --cache=false --runTestsByPath __
 pwsh -NoProfile -File scripts/Test-PrivateVaultNative.ps1
 ```
 
-完整 Rust 集成验证由指定构建写入者执行 `cargo test -p tomorrow-api --test private_vault`。按照项目存储规范，优先使用本地快速构建和已有兼容缓存，允许临时用量超过 10 GB，构建后统一清理；不在生产服务器编译。Android 系统验证、真机恢复、安装包与服务器发布需要单独验收；JVM 测试不能代替 Android Keystore／指纹的真机验证。
+完整 Rust 集成验证由指定构建写入者执行 `cargo test -p tomorrow-api --test private_vault`。按照项目存储规范，优先使用本地快速构建和已有兼容缓存，允许临时用量超过 20 GB，构建后统一清理；不在生产服务器编译。Android 系统验证、真机恢复、安装包与服务器发布需要单独验收；JVM 测试不能代替 Android Keystore／指纹的真机验证。
 
 源工作区快照 `80597bb` 留有 26 项客户端／页面／原有记忆回归、TypeScript、ESLint、Android 模块独立编译和 4 项 JVM 加密测试通过的记录；它们不代替本次集成后的完整 Rust、设备和发布验收。本次发布的独立检查与产物记录位于 `artifacts/release42-20261102/`，以实际验收回执为准。

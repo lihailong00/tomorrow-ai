@@ -37,6 +37,7 @@ pub(super) async fn chat_stream(
         120,
     )?);
     input.remember = Some(input.remember.unwrap_or(false));
+    super::client_context::validate_input(&state.repository, &auth.user_id, input.client_request_id.as_deref(), input.client_context.as_ref()).await?;
     if input.remember == Some(true) {
         validate_text(&input.message, "记忆内容", 10000)?;
     }

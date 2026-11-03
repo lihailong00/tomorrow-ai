@@ -25,7 +25,7 @@ impl McpTransport for Upstream {
         })
     }
 }
-fn credentials(token:&str, environment:&str)->Credentials { Credentials { token:token.into(), environment:environment.into(), server_url:None } }
+fn credentials(token:&str, environment:&str)->Credentials { Credentials { token:token.into(), environment:environment.into(), server_url:None, account:None, client_id:None } }
 fn values(enabled:bool)->HashMap<String,String> { HashMap::from([("CONNECTOR_ENCRYPTION_KEY".into(),"42".repeat(32)),("BAIDU_NETDISK_EXPERIENCE_ENABLED".into(),enabled.to_string())]) }
 async fn fixture()->(PersonalMcpState, Repository, String, String, Arc<Upstream>) {
     let repo=Repository::connect("sqlite::memory:").await.unwrap();

@@ -180,6 +180,7 @@ function CostCard({ metrics, report, onEdit }: { metrics: UsageMetrics; report: 
     <Text style={u.amountLabel}>{periodLabels[report.period]} · {cost.title}</Text>
     <Text accessibilityLabel={'预估金额' + cost.amount} style={[u.amount, metrics.cost_status === 'unknown' && u.unknownAmount]}>{cost.amount}</Text>
     {metrics.cost_status !== 'complete' ? <Text style={u.caveat}>{cost.note} · {integerLabel(metrics.unknown_cost_call_count)} 次调用暂未完整估价</Text> : null}
+    {(metrics.reconstructed_cost_call_count ?? 0) > 0 ? <Text style={u.tiny}>其中 {metrics.reconstructed_cost_call_count} 次按带版本的参考价格补算，非历史实扣账单。</Text> : null}
     {onEdit ? <Pressable accessibilityRole="button" accessibilityLabel="修改统计日期范围" onPress={onEdit} style={u.rangeButton}><Text style={u.small}>{dateLabel(report.start_date)} — {dateLabel(report.end_date)}　⌄</Text></Pressable> : <Text style={u.small}>{dateLabel(report.start_date)} — {dateLabel(report.end_date)}</Text>}
     <Text style={u.tiny}>北京时间 · 包含起止当天</Text>
     {report.history_status === 'partial' ? <Text style={u.caveat}>仅含开始记录后的用量。{dateLabel(coverageDate(report))} 之前的历史未记录，不会当成零。</Text> : null}

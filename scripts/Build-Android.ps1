@@ -44,8 +44,8 @@ $nativeTestSummary = $null
 $storagePaths = @($NativeBuildDirectory, $env:CARGO_TARGET_DIR, $env:GRADLE_USER_HOME) | Where-Object { $_ } | ForEach-Object { Get-TadaFullPath $_ }
 
 function First-ExistingFile([string[]]$Candidates) {
-  foreach ($candidate in $Candidates) {
-    if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return (Resolve-Path -LiteralPath $candidate).Path }
+  foreach ($candidatePath in $Candidates) {
+    if ($candidatePath -and (Test-Path -LiteralPath $candidatePath -PathType Leaf)) { return (Resolve-Path -LiteralPath $candidatePath).Path }
   }
   return $null
 }
@@ -60,10 +60,10 @@ try {
   Register-TadaStoragePaths -RepoPath $repoPath -AdditionalPaths $storagePaths -Lease $packagingLease
   if ($NativeBuildDirectory) { Initialize-TadaNativeBuildDirectory -RepoPath $repoPath -NativeBuildDirectory $NativeBuildDirectory }
   $storageBefore = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
-  # 10 GB is a retained target after housekeeping, not a transient build cap.
+  # 20 GB is the retained limit after housekeeping, not a transient build cap.
   # Keep warm caches for build speed; reclaim unused outputs only in finally.
   $storageReady = $storageBefore
-  Write-Host ('Storage before build: {0:N2} GB measured ({1}); retained target after housekeeping: 10 GB. Temporary build usage may exceed the target.' -f ($storageBefore.TotalBytes / 1e9), $storageBefore.Status)
+  Write-Host ('Storage before build: {0:N2} GB measured ({1}); retained limit after housekeeping: 20 GB. Temporary build usage may exceed the limit.' -f ($storageBefore.TotalBytes / 1e9), $storageBefore.Status)
   if ($storageBefore.Status -eq 'incomplete') { Write-Warning 'Some project paths could not be measured; see the final storage report for accounting limits.' }
   Write-Verbose ('Estimated transient peak: {0:N2} GB; no pre-build cache cleanup or retained-target enforcement.' -f (($storageBefore.TotalBytes + $EstimatedBuildBytes) / 1e9))
   # Enforce actual available disk space, not the retained-storage target.
@@ -101,14 +101,14 @@ try {
     }
     # Prefer JDK 17. JDK 21 also runs this Gradle/AGP toolchain.
     foreach ($major in @(17,21)) {
-      foreach ($candidate in $javaCandidates) {
-        $releasePath = Join-Path $candidate 'release'
+      foreach ($javaCandidatePath in $javaCandidates) {
+        $releasePath = Join-Path $javaCandidatePath 'release'
         if ((Test-Path -LiteralPath $releasePath) -and
-            (Test-Path -LiteralPath (Join-Path $candidate 'bin/java.exe')) -and
-            (Test-Path -LiteralPath (Join-Path $candidate 'bin/jlink.exe')) -and
-            (Test-Path -LiteralPath (Join-Path $candidate 'bin/javac.exe'))) {
+            (Test-Path -LiteralPath (Join-Path $javaCandidatePath 'bin/java.exe')) -and
+            (Test-Path -LiteralPath (Join-Path $javaCandidatePath 'bin/jlink.exe')) -and
+            (Test-Path -LiteralPath (Join-Path $javaCandidatePath 'bin/javac.exe'))) {
           $release = Get-Content -LiteralPath $releasePath -Raw
-          if ($release -match ('JAVA_VERSION="' + $major + '\.')) { $JavaHome = $candidate; break }
+          if ($release -match ('JAVA_VERSION="' + $major + '\.')) { $JavaHome = $javaCandidatePath; break }
         }
       }
       if ($JavaHome) { break }
@@ -121,14 +121,14 @@ try {
 
   if (-not $AndroidHome) {
     $sdkCandidates = [System.Collections.Generic.List[string]]::new()
-    foreach ($candidate in @($env:ANDROID_HOME,$env:ANDROID_SDK_ROOT,(Join-Path $env:LOCALAPPDATA 'Android/Sdk'))) {
-      if ($candidate) { $sdkCandidates.Add($candidate) }
+    foreach ($sdkCandidatePath in @($env:ANDROID_HOME,$env:ANDROID_SDK_ROOT,(Join-Path $env:LOCALAPPDATA 'Android/Sdk'))) {
+      if ($sdkCandidatePath) { $sdkCandidates.Add($sdkCandidatePath) }
     }
     foreach ($drive in Get-PSDrive -PSProvider FileSystem) { $sdkCandidates.Add((Join-Path $drive.Root 'Android/Sdk')) }
-    foreach ($candidate in $sdkCandidates) {
-      if ((Test-Path -LiteralPath (Join-Path $candidate 'platforms/android-36/android.jar')) -and
-          (Test-Path -LiteralPath (Join-Path $candidate 'ndk/27.2.12479018/source.properties'))) {
-        $AndroidHome = $candidate; break
+    foreach ($sdkCandidatePath in $sdkCandidates) {
+      if ((Test-Path -LiteralPath (Join-Path $sdkCandidatePath 'platforms/android-36/android.jar')) -and
+          (Test-Path -LiteralPath (Join-Path $sdkCandidatePath 'ndk/27.2.12479018/source.properties'))) {
+        $AndroidHome = $sdkCandidatePath; break
       }
     }
   }
@@ -239,19 +239,25 @@ try {
   if ($packagingLease) {
     try {
       $phase = if ($buildSucceeded) { 'Success' } else { 'Failure' }
-      $postCleanup = Invoke-TadaBuildCacheCleanup -RepoPath $repoPath -Lease $packagingLease -Phase $phase -NativeBuildDirectory $NativeBuildDirectory
-      Write-TadaCleanupStatus $postCleanup
       $storageAfter = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
-      if ($storageAfter.TotalBytes -ge $storageAfter.WarningBytes -and -not $PreserveRustTarget) {
-        $rustCleanup = Invoke-TadaBuildCacheCleanup -RepoPath $repoPath -Lease $packagingLease -Phase $phase -IncludeRustTarget
-        Write-TadaCleanupStatus $rustCleanup
+      $postCleanup = $null
+      $rustCleanup = $null
+      if ($storageAfter.TotalBytes -gt $storageAfter.BudgetBytes) {
+        $postCleanup = Invoke-TadaBuildCacheCleanup -RepoPath $repoPath -Lease $packagingLease -Phase $phase -NativeBuildDirectory $NativeBuildDirectory
+        Write-TadaCleanupStatus $postCleanup
         $storageAfter = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
-      } else { $rustCleanup = $null }
+        if ($storageAfter.TotalBytes -gt $storageAfter.BudgetBytes -and -not $PreserveRustTarget) {
+          $rustCleanup = Invoke-TadaBuildCacheCleanup -RepoPath $repoPath -Lease $packagingLease -Phase $phase -IncludeRustTarget
+          Write-TadaCleanupStatus $rustCleanup
+          $storageAfter = Get-TadaStorageUsage -RepoPath $repoPath -AdditionalPaths $storagePaths
+        }
+      } else { Write-Host 'Retained storage is within 20 GB; warm Android/native/Rust caches are preserved for build speed.' }
       Write-TadaStorageStatus -Usage $storageAfter -Phase 'after housekeeping'
       $report = [ordered]@{
         schema_version=1; finished_at=[DateTimeOffset]::UtcNow.ToString('o'); build_succeeded=$buildSucceeded
         package_target=$packageTarget.Name; build_type=$BuildType; compact=[bool]$Compact; candidate=[bool]$Candidate; apk_path=$apkPath; mapping_path=$mappingPath; native_tests=$nativeTestSummary; package_contents=$packageContents; rust_target_preserved=[bool]$PreserveRustTarget
-        budget_bytes=10000000000; warning_bytes=9000000000; estimated_build_bytes=$EstimatedBuildBytes
+        budget_bytes=$storageAfter.BudgetBytes; warning_bytes=$storageAfter.WarningBytes; estimated_build_bytes=$EstimatedBuildBytes
+        retained_limit_status=$(if ($storageAfter.Status -eq 'incomplete') { 'unverified' } elseif ($storageAfter.TotalBytes -gt $storageAfter.BudgetBytes) { 'exceeded' } else { 'met' })
         budget_scope='retained_after_housekeeping'; temporary_overage_allowed=$true; pre_cleanup_policy='deferred_until_build_finishes'
         actual_peak_bytes=$null; peak_note='Pre/post measurements only; temporary build peak is not continuously monitored.'
         before=$storageBefore; ready=$storageReady; after=$storageAfter
@@ -264,7 +270,7 @@ try {
       Assert-TadaPlainPath $reportPath
       [IO.File]::WriteAllText($reportPath, (($report | ConvertTo-Json -Depth 12) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
       Write-Host ('Storage report: ' + $reportPath)
-      if ($storageAfter.TotalBytes -gt $storageAfter.BudgetBytes) { Write-Warning 'Safe cleanup finished, but retained project storage remains above the 10 GB target. Required data and unrelated work were preserved; temporary build usage was allowed.' }
+      if ($storageAfter.TotalBytes -gt $storageAfter.BudgetBytes) { Write-Warning 'Safe cleanup finished, but retained project storage remains above the 20 GB limit. Required data and unrelated work were preserved; temporary build usage was allowed.' }
     } catch { Write-Warning ('Storage housekeeping/report could not finish: ' + $_.Exception.Message) }
     finally { $packagingLease.Stream.Dispose() }
   }

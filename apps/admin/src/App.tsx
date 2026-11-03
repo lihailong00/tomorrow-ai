@@ -1819,6 +1819,7 @@ function SettingsPanel({
   const groups = useMemo(() => {
     const result = new Map<string, Setting[]>();
     for (const item of settings) {
+      if (item.key === "AMAP_WEB_API_KEY") continue;
       const provider = [
         "GOOGLE",
         "TENCENT_DOCS",

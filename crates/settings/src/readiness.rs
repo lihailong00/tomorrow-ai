@@ -221,7 +221,7 @@ pub(crate) fn evaluate(revision: i64, values: &HashMap<String, String>) -> Confi
         google.iter().any(|key| has(key)),
         missing(google),
     ));
-    groups.push(group("amap", "高德地图", has("AMAP_WEB_API_KEY"), vec![]));
+    groups.push(group("amap", "高德用户 Key 加密存储", has("CONNECTOR_ENCRYPTION_KEY"), vec![]));
     for (id, label, keys) in [
         ("huawei_health", "华为运动健康", ["HUAWEI_HEALTH_CLIENT_ID", "HUAWEI_HEALTH_CLIENT_SECRET", "HUAWEI_HEALTH_REDIRECT_URI"]),
         ("xiaomi_health", "小米运动健康", ["XIAOMI_HEALTH_CLIENT_ID", "XIAOMI_HEALTH_CLIENT_SECRET", "XIAOMI_HEALTH_REDIRECT_URI"]),

@@ -105,7 +105,7 @@ fn credentials() -> Credentials {
     Credentials {
         token: "fixture-token".into(),
         environment: "production".into(),
-        server_url: None,
+        server_url: None, account: None, client_id: None,
     }
 }
 

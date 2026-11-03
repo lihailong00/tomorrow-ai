@@ -9,11 +9,11 @@ Tauri 2 / Rust 外壳。共享产品界面在 `../client`；可独立构建 Web�
 ```powershell
 pnpm --dir apps/client install --frozen-lockfile
 pnpm --dir apps/desktop install --frozen-lockfile
-pnpm --dir apps/desktop tauri icon ../mobile/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png --output src-tauri/icons
+pwsh -NoProfile -File apps/desktop/scripts/Generate-Icons.ps1
 pnpm --dir apps/desktop dev
 ```
 
-首次没有 lockfile 时，用 `pnpm install` 生成并保留 lockfile。图标来自本项目 Android 已有品牌资源，生成后保留所有平台所需的图标。
+首次没有 lockfile 时，用 `pnpm install` 生成并保留 lockfile。图标源为 `src-tauri/icons/orb.svg`，与妥啦界面的蓝紫圆球品牌一致；脚本生成 Windows ICO、macOS ICNS 及 PNG 多尺寸资源，供应用文件和系统窗口使用。
 
 交付构建统一使用：
 
@@ -25,7 +25,7 @@ pwsh -NoProfile -File scripts/Build-Desktop.ps1
 
 脚本默认产出 `artifacts/desktop/candidates/`，不会自动替换已验收的 latest。通过验收后可传 `-Publish` 发布独立程序并保留原 latest 为 rollback。发布的独立 exe 依赖机器上的 WebView2；安装程序可引导安装 WebView2。当前首版未配置正式 Windows 代码签名证书，不把普通构建声明成签名发行版。
 
-脚本复用仓库打包锁和空间统计，检查真实磁盘剩余空间，允许构建临时超过 10 GB；不为临时超额清理活动缓存。`-CleanBuildCache` 只在成功复制/校验交付物、无活动构建进程且验证本任务 target 归属后清理本应用的可重建输出。保留最新和回退、源码、用户数据及凭据；不会清理其他工作区。收尾记录在 `artifacts/desktop-storage.json`，没有持续测量构建峰值。
+脚本复用仓库打包锁和空间统计，检查真实磁盘剩余空间，允许构建临时超过 20 GB；不为临时超额清理活动缓存。构建结束（成功或失败）后，超过 20 GB 才自动安全清理本应用可重建输出；未超限保留暖缓存。`-CleanBuildCache` 可显式要求后置清理，仍须无活动构建进程并验证本任务 target 归属。保留最新和回退、源码、用户数据及凭据；不会清理其他工作区。收尾记录在 `artifacts/desktop-storage.json`，没有持续测量构建峰值。
 
 ## 原生桥接协议
 

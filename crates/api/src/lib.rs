@@ -18,7 +18,9 @@ use tomorrow_domain::*;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use utoipa::{OpenApi, ToSchema};
 mod agent_api;
+mod wallet_tools;
 mod chat_stream;
+mod client_context;
 mod knowledge_api;
 mod memory_api;
 mod private_vault_api;
@@ -717,6 +719,8 @@ struct ChatInput {
     replace_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "tomorrow_domain::model::ReasoningEffort::is_off")]
     reasoning_effort: tomorrow_domain::model::ReasoningEffort,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_context: Option<client_context::ClientContext>,
 }
 #[derive(serde::Serialize, serde::Deserialize, ToSchema)]
 struct ChatResponse {
@@ -746,6 +750,7 @@ async fn chat(
         .map(|value| validate_text(&value, "请求编号", 120))
         .transpose()?;
     input.remember = Some(input.remember.unwrap_or(false));
+    client_context::validate_input(&state.repository, &auth.user_id, input.client_request_id.as_deref(), input.client_context.as_ref()).await?;
     if input.remember == Some(true) {
         validate_text(&input.message, "记忆内容", 10000)?;
     }
@@ -784,6 +789,8 @@ async fn run_chat(state: &AppState, user_id: &str, input: ChatInput, attempt_tok
 }
 async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attempt_token: &str,
     stream: Option<&tomorrow_domain::chat_stream::ChatStreamProducer>) -> Result<ChatResponse> {
+    let user = state.repository.user(user_id).await?;
+    let runtime_context = client_context::RuntimeContext::capture(input.client_context.as_ref(), &user.timezone, chrono::Utc::now());
     if let Some(request)=&input.client_request_id {state.repository.ensure_chat_request_visible(user_id,request).await?;}
     let content = validate_text(&input.message, "消息", 20000)?;
     let fingerprint = serde_json::to_string(&input)
@@ -937,10 +944,18 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
     let provider = state.provider.with_usage(tomorrow_domain::model::UsageContext::new(
         state.repository.clone(), user_id, "chat", format!("chat:{}:{}", conversation.id, assistant_id),
     ));
+    // The direct-model fallback receives the same ephemeral context. This local
+    // Message is never part of user_message, ChatTurn, memory jobs or history.
+    if state.agent.is_none() {
+        context.insert(0, Message { id: new_id(), conversation_id: conversation.id.clone(), role: "system".into(),
+            content: runtime_context.prompt()?, created_at: timestamp(now()), model_mode: None, attachments: Vec::new() });
+    }
+    let runtime_payload = serde_json::to_value(&runtime_context)
+        .map_err(|_| DomainError::Internal("本轮上下文格式无效".into()))?;
     let reply = if let (Some(agent), Some(ticket)) = (&state.agent, &ticket) {
         ModelReply {
             content: agent
-                .execute_with_reasoning(&state.repository, ticket, &context, "chat", input.reasoning_effort)
+                .execute_with_context(&state.repository, ticket, &context, "chat", input.reasoning_effort, Some(&runtime_payload))
                 .await?,
             mode: "llm".into(),
             provider: Some("pi".into()),

@@ -176,8 +176,8 @@ function Get-TadaStorageUsage {
   param(
     [Parameter(Mandatory)][string]$RepoPath,
     [string[]]$AdditionalPaths = @(),
-    [long]$BudgetBytes = 10000000000,
-    [long]$WarningBytes = 9000000000
+    [long]$BudgetBytes = 20000000000,
+    [long]$WarningBytes = 20000000000
   )
   if ($BudgetBytes -le 0 -or $WarningBytes -lt 0 -or $WarningBytes -gt $BudgetBytes) { throw 'Invalid storage thresholds.' }
   Initialize-TadaStorageScanner
@@ -214,9 +214,11 @@ function Get-TadaStorageUsage {
 function Write-TadaStorageStatus {
   param([Parameter(Mandatory)]$Usage, [string]$Phase, [long]$EstimatedBuildBytes=0)
   Write-Host ('Storage {0}: {1:N2} GB / {2:N0} GB ({3}).' -f $Phase, ($Usage.TotalBytes / 1e9), ($Usage.BudgetBytes / 1e9), $Usage.Status)
-  if ($Usage.TotalBytes -ge $Usage.WarningBytes) { Write-Warning 'Project storage is near or above the 10 GB target; safe rebuildable outputs will be reclaimed where possible.' }
+  if ($Phase -match '(?i)after|post|housekeeping|收尾' -and $Usage.TotalBytes -gt $Usage.BudgetBytes) {
+    Write-Warning ('Retained project storage remains above the {0:N0} GB limit after safe housekeeping; preserve required data and report the remaining excess.' -f ($Usage.BudgetBytes / 1e9))
+  }
   if ($EstimatedBuildBytes -gt 0 -and ($Usage.TotalBytes + $EstimatedBuildBytes) -gt $Usage.BudgetBytes) {
-    Write-Warning ('Estimated build peak: {0:N2} GB. This may exceed the target temporarily; post-build housekeeping is mandatory.' -f (($Usage.TotalBytes + $EstimatedBuildBytes) / 1e9))
+    Write-Host ('Estimated build peak: {0:N2} GB. Temporary excess is allowed; cleanup is deferred until the build finishes.' -f (($Usage.TotalBytes + $EstimatedBuildBytes) / 1e9))
   }
   if ($Usage.Status -eq 'incomplete') { Write-Warning 'Some paths could not be measured or contain reparse links. Do not treat this total as complete.' }
 }
@@ -285,7 +287,7 @@ function Invoke-TadaBuildCacheCleanup {
     [Parameter(Mandatory)][string]$RepoPath,
     [string]$NativeBuildDirectory,
     [Parameter(Mandatory)]$Lease,
-    [ValidateSet('Preflight','Success','Failure')][string]$Phase,
+    [Parameter(Mandatory)][ValidateSet('Success','Failure')][string]$Phase,
     [switch]$IncludeRustTarget
   )
   $repo = Get-TadaFullPath $RepoPath

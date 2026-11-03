@@ -194,6 +194,75 @@ it('keeps a personal credential transient and shows connected only after actual 
   await view.unmount();
 });
 
+it.each([
+  {
+    id: 'jianguoyun',
+    name: '坚果云',
+    credential_label: '应用密码',
+    requires_account: true,
+    extraLabel: '坚果云账号',
+    extraKey: 'account',
+  },
+  {
+    id: 'ima',
+    name: 'ima',
+    credential_label: 'ima API Key',
+    requires_client_id: true,
+    extraLabel: 'Client ID',
+    extraKey: 'client_id',
+  },
+])(
+  'requires and securely submits both credentials for $id',
+  async ({ extraLabel, extraKey, ...provider }) => {
+    const view = await setup(
+      connection({ ...provider, supports_sandbox: false }),
+    );
+    const input = (label: string) =>
+      view.tree.root
+        .findAllByType(TextInput)
+        .find(node => node.props.accessibilityLabel === label)!;
+    const fill = async (label: string, value: string) => {
+      await act(async () => input(label).props.onChangeText(value));
+    };
+    const submit = () =>
+      view.tree.root
+        .findAllByType(Button)
+        .find(
+          node =>
+            node.props.accessibilityLabel === '校验并连接' + provider.name,
+        )!;
+    await view.button('连接' + provider.name + '账号');
+    expect(input(provider.credential_label).props.secureTextEntry).toBe(true);
+    expect(input(extraLabel).props.value).toBe('');
+    await fill(provider.credential_label, ' example-private-token ');
+    expect(submit().props.disabled).toBe(true);
+    expect(view.request.mock.calls.some(call => call[1] === 'POST')).toBe(
+      false,
+    );
+    await fill(extraLabel, ' example-account ');
+    expect(submit().props.disabled).toBe(false);
+    await view.button('取消填写');
+    await view.button('连接' + provider.name + '账号');
+    expect(input(extraLabel).props.value).toBe('');
+    expect(input(provider.credential_label).props.value).toBe('');
+    await fill(provider.credential_label, ' example-private-token ');
+    await fill(extraLabel, ' example-account ');
+    await view.button('校验并连接' + provider.name);
+    expect(view.request).toHaveBeenLastCalledWith(
+      '/personal-mcp/' + provider.id + '/connect',
+      'POST',
+      {
+        token: 'example-private-token',
+        environment: 'production',
+        [extraKey]: 'example-account',
+      },
+      expect.anything(),
+    );
+    expect(view.tree.root.findAllByType(TextInput)).toHaveLength(0);
+    await view.unmount();
+  },
+);
+
 it('retains the current failed draft for correction and clears it when cancelled', async () => {
   const view = await setup();
   await view.button('连接滴滴出行账号');

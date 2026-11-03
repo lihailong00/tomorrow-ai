@@ -22,6 +22,7 @@ describe("administrator usage prices", () => {
     expect(database).not.toContain("当前使用部署环境中的单价");
     const missing = renderToStaticMarkup(<UsagePriceSourceNote source="unconfigured" />);
     expect(missing).toContain("费用保持未知");
+    expect(missing).toContain("自动采用已核对的参考价");
   });
   it("converts exact decimal yuan without rounding, conflating empty and zero, or exceeding safe integers", () => {
     expect(cnyToMicros(" ")).toBeNull();

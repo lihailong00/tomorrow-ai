@@ -46,7 +46,7 @@ ENV API_BIND=0.0.0.0:8080 \
     AGENT_MODE=pi AGENT_URL=http://127.0.0.1:8090 AGENT_PORT=8090 RUST_API_URL=http://127.0.0.1:8080 TADA_RUNTIME_CONFIG=enabled \
     SCHEDULER_MODE=local \
     TADA_CONFIG_DIR=/data/config TADA_ADMIN_DIST=/opt/tada/admin \
-    PERSONAL_MCP_NODE=/usr/local/bin/node PERSONAL_MCP_YUQUE_SCRIPT=/opt/tada/agent/node_modules/yuque-mcp/dist/cli.js \
+    PERSONAL_MCP_NODE=/usr/local/bin/node PERSONAL_MCP_YUQUE_SCRIPT=/opt/tada/agent/node_modules/yuque-mcp/dist/cli.js PERSONAL_MCP_FLIGGY_SCRIPT=/opt/tada/agent/node_modules/@fly-ai/flyai-cli/dist/flyai-bundle.cjs \
     UPLOAD_STORAGE=local UPLOAD_DIR=/data/uploads BACKUP_DIR=/data/backups \
     BACKUP_RECOVERY_FILES=/data/runtime.env BACKUP_ENABLED=true \
     PYTHONUNBUFFERED=1 RUST_LOG=tomorrow_api=info,tomorrow_worker=info

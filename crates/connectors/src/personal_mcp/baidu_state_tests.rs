@@ -52,7 +52,7 @@ async fn personal_experience_requires_explicit_runtime_opt_in_without_environmen
     let credentials = Credentials {
         token: "fake-fixture-token".into(),
         environment: "experience".into(),
-        server_url: None,
+        server_url: None, account: None, client_id: None,
     };
     assert!(
         disabled

@@ -139,3 +139,17 @@ test('revoking consent during a delayed read prevents a new upload', async () =>
   expect(f.api.request.mock.calls.filter(([, method]) => method === 'PUT')).toHaveLength(1);
   expect(f.local().backup_enabled).toBe(false);
 });
+
+test('canceling restore during a delayed fetch prevents native decryption and reports actual stages', async () => {
+  const f = fixture({ version: 4, envelope: encrypted, updated_at: 1 });
+  const controller = new AbortController();
+  const stages: string[] = [];
+  let resolve!: (value: VaultCloudState) => void;
+  f.api.request.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+  const restoring = f.cloud.restore('TV1-EXAMPLE', phase => stages.push(phase), controller.signal);
+  while (!resolve) await Promise.resolve();
+  controller.abort(); resolve(f.remote());
+  await expect(restoring).rejects.toThrow('取消');
+  expect(stages).toEqual(['fetching']);
+  expect(f.native.restore).not.toHaveBeenCalled();
+});

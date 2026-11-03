@@ -161,7 +161,7 @@ pub static DEFINITIONS: &[SettingDefinition] = &[
         "url",
         ""
     ),
-    item!(secret "AMAP_WEB_API_KEY","connections","高德 Web API Key"),
+    item!(secret "AMAP_WEB_API_KEY","connections","旧版高德服务 Key（已停用，请在 App 配置自己的 Key）"),
     item!("BAIDU_NETDISK_EXPERIENCE_ENABLED", "connections", "百度网盘个人体验（仅限测试，非正式环境）", "boolean", "false"),
     item!("HUAWEI_HEALTH_CLIENT_ID", "connections", "华为运动健康应用 ID", "text", ""),
     item!(secret "HUAWEI_HEALTH_CLIENT_SECRET", "connections", "华为运动健康应用 Secret"),

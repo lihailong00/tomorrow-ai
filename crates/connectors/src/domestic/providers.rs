@@ -28,9 +28,8 @@ const ITEM_LIMIT: usize = 20;
 
 pub fn configured(id: &str) -> bool {
     match id {
-        "amap" => amap_key().is_ok(),
         // The calling vault separately checks encryption configuration.
-        "yuque" | "wecom" | "zhihu" => true,
+        "amap" | "yuque" | "wecom" | "zhihu" => true,
         _ => false,
     }
 }
@@ -41,8 +40,9 @@ pub async fn verify(id: &str, credentials: &Value) -> Result<Value> {
     let client = http_client()?;
     match id {
         "amap" => {
-            amap_read(&client, &json!({"keywords":"北京","limit":1})).await?;
-            Ok(json!({}))
+            let key = secret(credentials, "web_api_key", 256)?;
+            amap_read_with_key(&client, &json!({"keywords":"北京南站","city":"北京","limit":1}), &key).await?;
+            Ok(json!({"web_api_key":key}))
         }
         "yuque" => {
             let token = secret(credentials, "token", 4096)?;
@@ -80,16 +80,15 @@ pub async fn verify(id: &str, credentials: &Value) -> Result<Value> {
 }
 
 pub async fn read(id: &str, credentials: &Value, query: &Value) -> Result<Value> {
-    read_with_map_key(id, credentials, query, amap_key().ok().as_deref()).await
-}
-
-pub async fn read_with_map_key(id: &str, credentials: &Value, query: &Value, map_key: Option<&str>) -> Result<Value> {
     if !query.is_object() {
         return Err(ConnectorError::invalid());
     }
     let client = http_client()?;
     match id {
-        "amap" => amap_read_with_key(&client, query, map_key.ok_or_else(|| ConnectorError::new(StatusCode::SERVICE_UNAVAILABLE, "not_configured", "高德地图尚未配置"))?).await,
+        "amap" => {
+            let key = secret(credentials, "web_api_key", 256)?;
+            amap_read_with_key(&client, query, &key).await
+        }
         "yuque" => yuque_read(&client, credentials, query).await,
         "wecom" => wecom_read(&client, credentials, query).await,
         "zhihu" => zhihu_read(&client, credentials, query).await,
@@ -247,18 +246,6 @@ async fn json_response(request: RequestBuilder) -> Result<Value> {
     serde_json::from_slice(&body).map_err(|_| provider_error())
 }
 
-fn amap_key() -> Result<String> {
-    let value = std::env::var("AMAP_WEB_API_KEY").unwrap_or_default();
-    if value.trim().is_empty() {
-        return Err(ConnectorError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "not_configured",
-            "高德地图尚未配置服务端 Web API Key",
-        ));
-    }
-    secret(&json!({"key":value}), "key", 256)
-}
-
 fn coordinate(value: &str) -> Result<String> {
     let parts: Vec<_> = value.split(',').collect();
     if parts.len() != 2 {
@@ -294,11 +281,6 @@ fn amap_success(value: &Value) -> Result<()> {
         ) => Err(permission_error()),
         _ => Err(provider_error()),
     }
-}
-
-async fn amap_read(client: &Client, query: &Value) -> Result<Value> {
-    let key = amap_key()?;
-    amap_read_with_key(client, query, &key).await
 }
 
 async fn amap_read_with_key(client: &Client, query: &Value, key: &str) -> Result<Value> {

@@ -345,6 +345,23 @@ try {
     Assert-Equal $usage.Status 'within_budget' 'Linked worktree discovery incomplete'
   }
 
+  Invoke-Case 'default-retained-limit-is-20gb' {
+    $directory = New-GitFixture 'default-storage-limit'
+    $usage = Get-TadaStorageUsage -RepoPath $directory
+    Assert-Equal $usage.BudgetBytes 20000000000 'Default retained limit is not 20 GB.'
+    Assert-Equal $usage.WarningBytes 20000000000 'Default warning threshold should not trigger below 20 GB.'
+  }
+
+  Invoke-Case 'preflight-cleanup-is-rejected-and-warm-cache-preserved' {
+    $directory = New-GitFixture 'no-preflight-cleanup'
+    $cache = Join-Path $directory 'apps/mobile/android/app/build/warm.bin'
+    Write-Fixture $cache 'warm-cache'
+    $lease = Enter-TadaPackagingLease -RepoPath $directory -TimeoutSeconds 0
+    try { Assert-Throws { Invoke-TadaBuildCacheCleanup -RepoPath $directory -Lease $lease -Phase Preflight } 'Preflight cleanup was allowed.' }
+    finally { $lease.Stream.Dispose() }
+    Assert-True ([IO.File]::Exists($cache)) 'Preflight rejection changed the cache.'
+  }
+
   Invoke-Case 'budget-and-warning-boundaries-use-real-measured-bytes' {
     $directory = New-GitFixture 'thresholds'
     $usage = Get-TadaStorageUsage -RepoPath $directory
@@ -430,7 +447,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Fixture tracked-cache setup failed.' }
     function Get-TadaActiveBuildProcesses { return @() }
     $lease = Enter-TadaPackagingLease -RepoPath $directory -TimeoutSeconds 0
-    try { $result = Invoke-TadaBuildCacheCleanup -RepoPath $directory -Lease $lease -Phase Preflight }
+    try { $result = Invoke-TadaBuildCacheCleanup -RepoPath $directory -Lease $lease -Phase Success }
     finally { $lease.Stream.Dispose() }
     Assert-True ([IO.File]::Exists($private)) 'Private file in cache directory was deleted.'
     Assert-True ([IO.File]::Exists($tracked)) 'Tracked source in cache directory was deleted.'
@@ -510,7 +527,7 @@ try {
     function Get-TadaActiveBuildProcesses { return @() }
     $lease = Enter-TadaPackagingLease -RepoPath $directory -TimeoutSeconds 0
     try {
-      Invoke-TadaBuildCacheCleanup -RepoPath $directory -Lease $lease -Phase Preflight -IncludeRustTarget | Out-Null
+      Invoke-TadaBuildCacheCleanup -RepoPath $directory -Lease $lease -Phase Success -IncludeRustTarget | Out-Null
       Assert-True ([IO.File]::Exists($file)) 'Unmarked target was deleted.'
       Write-Fixture (Join-Path $directory 'target/CACHEDIR.TAG') 'Signature: 8a477f597d28d172789f06886806bc55'
       Invoke-TadaBuildCacheCleanup -RepoPath $directory -Lease $lease -Phase Success | Out-Null
@@ -540,8 +557,9 @@ try {
     Assert-True ([IO.File]::Exists($private)) 'Cleanup traversed a cache junction.'
   }
 
-  Invoke-Case 'android-build-failure-runs-housekeeping-report-and-preserves-delivery' {
-    $directory = New-GitFixture 'build-integration'
+  foreach ($simulatedBytes in @(13000000000,20000000000,21000000000)) {
+  Invoke-Case ('android-build-failure-postbuild-limit-' + $simulatedBytes) {
+    $directory = New-GitFixture ('build-integration-' + $simulatedBytes)
     $scriptDirectory = Join-Path $directory 'scripts'
     New-Item -ItemType Directory -Path $scriptDirectory -Force | Out-Null
     $buildCopy = Join-Path $scriptDirectory 'Build-Android.ps1'
@@ -551,7 +569,7 @@ try {
       Copy-Item -LiteralPath $targetSelector -Destination (Join-Path $scriptDirectory 'Android-PackageTargets.ps1')
     }
     # Keep cleanup process inspection deterministic and simulate a temporary
-    # >10 GB total without allocating large files or touching real build caches.
+    # 13/20/21 GB totals without allocating large files or touching real caches.
     $helper = [IO.File]::ReadAllText($storageScript) + @'
 
 function Get-TadaActiveBuildProcesses { return @() }
@@ -559,11 +577,12 @@ $script:FixtureRealStorageUsage = (Get-Command Get-TadaStorageUsage).ScriptBlock
 function Get-TadaStorageUsage {
   param([string]$RepoPath, [string[]]$AdditionalPaths = @())
   $usage = & $script:FixtureRealStorageUsage -RepoPath $RepoPath -AdditionalPaths $AdditionalPaths
-  $usage.TotalBytes = 11000000000
-  $usage.Status = 'over_budget'
+  $usage.TotalBytes = __SIMULATED_BYTES__
+  $usage.Status = if ($usage.TotalBytes -gt $usage.BudgetBytes) { 'over_budget' } else { 'within_budget' }
   return $usage
 }
 '@
+    $helper = $helper.Replace('__SIMULATED_BYTES__', [string]$simulatedBytes)
     Write-Fixture (Join-Path $scriptDirectory 'Project-Storage.ps1') $helper
     $apkDirectory = Join-Path $directory 'artifacts/apk'
     New-Item -ItemType Directory -Path $apkDirectory -Force | Out-Null
@@ -589,7 +608,8 @@ exit 42
     foreach ($name in @('java.exe','javac.exe','jlink.exe')) { Write-Fixture (Join-Path $java ('bin/' + $name)) 'fixture-only' }
     $sdk = Join-Path $directory 'fake-tools/sdk'
     New-Item -ItemType Directory -Path $sdk -Force | Out-Null
-    $native = Join-Path $fixtureRoot 'build-integration-native'
+    $nativeName = 'build-integration-native-' + $simulatedBytes
+    $native = Join-Path $fixtureRoot $nativeName
     $oldLocation = (Get-Location).Path
     $oldJava = $env:JAVA_HOME
     $oldGradle = [Environment]::GetEnvironmentVariable('GRADLE_USER_HOME','Process')
@@ -598,7 +618,7 @@ exit 42
     $env:CARGO_TARGET_DIR = 'relative-cargo-cache'
     Set-Location -LiteralPath $directory
     try {
-      Assert-Throws { & $buildCopy -NodePath $node -JavaHome $java -AndroidHome $sdk -NativeBuildDirectory '../build-integration-native' -SkipInstall -PreserveRustTarget -EstimatedBuildBytes 0 } 'Simulated TypeScript failure was not reported.'
+      Assert-Throws { & $buildCopy -NodePath $node -JavaHome $java -AndroidHome $sdk -NativeBuildDirectory ('../' + $nativeName) -SkipInstall -PreserveRustTarget -EstimatedBuildBytes 0 } 'Simulated TypeScript failure was not reported.'
       Assert-Equal (Get-Location).Path $directory 'Build failure did not restore its entry working directory'
       Assert-Equal $env:GRADLE_USER_HOME 'relative-gradle-cache' 'Relative Gradle environment was not restored after failure'
       Assert-Equal $env:CARGO_TARGET_DIR 'relative-cargo-cache' 'Relative Cargo environment was not restored after failure'
@@ -610,31 +630,35 @@ exit 42
       else { [Environment]::SetEnvironmentVariable('CARGO_TARGET_DIR',$oldCargo,'Process') }
     }
     Assert-Equal (Published-State $apkDirectory) $before 'Build failure changed latest or rollback'
-    Assert-True (-not [IO.File]::Exists($cache)) 'Failure finally did not reclaim generated cache.'
+    Assert-Equal ([IO.File]::Exists($cache)) ($simulatedBytes -le 20000000000) 'Post-build cleanup did not respect the 20 GB limit.'
     Assert-True ([IO.File]::Exists((Join-Path $directory '.env'))) 'Failure cleanup deleted private configuration.'
     $reportPath = Join-Path $directory 'artifacts/packaging-storage.json'
     Assert-True ([IO.File]::Exists($reportPath)) 'Failure finally did not write a storage report.'
     $buildReport = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
     Assert-True (-not $buildReport.build_succeeded) 'Failed build report claimed success.'
-    Assert-Equal $buildReport.post_cleanup.Phase 'Failure' 'Build failure used wrong cleanup phase'
+    if ($simulatedBytes -gt 20000000000) { Assert-Equal $buildReport.post_cleanup.Phase 'Failure' 'Build failure used wrong cleanup phase' }
+    else { Assert-True ($null -eq $buildReport.post_cleanup) 'Within-limit build discarded warm caches.' }
     Assert-True ($null -ne $buildReport.before -and $null -ne $buildReport.after) 'Pre/post measurements missing from report.'
-    Assert-Equal $buildReport.before.TotalBytes 11000000000 'Over-target temporary usage fixture was not exercised.'
+    Assert-Equal $buildReport.before.TotalBytes $simulatedBytes 'Temporary usage fixture was not exercised.'
     Assert-True ($null -eq $buildReport.pre_cleanup) 'Build ran a budget-triggered preflight cleanup.'
-    Assert-Equal $buildReport.budget_scope 'retained_after_housekeeping' '10 GB target scope missing.'
+    Assert-Equal $buildReport.budget_bytes 20000000000 '20 GB retained limit missing.'
+    Assert-Equal $buildReport.budget_scope 'retained_after_housekeeping' 'Retained limit scope missing.'
+    Assert-Equal $buildReport.retained_limit_status $(if ($simulatedBytes -gt 20000000000) { 'exceeded' } else { 'met' }) 'Retained limit result is inaccurate.'
     Assert-True $buildReport.temporary_overage_allowed 'Temporary build overage was not allowed.'
     Assert-True $buildReport.rust_target_preserved 'PreserveRustTarget was not recorded.'
     Assert-True ([IO.File]::Exists($rustCache)) 'PreserveRustTarget did not retain the reusable Rust cache.'
     $registered = Get-Content -LiteralPath (Join-Path $directory '.tada-storage.local.json') -Raw | ConvertFrom-Json
     Assert-True (@($registered.additional_measure_paths) -icontains $native) 'Relative native path was not normalized before changing working directory.'
-    Assert-True (-not [IO.Directory]::Exists($native)) 'Relative native output was not reclaimed at its original resolved path.'
+    Assert-Equal ([IO.Directory]::Exists($native)) ($simulatedBytes -le 20000000000) 'External native cache cleanup did not respect the retained limit.'
     $observed = Get-Content -LiteralPath (Join-Path $directory 'fake-tools/observed-env.json') -Raw | ConvertFrom-Json
-    Assert-True $observed.cache_present_at_compile 'Warm Android cache was purged before compilation solely because usage exceeded 10 GB.'
+    Assert-True $observed.cache_present_at_compile 'Warm Android cache was purged before the build finished.'
     Assert-Equal $observed.gradle (Join-Path $directory 'relative-gradle-cache') 'Gradle command would use another unaccounted relative cache'
     Assert-Equal $observed.cargo (Join-Path $directory 'relative-cargo-cache') 'Cargo command would use another unaccounted relative cache'
     Assert-Equal (Get-Location).Path $oldLocation 'Build failure did not restore working directory'
     Assert-Equal $env:JAVA_HOME $oldJava 'Build failure did not restore JAVA_HOME'
     $lease = Enter-TadaPackagingLease -RepoPath $directory -TimeoutSeconds 0
     $lease.Stream.Dispose()
+  }
   }
 } finally {
   $sourceHashes = [ordered]@{}

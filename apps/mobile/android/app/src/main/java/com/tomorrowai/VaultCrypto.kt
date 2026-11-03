@@ -21,7 +21,7 @@ object VaultCrypto {
     return "TV1-" + key.joinToString("") { "%02X".format(it.toInt() and 255) }.chunked(8).joinToString("-")
   }
   fun recoveryKey(value: String): ByteArray {
-    val normalized = value.trim().replace(" ", "").replace("\n", "").uppercase()
+    val normalized = value.replace(Regex("\\s+"), "").uppercase()
     require(normalized.startsWith("TV1-")) { "恢复密钥格式不正确" }
     val hex = normalized.removePrefix("TV1-").replace("-", "")
     require(hex.matches(Regex("[0-9A-F]{64}"))) { "恢复密钥格式不正确" }

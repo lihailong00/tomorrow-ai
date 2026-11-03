@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "妥啦",
   "mainBinaryName": "tada-desktop",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "identifier": "com.tada.desktop",
   "build": {
     "beforeDevCommand": "pnpm --dir ../client dev --host 127.0.0.1 --port 1430 --strictPort",

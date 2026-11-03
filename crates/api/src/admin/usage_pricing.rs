@@ -14,6 +14,9 @@ struct ConfiguredModel {
     provider: String,
     capabilities: Vec<String>,
     rates: UsageRates,
+    rates_source: String,
+    preset_version: Option<String>,
+    preset_source_url: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -28,7 +31,10 @@ struct Pricebook {
 pub(super) struct PriceInput {
     expected_revision: i64,
     expected_config_revision: i64,
+    #[serde(default)]
     changes: BTreeMap<String, UsageRates>,
+    #[serde(default)]
+    use_official: Vec<String>,
 }
 
 fn domain_error(error: DomainError) -> AdminError {
@@ -66,11 +72,19 @@ async fn snapshot(state: &AdminState) -> Result<Json<Value>> {
     let prices = parse_pricebook(&effective)?;
     let mut models = configured_models(&values);
     for model in &mut models {
-        model.rates = prices
-            .models
-            .get(&model.model_key)
-            .cloned()
-            .unwrap_or_default();
+        let identity = UsageIdentity { model_key: model.model_key.clone(), model: model.model.clone(),
+            model_name: model.model_name.clone(), provider: model.provider.clone() };
+        let preset = model.capabilities.iter().find_map(|capability|
+            tomorrow_domain::usage::official_usage_price(&identity, capability, now()));
+        model.preset_version = preset.as_ref().map(|p| p.version.clone());
+        model.preset_source_url = preset.as_ref().map(|_| if model.provider == "DeepSeek" {
+            "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/".into()
+        } else { "https://help.aliyun.com/zh/model-studio/model-pricing".into() });
+        if let Some(rates) = prices.models.get(&model.model_key) {
+            model.rates = rates.clone(); model.rates_source = "custom".into();
+        } else if let Some(preset) = preset {
+            model.rates = preset.rates; model.rates_source = "official".into();
+        }
     }
     Ok(Json(
         json!({"revision":revision,"config_revision":config_revision,
@@ -86,8 +100,8 @@ pub(super) async fn save(
     require_owner(&session)?;
     if !(0..=MAX_SAFE_INTEGER).contains(&input.expected_revision)
         || !(0..=MAX_SAFE_INTEGER).contains(&input.expected_config_revision)
-        || input.changes.is_empty()
-        || input.changes.len() > 4
+        || (input.changes.is_empty() && input.use_official.is_empty())
+        || input.changes.len() + input.use_official.len() > 4
     {
         return Err(invalid());
     }
@@ -96,10 +110,9 @@ pub(super) async fn save(
         return Err(ConfigError::Conflict.into());
     }
     let configured = configured_models(&values);
-    if input
-        .changes
-        .keys()
+    if input.changes.keys().chain(input.use_official.iter())
         .any(|key| !configured.iter().any(|model| &model.model_key == key))
+        || input.use_official.iter().any(|key| input.changes.contains_key(key))
     {
         return Err(AdminError(
             StatusCode::CONFLICT,
@@ -115,7 +128,15 @@ pub(super) async fn save(
     if revision != input.expected_revision {
         return Err(ConfigError::Conflict.into());
     }
-    let serialized = merge_prices(&effective, input.changes)?;
+    let serialized = if input.use_official.is_empty() { merge_prices(&effective, input.changes)? } else {
+        let mut prices = parse_pricebook(&effective)?;
+        prices.models.extend(input.changes);
+        for key in input.use_official { prices.models.remove(&key); }
+        prices.version = uuid::Uuid::new_v4().to_string();
+        let value = serde_json::to_string(&prices).map_err(|_| internal())?;
+        validate_pricebook_json(&value).map_err(domain_error)?;
+        value
+    };
     // Config updates and the pricebook have independent CAS revisions. A concurrent provider
     // switch can only leave a price attached to its old opaque key, never to the new deployment.
     if state.settings.revision().await? != config_revision {
@@ -127,6 +148,27 @@ pub(super) async fn save(
         .await
         .map_err(domain_error)?;
     snapshot(&state).await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BackfillInput {
+    expected_revision: i64,
+    expected_config_revision: i64,
+    #[serde(default)]
+    cursor: Option<(String, String)>,
+}
+
+pub(super) async fn backfill(State(state): State<AdminState>, session: AdminSession,
+    Json(input): Json<BackfillInput>) -> Result<Json<Value>> {
+    require_owner(&session)?;
+    if input.expected_config_revision != state.settings.revision().await? {
+        return Err(ConfigError::Conflict.into());
+    }
+    let result = state.repository.backfill_missing_usage_prices(input.expected_revision, input.cursor)
+        .await.map_err(domain_error)?;
+    Ok(Json(json!({"scanned":result.scanned,"updated":result.updated,"skipped":result.skipped,
+        "next_cursor":result.next_cursor,"note":"仅补算缺少价格快照的记录，采用带版本的参考价格，不代表历史实扣账单"})))
 }
 
 fn merge_prices(effective: &str, changes: BTreeMap<String, UsageRates>) -> Result<String> {
@@ -216,6 +258,9 @@ fn configured_models(values: &HashMap<String, String>) -> Vec<ConfiguredModel> {
                 provider: identity.provider,
                 capabilities: vec![capability.into()],
                 rates: UsageRates::default(),
+                rates_source: "unconfigured".into(),
+                preset_version: None,
+                preset_source_url: None,
             });
         }
     };
@@ -586,6 +631,20 @@ mod tests {
             parse_pricebook(&persisted).unwrap().models[key].input_cny_micros_per_million,
             Some(0)
         );
+        async fn backfill_call(state: &AdminState, cookie: Option<&str>, csrf: Option<&str>, body: Value) -> StatusCode {
+            let mut request = axum::http::Request::builder().method(Method::POST)
+                .uri("/admin/api/usage-pricing/backfill").header(header::HOST,"unit.test")
+                .header(header::ORIGIN,"https://unit.test").header(header::CONTENT_TYPE,"application/json");
+            if let Some(cookie)=cookie { request=request.header(header::COOKIE,cookie); }
+            if let Some(csrf)=csrf { request=request.header("x-csrf-token",csrf); }
+            router(state.clone()).oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap().status()
+        }
+        let backfill_body=json!({"expected_revision":revision,"expected_config_revision":saved["config_revision"],"cursor":null});
+        assert_eq!(backfill_call(&state,None,None,backfill_body.clone()).await,StatusCode::UNAUTHORIZED);
+        assert_eq!(backfill_call(&state,Some(&cookie),None,backfill_body.clone()).await,StatusCode::FORBIDDEN);
+        assert_eq!(backfill_call(&state,Some(&cookie),Some(&csrf_token),backfill_body.clone()).await,StatusCode::OK);
+        let mut stale_backfill=backfill_body.clone(); stale_backfill["expected_revision"]=json!(revision+1);
+        assert_eq!(backfill_call(&state,Some(&cookie),Some(&csrf_token),stale_backfill).await,StatusCode::CONFLICT);
         sqlx::query("UPDATE admin_roles SET role='admin' WHERE user_id=$1")
             .bind(&owner.id)
             .execute(&state.repository.pool())
@@ -595,5 +654,6 @@ mod tests {
             call(&state, Some(&cookie), None, None).await.0,
             StatusCode::FORBIDDEN
         );
+        assert_eq!(backfill_call(&state,Some(&cookie),Some(&csrf_token),backfill_body).await,StatusCode::FORBIDDEN);
     }
 }

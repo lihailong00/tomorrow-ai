@@ -8,6 +8,7 @@ import { markdownBlocks, markdownInlineText, type MarkdownBlock } from './markdo
 import { LinkedText, LinkPreviewScope, DocumentLink } from './LinkPreview';
 import { markdownLinks } from './markdownLinks';
 import { NativeCodeBlock } from './NativeCodeBlock';
+import { useMessageLongPress } from './MessageLongPress';
 
 function inline(value: string) { return markdownLinks(value).some(t => t.kind === 'link') ? <LinkedText value={value} /> : markdownInlineText(value); }
 
@@ -29,6 +30,7 @@ function columnWidths(table: TableBlock, available: number, fontSize: number, fo
 }
 
 function NativeMarkdownTable({ table, textStyle }: { table: TableBlock; textStyle?: StyleProp<TextStyle> }) {
+  const onLongPress = useMessageLongPress();
   const { width, fontScale } = useWindowDimensions();
   const [measuredWidth, setMeasuredWidth] = useState(0);
   const available = measuredWidth || Math.max(1, width - 52);
@@ -42,7 +44,7 @@ function NativeMarkdownTable({ table, textStyle }: { table: TableBlock; textStyl
         const plain = markdownInlineText(value);
         const label = markdownInlineText(table.headers[column]) || `第 ${column + 1} 列`;
         return <View key={column} style={[tableStyles.cell, { width: widths[column] }, column > 0 && tableStyles.nextColumn]}>
-          <Text readingText={plain} selectable accessibilityRole={header ? 'header' : 'text'}
+          <Text readingText={plain} selectable={!onLongPress} onLongPress={onLongPress} accessibilityRole={header ? 'header' : 'text'}
             accessibilityLabel={header ? label : `${label}：${plain || '空白'}`}
             style={[s.body, textStyle, tableStyles.cellText, header && tableStyles.headerText, { textAlign: table.alignments[column] }]}>
             {inline(value)}
@@ -68,6 +70,7 @@ function NativeMarkdownTable({ table, textStyle }: { table: TableBlock; textStyl
 
 /** Safe native rendering: model output never becomes executable HTML or a WebView. */
 export function ResultText({ content, textStyle }: { content: string; textStyle?: StyleProp<TextStyle> }) {
+  const onLongPress = useMessageLongPress();
   const blocks = useMemo(() => markdownBlocks(content), [content]);
   return <LinkPreviewScope blocks={blocks}><View style={{ gap: 7 }}>
     {blocks.map(block => {
@@ -79,7 +82,7 @@ export function ResultText({ content, textStyle }: { content: string; textStyle?
       if (tokens.length === 1 && tokens[0].kind === 'link' && tokens[0].source.pdf) return <DocumentLink key={`pdf:${block.line}`} source={tokens[0].source} />;
       const heading = !code && /^(#{1,4})\s+(.+)$/.exec(line);
       const value = (heading ? heading[2] : line).replace(/^[-*]\s/, '• ');
-      return <Text readingText={code ? line : markdownInlineText(value)} selectable key={`line:${block.line}`} style={[
+      return <Text readingText={code ? line : markdownInlineText(value)} selectable={!onLongPress} onLongPress={onLongPress} key={`line:${block.line}`} style={[
         s.body,
         textStyle,
         heading && { fontSize: heading[1].length < 3 ? 18 : 15, fontWeight: '600', color: colors.ink, marginTop: 12 },

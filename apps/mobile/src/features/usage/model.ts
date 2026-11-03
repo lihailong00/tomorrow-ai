@@ -68,6 +68,14 @@ export function durationLabel(ms: number | null): string {
   return seconds < 60 ? seconds + '秒' : Math.floor(seconds / 60) + '分' + (seconds % 60 ? seconds % 60 + '秒' : '钟');
 }
 export function costPresentation(metrics: UsageMetrics) {
+  const missingPrice = metrics.missing_price_call_count ?? 0;
+  const missingUsage = metrics.missing_measurement_call_count ?? 0;
+  if (metrics.cost_status === 'unknown' && missingPrice > 0 && missingUsage === 0)
+    return { title: '缺少模型单价', amount: '待配置价格', note: '用量已记录，请管理员配置单价或启用官方参考价格后补算' };
+  if (metrics.cost_status === 'unknown' && missingUsage > 0 && missingPrice === 0)
+    return { title: '计费用量未齐', amount: '等待完整用量', note: '单价已匹配，服务商尚未返回计算费用所需的完整用量' };
+  if (metrics.cost_status === 'unknown' && missingPrice > 0 && missingUsage > 0)
+    return { title: '计价资料未齐', amount: '暂无法估算', note: `${missingPrice} 次缺少单价，${missingUsage} 次缺少完整计费用量` };
   if (metrics.cost_status === 'unknown') return { title: '价格未配置 / 暂无法估算', amount: '暂无法估算', note: '价格未配置或计费所需用量未返回' };
   if (metrics.cost_status === 'partial') return { title: '已知预估', amount: moneyLabel(metrics.known_cost_cny_micros), note: '部分费用未定价' };
   return { title: '预估费用', amount: moneyLabel(metrics.known_cost_cny_micros), note: '预估' };
@@ -95,6 +103,9 @@ export function sumMetrics(cells: UsageMetrics[]): UsageMetrics {
     audio_ms: null, image_count: null, usage_status: status, known_cost_cny_micros: known,
     estimated_cost_cny_micros: unknown ? null : known, unknown_cost_call_count: unknown,
     cost_status: unknown === 0 ? 'complete' : unknown === count ? 'unknown' : 'partial' };
+  for (const key of ['missing_price_call_count','missing_measurement_call_count','reconstructed_cost_call_count'] as const) {
+    if (cells.some(cell => cell[key] !== undefined)) result[key] = safeSum(cells.map(cell => cell[key] ?? 0));
+  }
   for (const key of nullableKeys) {
     const measured = cells.flatMap(cell => cell[key] === null ? [] : [cell[key] as number]);
     if (cells.length) result[key] = measured.length ? safeSum(measured) : null;

@@ -4,6 +4,11 @@ pub(crate) mod memos;
 pub(crate) mod notion;
 pub(crate) mod transport;
 pub(crate) mod yinxiang;
+pub(crate) mod fliggy;
+pub(crate) mod jianguoyun;
+pub(crate) mod ima;
+pub(crate) mod weread;
+pub(crate) mod qq_music;
 pub(super) mod state;
 
 pub use state::{PersonalMcpState, router};

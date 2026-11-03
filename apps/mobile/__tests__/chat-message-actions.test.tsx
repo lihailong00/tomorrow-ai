@@ -8,11 +8,14 @@ import { platform } from '../src/platform/ports';
 import type { ChatIntent, Message } from '../src/domain/types';
 import { Button } from '../src/ui/components';
 import { ChatTransportError } from '../src/api/chatSse';
+import { ResultText } from '../src/ui/ResultText';
+import { ChatReplyMemory } from '../src/ui/ChatReplyMemory';
+import { ConversationShareSheet } from '../src/features/conversation-share/ConversationShareSheet';
 
 jest.mock('../src/platform/ports', () => ({ platform: { hasRecorder: true, hasDocumentPicker: true,
   copyText: jest.fn().mockResolvedValue(undefined), share: jest.fn().mockResolvedValue(undefined),
   startRecording: jest.fn().mockResolvedValue(undefined), stopRecording: jest.fn().mockResolvedValue(null) } }));
-jest.mock('../src/ui/visuals', () => ({ Icon: () => null, AssistantOrb: () => null }));
+jest.mock('../src/ui/visuals', () => ({ Icon: () => null, AssistantOrb: () => null, AmbientBackground: () => null }));
 jest.mock('../src/screens/Main', () => ({ ModeNotice: () => null }));
 beforeAll(() => { (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; });
 beforeEach(() => { jest.clearAllMocks();
@@ -74,12 +77,14 @@ test('menu is anchored and clamped within the screen, including expanded content
   }
 });
 
-test('sent user long press opens dated native menu; copy and share use exact text without sending', async () => {
+test('sent user long press opens dated native menu; share seeds exact selected question without sending', async () => {
   const app = await setup();
   await app.longpress();
   expect(app.tree().root.findByType(ChatMessageActions).props.timestamp).toBe(`日期:${question.created_at}`);
   await app.action('copy'); expect(platform.copyText).toHaveBeenCalledWith(question.content);
-  await app.longpress(); await app.action('share'); expect(platform.share).toHaveBeenCalledWith(question.content);
+  await app.longpress(); await app.action('share');
+  expect(app.tree().root.findByType(ConversationShareSheet).props.initialSelectedId).toBe(question.id);
+  expect(platform.share).not.toHaveBeenCalled();
   expect(app.api.chatStream).not.toHaveBeenCalled(); await app.unmount();
 });
 
@@ -269,4 +274,89 @@ test('history arriving during an edit uses the server reply timestamp and keeps 
   expect(items.findIndex(m => m.id === 'u1')).toBeLessThan(items.findIndex(m => m.id === 'streaming-answer'));
   expect(items.some(m => m.id === 'a1')).toBe(false);
   await app.unmount(); await act(async () => stream.resolve());
+});
+
+test('assistant reply long press opens its own action menu; sharing seeds exact reply and text selection stays intact', async () => {
+  const app = await setup(); await app.longpress('a1');
+  expect(app.tree().root.findByType(ChatMessageActions).props.role).toBe('assistant');
+  expect(app.node('在新对话中继续')).toBeTruthy();
+  expect(app.node('保存到记忆')).toBeTruthy();
+  expect(app.node('从对话发现待办')).toBeTruthy();
+  expect(app.node('修改')).toBeUndefined();
+  expect(app.node('删除')).toBeUndefined();
+  await app.action('copy'); expect(platform.copyText).toHaveBeenCalledWith(answer.content);
+  await app.longpress('a1'); await app.action('share');
+  expect(app.tree().root.findByType(ConversationShareSheet).props.initialSelectedId).toBe(answer.id);
+  expect(platform.share).not.toHaveBeenCalled();
+  await app.press('取消分享');
+  await app.longpress('a1'); await app.action('select');
+  expect(app.tree().root.findByType(ChatTextSelection).props.text).toBe(answer.content);
+  expect(app.api.chatStream).not.toHaveBeenCalled(); await app.unmount();
+});
+
+test('sharing a finished reply during a later stream preserves the draft and excludes partial/failed messages', async () => {
+  const app = await setup(); await app.input('尚未发送的草稿');
+  await act(async () => app.state.update(old => ({ ...old, sending: true,
+    messages: [...old.messages, { ...answer, id: 'partial', content: '未完成内容', stream_status: '回答中' },
+      { ...answer, id: 'failed', content: '失败内容', stream_error: '中断' }] })));
+  await app.press('分享这条回复');
+  const sheet = app.tree().root.findByType(ConversationShareSheet);
+  expect(sheet.props.initialSelectedId).toBe(laterAnswer.id);
+  expect(sheet.props.candidates.map((item: { id: string }) => item.id)).toEqual(['u1', 'a1', 'u2', 'a2']);
+  expect(app.state.getSnapshot().draft).toBe('尚未发送的草稿');
+  await app.press('取消分享'); expect(app.state.getSnapshot().draft).toBe('尚未发送的草稿');
+  expect(app.api.chatStream).not.toHaveBeenCalled(); await app.unmount();
+});
+
+test('an old row share callback cannot reopen sharing under a replacement account/server owner', async () => {
+  const app = await setup(); const share = app.node('分享这条回复').props.onPress;
+  await app.owner(); await act(async () => share());
+  expect(app.tree().root.findAllByType(ConversationShareSheet)).toHaveLength(0);
+  expect(platform.share).not.toHaveBeenCalled(); await app.unmount();
+});
+
+test('long pressing the actual AI text opens the menu instead of native text selection', async () => {
+  const app = await setup();
+  const result = app.tree().root.findAllByType(ResultText).find(n => n.props.content === answer.content)!;
+  const native = result.findAllByType(Text).find(n => n.props.children === answer.content)!;
+  expect(native.props.selectable).toBe(false);
+  expect(typeof native.props.onLongPress).toBe('function');
+  await act(async () => native.props.onLongPress({ nativeEvent: { pageX: 150, pageY: 420 } }));
+  expect(app.tree().root.findByType(ChatMessageActions).props.role).toBe('assistant');
+  await app.unmount();
+});
+
+test('assistant quote keeps the draft, while branch and todo actions navigate without submitting', async () => {
+  const app = await setup(); await app.input('请解释一下');
+  await app.longpress('a1'); await app.action('quote');
+  expect(app.state.getSnapshot().quoting?.id).toBe('a1');
+  expect(app.state.getSnapshot().draft).toBe('请解释一下');
+  await app.longpress('a1'); await app.action('branch');
+  expect(app.navigate).toHaveBeenCalledWith({ name: 'chat', prompt: answer.content });
+  await app.longpress('a1'); await app.action('todos');
+  expect(app.navigate).toHaveBeenCalledWith({ name: 'todoSources', conversationId: 'c' });
+  expect(app.api.chatStream).not.toHaveBeenCalled(); await app.unmount();
+});
+
+test('assistant edit/delete are rejected, and saving opens an editable confirmation without an API call', async () => {
+  const app = await setup(); await app.longpress('a1'); await app.action('edit');
+  expect(app.state.getSnapshot().editing).toBeNull();
+  await app.action('delete'); expect(app.api.deleteMessage).not.toHaveBeenCalled();
+  expect(app.tree().root.findAllByType(ChatDeleteConfirmation)).toHaveLength(0);
+  await app.action('memory');
+  expect(app.tree().root.findByType(ChatReplyMemory).props.content).toBe(answer.content);
+  expect(app.api.chatStream).not.toHaveBeenCalled();
+  await app.press('取消保存回复'); expect(app.tree().root.findAllByType(ChatReplyMemory)).toHaveLength(0);
+  await app.unmount();
+});
+
+test('assistant streaming, empty content and stale owner callbacks cannot open or change a reply', async () => {
+  for (const item of [{ ...answer, stream_status: '正在回复…' }, { ...answer, content: '' }]) {
+    const app = await setup({ items: [question, item] }); await app.longpress('a1');
+    expect(app.tree().root.findAllByType(ChatMessageActions)).toHaveLength(0); await app.unmount();
+  }
+  const app = await setup(); await app.longpress('a1');
+  const stale = app.tree().root.findByType(ChatMessageActions).props.onAction;
+  await app.owner(); await act(async () => stale('memory'));
+  expect(app.tree().root.findAllByType(ChatReplyMemory)).toHaveLength(0); await app.unmount();
 });

@@ -5,22 +5,25 @@ import { Text } from './Text';
 import { ReadingText } from './ChatReadingMetrics';
 import { markdownLinks, type WebSource } from './markdownLinks';
 import { markdownInlineText, type MarkdownBlock } from './markdownBlocks';
+import { useMessageLongPress } from './MessageLongPress';
 
 type Context = { open: (source: WebSource) => void };
 const Links = createContext<Context | null>(null);
 
 export function LinkedText({ value }: { value: string }) {
   const context = useContext(Links);
+  const onLongPress = useMessageLongPress();
   return <>{markdownLinks(value).map((token, i) => token.kind === 'link' ?
     <Text key={i} accessibilityRole="link" accessibilityLabel={`${markdownInlineText(token.text)}，${token.source.domain}${token.source.pdf ? '，PDF 文档' : ''}`}
-      onPress={() => context?.open({ ...token.source, title: markdownInlineText(token.text) })}
+      onPress={() => context?.open({ ...token.source, title: markdownInlineText(token.text) })} onLongPress={onLongPress}
       style={styles.inline}>{markdownInlineText(token.text)}</Text> :
     <React.Fragment key={i}>{markdownInlineText(token.text)}</React.Fragment>)}</>;
 }
 
 export function DocumentLink({ source }: { source: WebSource }) {
   const context = useContext(Links);
-  return <Pressable accessibilityRole="link" accessibilityLabel={`${source.title}，PDF 文档，${source.domain}`} onPress={() => context?.open(source)} style={styles.document}>
+  const onLongPress = useMessageLongPress();
+  return <Pressable accessibilityRole="link" accessibilityLabel={`${source.title}，PDF 文档，${source.domain}`} onLongPress={onLongPress} onPress={() => context?.open(source)} style={styles.document}>
     <Text style={styles.sourceIcon}>▤</Text><View style={styles.flex}><ReadingText readingText={markdownInlineText(source.title)} style={styles.rowTitle}>{markdownInlineText(source.title)}</ReadingText><Text style={styles.small}>{source.domain} · PDF 文档</Text></View><Text style={styles.secondary}>↗</Text>
   </Pressable>;
 }
@@ -47,16 +50,38 @@ export function LinkPreviewScope({ blocks, children }: { blocks: MarkdownBlock[]
   const [error, setError] = useState('');
   const [opening, setOpening] = useState(false);
   const attempt = useRef(0);
+  const openingRequest = useRef<string | null>(null);
+  const currentSources = useRef(sources);
+  currentSources.current = sources;
   const selected = sources.find(s => s.url === panel);
   const sourceIdentity = sources.map(source => source.url).join('\n');
   useEffect(() => () => { attempt.current++; }, []);
   useEffect(() => {
-    if (panel === null || (panel === 'list' ? sources.length > 0 : sources.some(source => source.url === panel))) return;
-    attempt.current++; setPanel(null); setExpanded(false); setError(''); setOpening(false);
+    const latest = currentSources.current;
+    if (panel === null || (panel === 'list' ? latest.length > 0 : latest.some(source => source.url === panel))) return;
+    attempt.current++; openingRequest.current = null; setPanel(null); setExpanded(false); setError(''); setOpening(false);
   }, [sourceIdentity, panel]);
-  const show = useCallback((source: WebSource) => { attempt.current++; setPanel(source.url); setExpanded(false); setError(''); setOpening(false); }, []);
-  const close = () => { attempt.current++; setPanel(null); setExpanded(false); setOpening(false); setError(''); };
-  const context = useMemo(() => ({ open: show }), [show]);
+  const openSource = useCallback(async (source: WebSource) => {
+    if (openingRequest.current) return;
+    const token = ++attempt.current;
+    openingRequest.current = source.url;
+    setOpening(true); setError('');
+    try {
+      await platform.openUrl(source.url);
+      if (attempt.current === token) { setPanel(null); setExpanded(false); }
+    } catch {
+      // Only failed launches need a recovery panel. A stale failure must not
+      // restore a source removed by streaming, message editing or unmounting.
+      if (attempt.current === token && currentSources.current.some(item => item.url === source.url)) {
+        setPanel(source.url); setExpanded(true);
+        setError('未能打开链接，请复制下方网址，或稍后重试。');
+      }
+    } finally {
+      if (attempt.current === token) { openingRequest.current = null; setOpening(false); }
+    }
+  }, []);
+  const close = () => { attempt.current++; openingRequest.current = null; setPanel(null); setExpanded(false); setOpening(false); setError(''); };
+  const context = useMemo(() => ({ open: openSource }), [openSource]);
   return <Links.Provider value={context}>{children}
     {sources.length > 0 && <Pressable testID="answer-sources" accessibilityRole="button" accessibilityLabel={`查看 ${sources.length} 个来源`} onPress={() => { close(); setPanel('list'); }} style={styles.summary}>
       <Text style={styles.sourceIcon}>↗</Text><View style={styles.flex}><Text style={styles.summaryTitle}>{sources.length} 个来源</Text><Text style={styles.small}>网页与文档，集中查看</Text></View><Text style={styles.secondary}>›</Text>
@@ -74,14 +99,9 @@ export function LinkPreviewScope({ blocks, children }: { blocks: MarkdownBlock[]
               <Pressable accessibilityRole="button" accessibilityLabel={expanded ? '收起完整网址' : '查看完整网址'} accessibilityState={{ expanded }} style={styles.urlToggle} onPress={() => setExpanded(v => !v)}><Text style={styles.link}>{expanded ? '收起完整网址' : '查看完整网址'}</Text></Pressable>
               {expanded && <View style={styles.urlBox}><Text selectable style={styles.url}>{selected.url}</Text></View>}
               <View style={styles.actions}><Pressable accessibilityRole="button" style={styles.action} onPress={() => { close(); setPanel('list'); }}><Text style={styles.link}>全部来源</Text></Pressable>
-                <Pressable accessibilityRole="button" accessibilityLabel={selected.pdf ? '打开 PDF' : '打开原文'} disabled={opening} style={[styles.action, opening && styles.disabled]} onPress={async () => {
-                  const token = ++attempt.current; setOpening(true); setError('');
-                  try { await platform.openUrl(selected.url); }
-                  catch { if (attempt.current === token) { setError('未能打开链接，请展开网址后复制，或稍后重试。'); setExpanded(true); } }
-                  finally { if (attempt.current === token) setOpening(false); }
-                }}><Text style={styles.link}>{opening ? '正在打开…' : selected.pdf ? '打开 PDF ↗' : '打开原文 ↗'}</Text></Pressable></View>
+                <Pressable accessibilityRole="button" accessibilityLabel={selected.pdf ? '打开 PDF' : '打开原文'} disabled={opening} style={[styles.action, opening && styles.disabled]} onPress={() => { void openSource(selected); }}><Text style={styles.link}>{opening ? '正在打开…' : selected.pdf ? '打开 PDF ↗' : '打开原文 ↗'}</Text></Pressable></View>
               {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
-            </> : sources.map((source, index) => <Pressable key={source.url} accessibilityRole="button" accessibilityLabel={`来源 ${index + 1}：${source.title}，${source.domain}`} onPress={() => show(source)} style={styles.row}>
+            </> : sources.map((source, index) => <Pressable key={source.url} accessibilityRole="link" accessibilityLabel={`来源 ${index + 1}：${source.title}，${source.domain}`} accessibilityState={{ disabled: opening }} disabled={opening} onPress={() => { void openSource(source); }} style={styles.row}>
               <Text style={styles.index}>{index + 1}</Text><View style={styles.flex}><Text style={styles.rowTitle}>{source.title}</Text><Text style={styles.small}>{source.domain}{source.pdf ? ' · PDF' : ''}</Text></View><Text style={styles.secondary}>›</Text>
             </Pressable>)}
           </ScrollView>

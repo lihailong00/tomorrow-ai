@@ -538,7 +538,16 @@ async fn append_visible_tx(
             .as_i64()
             .filter(|n| *n >= 1 && *n <= 20)
             .ok_or_else(|| DomainError::Validation("文本轮次无效".into()))?;
-        body = json!({"turn":turn});
+        if body.get("replace").and_then(Value::as_bool) == Some(true) {
+            // A streamed preamble became a tool turn, not a completed answer.
+            // Fence/replay remains in this transaction; legacy APKs clear on the
+            // next authoritative delta's existing replace flag as well.
+            sqlx::query("UPDATE chat_streams SET partial='',text_turn=$1,reset_pending=1 WHERE request_key=$2")
+                .bind(turn).bind(key).execute(&mut **tx).await?;
+            body = json!({"turn":turn,"replace":true});
+        } else {
+            body = json!({"turn":turn});
+        }
     } else if matches!(kind, "tool_start" | "tool_end") {
         body = json!({"tool":body["tool"],"tool_call_id":body["tool_call_id"],"is_error":body["is_error"],"status":kind,"activity":public_activity(&body)});
         sqlx::query("UPDATE chat_streams SET tool_status=$1 WHERE request_key=$2")

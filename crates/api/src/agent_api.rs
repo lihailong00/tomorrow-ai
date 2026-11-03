@@ -118,6 +118,18 @@ async fn tool(
 ) -> Result<Json<Value>> {
     let token = credentials(&state, &headers)?;
     let (user_id, _scope) = state.repository.agent_authority(&id, &token).await?;
+    if crate::wallet_tools::is_wallet_tool(&input.name) {
+        let wallet=state.personal_wallet.as_ref().ok_or_else(||DomainError::Validation("支付宝钱包接入尚未配置".into()))?;
+        let result=crate::wallet_tools::execute(wallet,&user_id,&id,input.operation_index.unwrap_or(0),&input.name,&input.arguments).await?;
+        state.repository.agent_authority(&id,&token).await?;
+        return Ok(Json(result));
+    }
+    if input.name == "recent_chat_tool_receipts" {
+        if !input.arguments.as_object().is_some_and(|args|args.is_empty()) {
+            return Err(DomainError::Validation("历史工具回执不接受额外参数".into()).into());
+        }
+        return Ok(Json(state.repository.recent_chat_tool_receipts(&user_id,&id).await?));
+    }
     if matches!(input.name.as_str(), "list_mcp_connections" | "list_mcp_tools" | "call_mcp_tool" | "get_mcp_action") {
         // The account owner comes from the authenticated run, never model arguments.
         // There is intentionally no agent-side confirmation or credential endpoint.
@@ -127,7 +139,7 @@ async fn tool(
             .ok_or_else(|| DomainError::Validation("MCP 工具参数必须为对象".into()))?;
         let allowed: &[&str] = match input.name.as_str() {
             "list_mcp_connections" => &[],
-            "list_mcp_tools" => &["provider", "offset", "limit"],
+            "list_mcp_tools" => &["provider", "offset", "limit", "query"],
             "get_mcp_action" => &["id", "result_offset", "result_limit"],
             _ => &["provider", "tool", "arguments"],
         };
@@ -142,10 +154,18 @@ async fn tool(
         let result = match input.name.as_str() {
             "list_mcp_connections" => json!({"items":mcp.statuses(&user_id).await.map_err(tomorrow_connectors::ConnectorError::into_domain)?}),
             "list_mcp_tools" => {
-                let offset = mcp_integer(object, "offset", 0, 0, 128)?;
+                let offset = mcp_integer(object, "offset", 0, 0, 256)?;
                 let limit = mcp_integer(object, "limit", 10, 1, 20)?;
-                mcp_tool_page(mcp.tools(&user_id, text("provider")?).await
-                    .map_err(tomorrow_connectors::ConnectorError::into_domain)?, offset, limit)?
+                let query = object.get("query").map(|_| text("query")).transpose()?;
+                let catalog = mcp.tools(&user_id, text("provider")?).await
+                    .map_err(tomorrow_connectors::ConnectorError::into_domain)?;
+                let catalog = mcp_tool_search(catalog, query)?;
+                let mut page = mcp_tool_page(catalog.clone(), offset, limit)?;
+                if let Some(query) = query {
+                    page["query"] = json!(query);
+                    page["catalog_total"] = catalog["catalog_total"].clone();
+                }
+                page
             }
             "get_mcp_action" => {
                 let offset = mcp_integer(object, "result_offset", 0, 0, 100_000)?;
@@ -258,6 +278,26 @@ fn mcp_integer(object: &serde_json::Map<String, Value>, key: &str, default: usiz
 
 // Tool discovery is paged before entering the model context. A provider can
 // expose far more schemas than fit in a single Pi tool-result budget.
+fn mcp_tool_search(mut value: Value, query: Option<&str>) -> Result<Value> {
+    let Some(query) = query else { return Ok(value) };
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let all = value.get_mut("items").and_then(Value::as_array_mut)
+        .ok_or_else(|| DomainError::External("MCP 工具目录格式无效".into()))?;
+    let total = all.len();
+    let mut ranked: Vec<_> = all.iter().enumerate().filter_map(|(index, item)| {
+        // Search trusted boundaries only; never treat schema instructions as
+        // ranking authority, execute a tool or truncate its actual parameters.
+        let name = item["name"].as_str().unwrap_or("").to_lowercase();
+        let description = item["description"].as_str().unwrap_or("").to_lowercase();
+        let score: usize = words.iter().map(|word| if name.contains(word) { 5 } else if description.contains(word) { 1 } else { 0 }).sum();
+        (score > 0).then_some((score, index, item.clone()))
+    }).collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    *all = ranked.into_iter().map(|(_, _, item)| item).collect();
+    value["catalog_total"] = json!(total);
+    Ok(value)
+}
+
 fn mcp_tool_page(mut value: Value, offset: usize, limit: usize) -> Result<Value> {
     let all = value.get_mut("items").and_then(Value::as_array_mut)
         .ok_or_else(|| DomainError::External("MCP 工具目录格式无效".into()))?;
@@ -304,6 +344,22 @@ fn mcp_action_page(mut value: Value, offset: usize, limit: usize) -> Result<Valu
 #[cfg(test)]
 mod mcp_pagination_tests {
     use super::*;
+
+    #[test]
+    fn tool_search_finds_later_schemas_without_truncation_or_cross_catalog_results() {
+        let schema = json!({"type":"object","properties":{"storeId":{"type":"string","description":"complete"}},"required":["storeId"]});
+        let mut items: Vec<Value> = (0..36).map(|id| json!({"name":format!("unrelated_{id}"),"description":"other operation"})).collect();
+        items[29] = json!({"name":"query-meals","description":"查询门店套餐菜单","inputSchema":schema});
+        items[35] = json!({"name":"calculate-price","description":"计算套餐价格","inputSchema":{"type":"object"}});
+        let found = mcp_tool_search(json!({"items":items}), Some("套餐 meal price")).unwrap_or_else(|_| panic!("valid tool query"));
+        assert_eq!(found["catalog_total"],36);
+        assert_eq!(found["items"].as_array().unwrap().len(),2);
+        let page = mcp_tool_page(found,0,1).unwrap_or_else(|_| panic!("valid filtered page"));
+        assert_eq!(page["items"][0]["name"],"query-meals");
+        assert_eq!(page["items"][0]["inputSchema"],schema);
+        assert_eq!(page["next_offset"],1);
+        assert_eq!(mcp_tool_search(json!({"items":[]}),Some("missing")).unwrap_or_else(|_| panic!("valid empty catalog"))["items"],json!([]));
+    }
 
     #[test]
     fn schema_pages_are_bounded_and_continue_without_skipping_tools() {

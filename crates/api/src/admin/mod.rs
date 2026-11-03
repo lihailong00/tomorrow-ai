@@ -240,6 +240,7 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/api/status", get(status))
         .route("/admin/api/config", get(config).patch(update_config))
         .route("/admin/api/usage-pricing", get(usage_pricing::read).patch(usage_pricing::save))
+        .route("/admin/api/usage-pricing/backfill", post(usage_pricing::backfill))
         .route("/admin/api/config/check", post(check_config))
         .route("/admin/api/config/test-model", post(model_probe::test_model))
         .route("/admin/api/config/test-speech", post(model_probe::test_speech))

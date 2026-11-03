@@ -18,3 +18,7 @@
 # RN 0.82.1 registers this wrapper and its nested delegates from JNI even with
 # dev support disabled. Java reachability alone drops it and crashes on launch.
 -keep class com.facebook.react.devsupport.CxxInspectorPackagerConnection* { *; }
+
+# Native alarm bridge and manifest receiver.
+-keep class com.tomorrowai.PhoneAlarmsModule { *; }
+-keep class com.tomorrowai.PhoneAlarmReceiver { *; }

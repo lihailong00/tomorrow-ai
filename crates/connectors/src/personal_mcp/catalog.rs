@@ -18,6 +18,96 @@ pub struct Provider {
 
 const PROVIDERS: &[Provider] = &[
     Provider {
+        id: "dida365",
+        name: "滴答清单",
+        description: "连接自己的滴答清单，读取和管理授权任务；修改操作需要本人确认。",
+        help_url: "https://help.dida365.com/articles/7438132116019216384",
+        credential_label: "个人 API Token",
+        transport: "streamable_http",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
+        id: "fliggy",
+        name: "飞猪",
+        description: "通过飞猪官方 FlyAI 查询酒店、航班及旅行信息，不自动预订或支付。",
+        help_url: "https://flyai.open.fliggy.com/docs/quickstart",
+        credential_label: "FlyAI API Key",
+        transport: "official_skill",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
+        id: "jianguoyun",
+        name: "坚果云",
+        description: "使用本人坚果云账号和应用密码，通过官方 WebDAV 列出文件和读取文本。",
+        help_url: "https://help.jianguoyun.com/?p=2064",
+        credential_label: "应用密码",
+        transport: "webdav",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
+        id: "baidu_maps",
+        name: "百度地图",
+        description: "使用自己的地图 AK 查询地点和路线，不读取百度网盘或私人搜索记录。",
+        help_url: "https://lbs.baidu.com/docs/ai?title=mcpserver/quickstart",
+        credential_label: "百度地图服务端 AK",
+        transport: "streamable_http",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
+        id: "weread",
+        name: "微信读书",
+        description: "使用微信读书官方 Skill API Key 读取自己的书架信息。",
+        help_url: "https://weread.qq.com/r/weread-skills",
+        credential_label: "微信读书 API Key",
+        transport: "official_api",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
+        id: "weiyun",
+        name: "腾讯微云",
+        description: "连接本人微云 MCP，列出授权文件；其他操作需本人确认。",
+        help_url: "https://www.weiyun.com/act/openclaw",
+        credential_label: "个人 MCP Token",
+        transport: "streamable_http",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
+        id: "luckin",
+        name: "瑞幸咖啡",
+        description: "连接瑞幸官方 MCP 查询账号开放的服务；下单、修改、兑换和支付均需本人单独确认。",
+        help_url: "https://open.lkcoffee.com/mcp",
+        credential_label: "个人 MCP Token",
+        transport: "streamable_http",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
+        id: "qq_music",
+        name: "QQ 音乐",
+        description: "使用 QQ 音乐官方 API Key 搜索音乐、获取推荐和查看本人听歌报告。",
+        help_url: "https://y.qq.com/n/ryqq_v2/qqmusic_skills",
+        credential_label: "QQ 音乐 API Key",
+        transport: "official_api",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
+        id: "ima",
+        name: "ima",
+        description: "使用本人 ima Client ID 和 API Key 读取授权知识库和笔记。",
+        help_url: "https://ima.qq.com/agent-interface",
+        credential_label: "ima API Key",
+        transport: "official_api",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
         id: "mcdonalds",
         name: "麦当劳",
         description: "连接你自己的麦当劳账号，查询活动、营养与账号开放的服务；点餐、兑换等操作需单独确认。",
@@ -127,6 +217,16 @@ pub fn providers() -> &'static [Provider] {
     PROVIDERS
 }
 
+/// Tencent Docs currently publishes 227 tools in a single ~609 KiB response.
+/// Keep this catalog-only allowance separate from action/result/credential caps.
+pub(super) fn discovery_limits(provider: &str) -> (usize, usize) {
+    if provider == "tencent_docs" {
+        (256, 1024 * 1024)
+    } else {
+        (128, 256 * 1024)
+    }
+}
+
 pub fn find(id: &str) -> Result<&'static Provider> {
     PROVIDERS
         .iter()
@@ -142,7 +242,9 @@ pub fn find(id: &str) -> Result<&'static Provider> {
 
 pub fn runtime_available(id: &str) -> bool {
     find(id).is_ok_and(|provider| {
-        provider.supported && (id != "yuque" || super::transport::yuque_script().is_some())
+        provider.supported
+            && (id != "yuque" || super::transport::yuque_script().is_some())
+            && (id != "fliggy" || super::fliggy::script().is_some())
     })
 }
 
@@ -150,6 +252,12 @@ pub fn runtime_available(id: &str) -> bool {
 /// annotations claim to be read-only, require an explicit user confirmation.
 pub fn is_read_only(provider: &str, tool: &str) -> bool {
     match provider {
+        "fliggy" => super::fliggy::is_read_only(tool),
+        "jianguoyun" => super::jianguoyun::is_read_only(tool),
+        "ima" => super::ima::is_read_only(tool),
+        "weread" => super::weread::is_read_only(tool),
+        "qq_music" => super::qq_music::is_read_only(tool),
+        "weiyun" => matches!(tool, "weiyun.list" | "weiyun.list_by_category"),
         "mcdonalds" => matches!(
             tool,
             "list-nutrition-foods"

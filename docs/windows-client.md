@@ -46,7 +46,7 @@ pwsh -NoProfile -File scripts/Build-Desktop.ps1
 pwsh -NoProfile -File scripts/Build-Desktop.ps1 -Publish
 ```
 
-脚本将原生输出统一放在 `apps/desktop/src-tauri/target`，检查真实剩余空间，统计所有登记工作区的保留量。不要多个 agent 同时写同一个 target。临时构建允许超出 10 GB；完成交付与验证后才清理确认无用的输出。`-CleanBuildCache` 是收尾可选项，会保护源码、密钥、数据库、链接、正在使用的程序和未知归属文件。不要在迭代中反复清缓存。
+脚本将原生输出统一放在 `apps/desktop/src-tauri/target`，检查真实剩余空间，统计所有登记工作区的保留量。不要多个 agent 同时写同一个 target。临时构建允许超出 20 GB；构建结束后再计量，超过上限才自动清理确认无用的输出，未超限保留暖缓存。`-CleanBuildCache` 是收尾可选项，会保护源码、密钥、数据库、链接、正在使用的程序和未知归属文件。不要在迭代中反复清缓存。
 
 ## 验证与已知边界
 

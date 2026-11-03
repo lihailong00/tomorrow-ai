@@ -8,6 +8,7 @@ export interface Integration {
   import_supported?: boolean;
   notification_supported?: boolean;
   required_configuration?: string[];
+  credential_scope?: 'user';
 }
 
 export interface ImportedContent {

@@ -4,7 +4,7 @@ import { Text } from './Text';
 import { Icon } from './visuals';
 
 export type MessageAnchor = { x: number; y: number; width: number; height: number };
-export type MessageAction = 'copy' | 'edit' | 'quote' | 'select' | 'share' | 'branch' | 'delete';
+export type MessageAction = 'copy' | 'edit' | 'quote' | 'select' | 'share' | 'branch' | 'delete' | 'memory' | 'todos';
 export function messageMenuPosition(anchor: MessageAnchor, width: number, height: number, expanded: boolean, menuHeight?: number) {
   const cardWidth = Math.min(276, Math.max(160, width - 32));
   const cardHeight = Math.min(menuHeight ?? (expanded ? 408 : 300), Math.max(100, height - 48));
@@ -15,15 +15,17 @@ export function messageMenuPosition(anchor: MessageAnchor, width: number, height
 }
 
 /** A native anchored menu; selection uses Android/iOS' actual selectable Text. */
-export function ChatMessageActions({ anchor, timestamp, hasText, blocked, onAction, onClose }: {
+export function ChatMessageActions({ anchor, timestamp, hasText, blocked, role = 'user', onAction, onClose }: {
   anchor: MessageAnchor; timestamp: string; hasText: boolean; blocked: boolean;
+  role?: 'user' | 'assistant';
   onAction: (action: MessageAction) => void; onClose: () => void;
 }) {
   const { width, height } = useWindowDimensions();
   const [expanded, setExpanded] = useState(false);
   const [measuredHeight, setMeasuredHeight] = useState<number>();
+  const assistant = role === 'assistant';
   const action = (name: MessageAction, label: string, icon: Parameters<typeof Icon>[0]['name'], compact = false) => {
-    const disabled = (blocked && ['edit', 'quote', 'branch', 'delete'].includes(name)) || (!hasText && ['copy', 'edit', 'select'].includes(name));
+    const disabled = (blocked && ['edit', 'quote', 'branch', 'delete', 'memory', 'todos'].includes(name)) || (!hasText && name !== 'delete');
     return <Pressable key={name} accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
       onPress={() => onAction(name)} style={[compact ? css.topAction : css.row, disabled && css.disabled]}>
       <Icon name={icon} size={compact ? 21 : 19} color={name === 'delete' ? '#c84c63' : '#5665be'} />
@@ -35,19 +37,26 @@ export function ChatMessageActions({ anchor, timestamp, hasText, blocked, onActi
       <Pressable accessibilityRole="button" accessibilityLabel="关闭消息菜单" onPress={onClose} style={StyleSheet.absoluteFill} />
       <View testID="chat-message-menu" accessibilityViewIsModal
         onLayout={event => { const next = event.nativeEvent.layout.height; if (next > 0 && next !== measuredHeight) setMeasuredHeight(next); }}
-        style={[css.menu, messageMenuPosition(anchor, width, height, expanded, measuredHeight)]}>
+        style={[css.menu, messageMenuPosition(anchor, width, height, expanded, measuredHeight ?? (assistant ? 460 : undefined))]}>
         <ScrollView bounces={false} keyboardShouldPersistTaps="handled">
           <Text style={css.timestamp}>{timestamp}</Text>
-          <View style={css.top}>{action('copy', '复制', 'copy', true)}{action('edit', '修改', 'edit', true)}{action('quote', '追问', 'quote', true)}</View>
+          <View style={css.top}>{action('copy', '复制', 'copy', true)}{assistant ? action('share', '分享', 'share', true) : action('edit', '修改', 'edit', true)}{action('quote', '追问', 'quote', true)}</View>
           <View style={css.divider} />
           {action('select', '选择文字', 'select')}
-          {action('share', '分享', 'share')}
-          <Pressable accessibilityRole="button" accessibilityLabel="更多消息操作" accessibilityState={{ expanded }}
-            onPress={() => { setMeasuredHeight(undefined); setExpanded(!expanded); }} style={css.row}>
-            <Icon name="more" size={19} color="#5665be" /><Text style={css.label}>更多</Text>
-            <View style={css.spacer} /><View style={expanded ? css.moreExpanded : undefined}><Icon name="chevronDown" size={16} color="#8a90a3" /></View>
-          </Pressable>
-          {expanded && <><View style={css.divider} />{action('branch', '创建新对话', 'plus')}{action('delete', '删除', 'delete')}</>}
+          {assistant ? <>
+            {action('memory', '保存到记忆', 'memory')}
+            {action('todos', '从对话发现待办', 'tasks')}
+            <View style={css.divider} />
+            {action('branch', '在新对话中继续', 'compose')}
+          </> : <>
+            {action('share', '分享', 'share')}
+            <Pressable accessibilityRole="button" accessibilityLabel="更多消息操作" accessibilityState={{ expanded }}
+              onPress={() => { setMeasuredHeight(undefined); setExpanded(!expanded); }} style={css.row}>
+              <Icon name="more" size={19} color="#5665be" /><Text style={css.label}>更多</Text>
+              <View style={css.spacer} /><View style={expanded ? css.moreExpanded : undefined}><Icon name="chevronDown" size={16} color="#8a90a3" /></View>
+            </Pressable>
+            {expanded && <><View style={css.divider} />{action('branch', '创建新对话', 'plus')}{action('delete', '删除', 'delete')}</>}
+          </>}
         </ScrollView>
       </View>
     </View>

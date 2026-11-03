@@ -300,7 +300,7 @@ fn baidu_is_explicit_experience_and_exact_read_ids_exclude_file_changes() {
     let credentials = Credentials {
         token: "fixture".into(),
         environment: "experience".into(),
-        server_url: None,
+        server_url: None, account: None, client_id: None,
     };
     assert!(credentials.validate("baidu_netdisk").is_ok());
     assert!(

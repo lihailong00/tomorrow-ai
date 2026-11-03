@@ -17,6 +17,9 @@ export interface UsageMetrics {
   estimated_cost_cny_micros: number | null;
   known_cost_cny_micros: number;
   unknown_cost_call_count: number;
+  missing_price_call_count?: number;
+  missing_measurement_call_count?: number;
+  reconstructed_cost_call_count?: number;
   cost_status: UsageStatus;
 }
 export type UsageCapability = 'llm' | 'asr' | 'vision' | 'embedding';
@@ -84,7 +87,12 @@ export function readMetrics(value: unknown): UsageMetrics {
     known_cost_cny_micros: integer(row.known_cost_cny_micros),
     unknown_cost_call_count: integer(row.unknown_cost_call_count),
     cost_status: choice(row.cost_status, statuses),
+    ...Object.fromEntries(['missing_price_call_count','missing_measurement_call_count','reconstructed_cost_call_count']
+      .filter(key => row[key] !== undefined).map(key => [key, integer(row[key])])),
   };
+  if (metrics.missing_price_call_count !== undefined && metrics.missing_measurement_call_count !== undefined &&
+      metrics.missing_price_call_count + metrics.missing_measurement_call_count !== metrics.unknown_cost_call_count) throw incompatible();
+  if (metrics.reconstructed_cost_call_count !== undefined && metrics.reconstructed_cost_call_count > metrics.call_count - metrics.unknown_cost_call_count) throw incompatible();
   if (metrics.unknown_cost_call_count > metrics.call_count ||
       (metrics.unknown_cost_call_count === 0 ?
         metrics.estimated_cost_cny_micros !== metrics.known_cost_cny_micros || metrics.cost_status !== 'complete' :

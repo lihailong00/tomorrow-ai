@@ -1,6 +1,5 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
-  ActivityIndicator,
   AppState,
   Image,
   Keyboard,
@@ -15,7 +14,7 @@ import { Text } from '../ui/Text';
 import { errorMessage, newRequestId } from '../api/client';
 import { useAction, useApp, useResource } from '../app/context';
 import type { RetainedRouteScope } from '../app/navigation';
-import type { Message, Upload, ReasoningEffort } from '../domain/types';
+import type { Message, Upload, ReasoningEffort, ChatClientContext } from '../domain/types';
 import { ChatReasoningSelector } from '../ui/ChatReasoningSelector';
 import { ChatActivity } from '../ui/ChatActivity';
 import { LocalFile, platform } from '../platform/ports';
@@ -33,6 +32,10 @@ import { ChatModeMotion, useChatReducedMotion } from '../ui/ChatMotion';
 import { ChatVoiceOverlay } from '../ui/ChatVoiceOverlay';
 import { ChatVoiceRecovery } from '../ui/ChatVoiceRecovery';
 import { ChatDeleteConfirmation, ChatMessageActions, ChatTextSelection, type MessageAction, type MessageAnchor } from '../ui/ChatMessageActions';
+import { ChatReplyMemory } from '../ui/ChatReplyMemory';
+import { MessageLongPress } from '../ui/MessageLongPress';
+import { ConversationShareSheet } from '../features/conversation-share/ConversationShareSheet';
+import { shareEligible, snapshotShareCandidates, validateShareSelection, type ShareCandidate } from '../features/conversation-share/model';
 import { chatAppearance as appearance } from '../ui/ChatAppearance';
 import { styles as s } from '../ui/theme';
 import { AssistantOrb, Icon } from '../ui/visuals';
@@ -42,6 +45,9 @@ import { createMessageHistory, mergeMessageHistory } from './messageHistory';
 import { ChatMessageList } from './ChatMessageList';
 import { createChatStreamController, type ChatProgress, type ChatStreamController } from './chatStreamController';
 import { voiceFailure, type VoiceFailure } from './chatVoiceRecovery';
+import { PhoneAlarmCard } from '../features/phone-alarms/PhoneAlarmCard';
+import { useChatLocation } from '../features/location/LocationProvider';
+import { captureClientContext } from '../features/location/model';
 
 type Attachment = { file: LocalFile; upload?: Upload; transcript?: string; imageText?: string };
 type VoiceSendIntent = { draft: string; file: LocalFile | null; context: object | null; isVisible: () => boolean };
@@ -152,6 +158,7 @@ export function ChatScreen({
   entryState?: ChatEntryState;
 }) {
   const { api, invalidate, formatDate, user, preferences, navigate } = useApp();
+  const location = useChatLocation();
   const { height: windowHeight, fontScale } = useWindowDimensions();
   const reducedMotion = useChatReducedMotion();
   const [availableHeight, setAvailableHeight] = useState(windowHeight);
@@ -183,6 +190,8 @@ export function ChatScreen({
   const [holdCancelled, setHoldCancelled] = useState(false);
   const [captureBusy, setCaptureBusy] = useState(false);
   const recorderLease = useRef<object | null>(null);
+  // These dependencies intentionally create a new permission/gesture owner per chat scope.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const holdOwner = useMemo(() => ({ active: true, gesture: null as HoldRecording | null }), [api, state]);
   const mounted = useRef(true);
   const voiceOwner = useRef({ api, state });
@@ -215,6 +224,8 @@ export function ChatScreen({
     }
   };
   const [nativeFontScale, setNativeFontScale] = useState<number | null>(null);
+  // Native callbacks from a previous account/chat must keep their original owner fence.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const inputScaleOwner = useMemo(() => ({ active: true, running: false, pending: false }), [api, state]);
   const currentInputScaleOwner = useRef(inputScaleOwner);
   currentInputScaleOwner.current = inputScaleOwner;
@@ -278,14 +289,34 @@ export function ChatScreen({
     [api, state, user?.id, preferences?.serverUrl, preferences?.instance?.id]);
   const currentShareOwner = useRef(shareOwner);
   currentShareOwner.current = shareOwner;
+  const [conversationSharing, setConversationSharing] = useState<{
+    key: string; owner: typeof shareOwner; candidates: readonly ShareCandidate[]; initialSelectedId: string; hasOlder: boolean; conversationId?: string;
+  } | null>(null);
+  const pendingLocation = useRef<object | null>(null);
+  useEffect(() => () => {
+    if (pendingLocation.current === state) {
+      pendingLocation.current = null;
+      location.session?.dismiss();
+    }
+  }, [state, location.session]);
   useEffect(() => () => {
     if (currentShareOwner.current !== shareOwner) state.disposeStreams();
   }, [shareOwner, state]);
-  const shareMessage = useCallback((content: string) => {
+  const shareMessage = useCallback((message: Message) => {
     // A previously rendered row must keep its original owner's action fence.
     if (!mounted.current || currentShareOwner.current !== shareOwner ||
-      voiceOwner.current.api !== api || voiceOwner.current.state !== state) return;
-    return fileActionRef.current.run(() => platform.share(content));
+      voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
+      (state.scope && !state.scope.isRetained()) || recordingRef.current || recordingSession.active ||
+      fileActionRef.current.busy || deletingRef.current) return;
+    const snapshot = state.getSnapshot();
+    if (snapshot.voice || snapshot.voiceBusy) return;
+    const latest = snapshot.messages.find(item => item.id === message.id && shareEligible(item, snapshot.id));
+    if (!latest) return;
+    const candidates = snapshotShareCandidates(snapshot.messages, snapshot.id);
+    Keyboard.dismiss();
+    setConversationSharing({ key: newRequestId(), owner: shareOwner, candidates, initialSelectedId: latest.id,
+      conversationId: snapshot.id,
+      hasOlder: state.history.getSnapshot().nextOffset !== null });
   }, [api, state, shareOwner]);
   const retryMessage = useCallback((key: string) => {
     if (!mounted.current || currentShareOwner.current !== shareOwner ||
@@ -295,6 +326,7 @@ export function ChatScreen({
   }, [api, state, shareOwner]);
   const [messageMenu, setMessageMenu] = useState<{ message: Message; anchor: MessageAnchor; owner: typeof shareOwner } | null>(null);
   const [selection, setSelection] = useState<{ text: string; owner: typeof shareOwner } | null>(null);
+  const [replyMemory, setReplyMemory] = useState<{ text: string; owner: typeof shareOwner } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ message: Message; owner: typeof shareOwner } | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -302,7 +334,7 @@ export function ChatScreen({
   const deletionAbort = useRef<AbortController | null>(null);
   useEffect(() => {
     deletingRef.current = false;
-    setDeleting(false); setDeleteError(null); setMessageMenu(null); setSelection(null); setDeleteTarget(null);
+    setDeleting(false); setDeleteError(null); setMessageMenu(null); setSelection(null); setReplyMemory(null); setDeleteTarget(null); setConversationSharing(null);
     return () => { deletionAbort.current?.abort(); };
   }, [shareOwner]);
   const actionOwnerCurrent = (owner: typeof shareOwner) => mounted.current && currentShareOwner.current === owner &&
@@ -316,8 +348,9 @@ export function ChatScreen({
     if (!mounted.current || currentShareOwner.current !== shareOwner ||
       voiceOwner.current.api !== api || voiceOwner.current.state !== state ||
       (state.scope && !state.scope.isRetained()) || recordingRef.current || recordingSession.active) return;
-    const latest = state.getSnapshot().messages.find(item => item.id === message.id && item.role === 'user' &&
-      (!item.delivery || item.delivery === 'sent'));
+    const latest = state.getSnapshot().messages.find(item => item.id === message.id &&
+      (!item.delivery || item.delivery === 'sent') && !item.stream_status &&
+      (item.role === 'user' || Boolean(item.content.trim())));
     if (!latest) return;
     Keyboard.dismiss();
     setMessageMenu({ message: latest, anchor, owner: shareOwner });
@@ -334,12 +367,16 @@ export function ChatScreen({
   const performMessageAction = (name: MessageAction) => {
     const selected = messageMenu;
     if (!selected || !actionOwnerCurrent(selected.owner)) return;
-    const message = liveSentMessage(selected.message.id);
-    if (!message || (['edit', 'quote', 'branch', 'delete'].includes(name) && mutationBlocked())) return;
+    const message = state.getSnapshot().messages.find(item => item.id === selected.message.id &&
+      (!item.delivery || item.delivery === 'sent') && !item.stream_status);
+    if (!message || (['edit', 'delete'].includes(name) && message.role !== 'user') ||
+      (['edit', 'quote', 'branch', 'delete', 'memory', 'todos'].includes(name) && mutationBlocked())) return;
     setMessageMenu(null);
     if (name === 'copy') return fileActionRef.current.run(() => platform.copyText(message.content));
-    if (name === 'share') return fileActionRef.current.run(() => platform.share(message.content));
+    if (name === 'share') return shareMessage(message);
     if (name === 'select') { setSelection({ text: message.content, owner: selected.owner }); return; }
+    if (name === 'memory') { setReplyMemory({ text: message.content, owner: selected.owner }); return; }
+    if (name === 'todos') { navigate({ name: 'todoSources', conversationId: message.conversation_id }); return; }
     if (name === 'delete') { setDeleteError(null); setDeleteTarget({ message, owner: selected.owner }); return; }
     if (name === 'branch') { navigate({ name: 'chat', prompt: message.content }); return; }
     state.getSnapshot().editing?.discardRetry?.();
@@ -724,7 +761,7 @@ export function ChatScreen({
   const awaitingInitialConversation = () => !state.getSnapshot().id &&
     Array.from(state.streams.values()).some(stream => stream.intent.conversation_id === null &&
       stream.getSnapshot().phase === 'failed' && !stream.getSnapshot().conversationId);
-  const submitPrepared = (automatic?: { draft: string; file: LocalFile | null }) => {
+  const submitPrepared = (automatic?: { draft: string; file: LocalFile | null }, preparedContext?: ChatClientContext): Promise<void> | void => {
     const before = state.getSnapshot();
     const selected = before.attachment;
     const entered = before.draft.trim() || (selected && isImageFile(selected.file) ? '请描述这张图片的内容。' : '');
@@ -741,6 +778,22 @@ export function ChatScreen({
       return;
     }
     if (before.editing?.retry && before.draft === before.editing.retryDraft && selected === before.editing.retryAttachment) return before.editing.retry();
+    const context = preparedContext ?? location.capture(entered, false, user?.timezone, before.messages.slice(-6));
+    if (!context) {
+      if (pendingLocation.current) return;
+      pendingLocation.current = state;
+      return location.request('chat').then(choice => {
+        if (pendingLocation.current !== state) return;
+        pendingLocation.current = null;
+        const latest = state.getSnapshot();
+        if (choice.kind === 'cancel' || !mounted.current || currentShareOwner.current !== shareOwner ||
+          latest.draft !== before.draft || latest.attachment !== selected || latest.editing !== before.editing ||
+          latest.quoting !== before.quoting || latest.id !== before.id) return;
+        // The picker is an input step. Only now create an immutable new intent;
+        // future retry/reconnect uses that controller's original context.
+        return submitPrepared(automatic, captureClientContext(choice.kind === 'selected' ? choice.location : null, user?.timezone));
+      });
+    }
     before.editing?.discardRetry?.();
     const edit = before.editing;
     const targetIndex = edit ? before.messages.findIndex(message => message.id === edit.message.id) : -1;
@@ -869,6 +922,7 @@ export function ChatScreen({
     const operation: ChatStreamController = createChatStreamController({ api,
       intent: { message: text, conversation_id: before.id ?? null,
         client_request_id: requestId, upload_ids: uploadIds, remember: false,
+        client_context: context,
         reasoning_effort: before.reasoningEffort,
         ...(edit ? { replace_message_id: edit.message.id } : {}) },
       isCurrent: () => canApply() && state.streams.get(userKey) === operation,
@@ -1247,9 +1301,22 @@ export function ChatScreen({
       <UnifiedAttachmentMenu visible={attachmentMenu} onClose={() => setAttachmentMenu(false)}
         onImage={() => chooseInputFile('image')} onFile={() => chooseInputFile('file')} />
       {messageMenu?.owner === shareOwner && <ChatMessageActions anchor={messageMenu.anchor}
+        role={messageMenu.message.role}
         timestamp={formatDate(messageMenu.message.created_at)} hasText={Boolean(messageMenu.message.content)}
         blocked={mutationBlocked()} onAction={performMessageAction} onClose={() => setMessageMenu(null)} />}
       {selection?.owner === shareOwner && <ChatTextSelection text={selection.text} onClose={() => setSelection(null)} />}
+      {conversationSharing?.owner === shareOwner && <ConversationShareSheet
+        key={conversationSharing.key}
+        candidates={conversationSharing.candidates} initialSelectedId={conversationSharing.initialSelectedId}
+        hasOlder={conversationSharing.hasOlder} formatDate={formatDate}
+        isCurrent={() => actionOwnerCurrent(conversationSharing.owner)}
+        validateSelection={ids => {
+          const live = state.getSnapshot();
+          return live.id !== conversationSharing.conversationId ? '对话已变化，请退出分享后重新选择。' :
+            validateShareSelection(conversationSharing.candidates, ids, live.messages, live.id);
+        }}
+        onClose={() => { if (actionOwnerCurrent(conversationSharing.owner)) setConversationSharing(null); }} />}
+      {replyMemory?.owner === shareOwner && <ChatReplyMemory content={replyMemory.text} onClose={() => setReplyMemory(null)} />}
       {deleteTarget?.owner === shareOwner && <ChatDeleteConfirmation text={deleteTarget.message.content}
         busy={deleting} error={deleteError} onDelete={confirmDelete}
         onClose={() => { if (!deletingRef.current) setDeleteTarget(null); }} />}
@@ -1271,7 +1338,7 @@ const ChatMessage = memo(function ChatMessage({
   message: Message;
   observeMemory: boolean;
   formatDate: (value: string) => string;
-  share: (content: string) => unknown;
+  share: (message: Message) => unknown;
   retry: (key: string) => unknown;
   menu: (message: Message, anchor: MessageAnchor) => void;
 }) {
@@ -1284,6 +1351,7 @@ const ChatMessage = memo(function ChatMessage({
     else menu(message, fallback);
   };
   return message.role === 'user' ? (
+    <View>
     <Pressable
       ref={bubbleRef}
       testID={`chat-message-${message.client_key ?? message.id}`}
@@ -1311,15 +1379,23 @@ const ChatMessage = memo(function ChatMessage({
         </Text>
       ))}
     </Pressable>
+    {(!message.delivery || message.delivery === 'sent') && <PhoneAlarmCard text={message.content} createdAt={message.created_at} messageId={message.id} />}
+    </View>
   ) : (
-    <View
+    <Pressable
+      ref={bubbleRef}
       testID={`chat-message-${message.client_key ?? message.id}`}
       collapsable={false}
       style={chat.assistantMessage}
+      delayLongPress={420}
+      onLongPress={openMenu}
+      accessibilityHint="长按打开回复操作，选择文字请使用菜单中的选择文字"
+      accessibilityActions={[{ name: 'longpress', label: '回复操作' }]}
+      onAccessibilityAction={event => { if (event.nativeEvent.actionName === 'longpress') openMenu(); }}
     >
       <View style={chat.answer}>
         {message.model_mode === 'local' && <Text style={chat.timestamp}>本地生成</Text>}
-        {message.content ? <ResultText content={message.content} textStyle={chat.answerText} /> : null}
+        {message.content ? <MessageLongPress.Provider value={openMenu}><ResultText content={message.content} textStyle={chat.answerText} /></MessageLongPress.Provider> : null}
         {!message.stream_status && !message.stream_error && message.model_mode === 'llm' && <AutomaticMemoryNotice replyId={message.id} active={observeMemory && Date.now() - Date.parse(message.created_at) < 120000} />}
         <ChatActivity key={message.client_key ?? message.id} items={message.stream_activity} status={message.stream_status} />
         {message.stream_error && <Text style={s.small}>{message.stream_error}</Text>}
@@ -1329,14 +1405,14 @@ const ChatMessage = memo(function ChatMessage({
             accessibilityRole="button"
             accessibilityLabel="分享这条回复"
             style={chat.shareButton}
-            onPress={() => share(message.content)}
+            onPress={() => share(message)}
           >
             <Text style={chat.shareText}>分享</Text>
             <Icon name="arrowRight" size={14} color={appearance.secondary} />
           </Pressable>
         </View>}
       </View>
-    </View>
+    </Pressable>
   );
 });
 

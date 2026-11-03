@@ -10,6 +10,9 @@ use std::collections::BTreeMap;
 pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 const DEFAULT_THRESHOLD: i64 = 20_000_000;
 const TIMEZONE: &str = "Asia/Shanghai";
+#[path = "usage_pricing_presets.rs"]
+mod pricing_presets;
+pub use pricing_presets::{official_usage_price, UsageBackfillResult};
 
 pub(crate) async fn initialize(pool: &AnyPool) -> Result<(), DomainError> {
     sqlx::raw_sql(include_str!("../../../migrations/sqlite/015_usage.sql"))
@@ -343,6 +346,9 @@ pub struct UsageMetrics {
     pub estimated_cost_cny_micros: Option<i64>,
     pub known_cost_cny_micros: i64,
     pub unknown_cost_call_count: i64,
+    pub missing_price_call_count: i64,
+    pub missing_measurement_call_count: i64,
+    pub reconstructed_cost_call_count: i64,
     pub cost_status: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -436,6 +442,7 @@ impl Repository {
         dispatch: UsageDispatch,
     ) -> Result<(), DomainError> {
         validate_dispatch(&dispatch)?;
+        let dispatched_at = dispatch.dispatched_at.unwrap_or_else(now);
         let price = match dispatch.price {
             Some(price) => {
                 if price.version.trim().is_empty()
@@ -466,9 +473,9 @@ impl Repository {
                             .map(|rates| UsagePrice {
                                 version: book.version,
                                 rates: rates.clone(),
-                            })
+                            }).or_else(|| official_usage_price(&dispatch.identity, &dispatch.capability, dispatched_at))
                     }
-                    Ok(None) => None,
+                    Ok(None) => official_usage_price(&dispatch.identity, &dispatch.capability, dispatched_at),
                     Err(error) => {
                         tracing::warn!(error=%error, "usage pricebook unavailable");
                         None
@@ -478,7 +485,7 @@ impl Repository {
         };
         let identity = encode(&dispatch.identity)?;
         sqlx::query("INSERT INTO usage_requests(user_id,request_id,dispatched_at,identity_json,capability,purpose,price_json,outcome_json) VALUES($1,$2,$3,$4,$5,$6,$7,'') ON CONFLICT(user_id,request_id) DO NOTHING")
-            .bind(user_id).bind(&dispatch.request_id).bind(dispatch.dispatched_at.unwrap_or_else(now))
+            .bind(user_id).bind(&dispatch.request_id).bind(dispatched_at)
             .bind(&identity).bind(&dispatch.capability).bind(&dispatch.purpose).bind(encode(&price)?)
             .execute(&mut **transaction).await?;
         let row = sqlx::query("SELECT identity_json,capability,purpose FROM usage_requests WHERE user_id=$1 AND request_id=$2")
@@ -792,6 +799,9 @@ struct Accumulator {
     sums: [Option<i64>; 6],
     known_cost: i64,
     unknown_cost: i64,
+    missing_price: i64,
+    missing_measurement: i64,
+    reconstructed: i64,
 }
 impl Accumulator {
     fn add(&mut self, record: &Recorded) -> Result<(), DomainError> {
@@ -813,8 +823,28 @@ impl Accumulator {
             &record.measurements,
             &record.capability,
         )? {
-            Some(value) => self.known_cost = sum(self.known_cost, value)?,
-            None => self.unknown_cost = sum(self.unknown_cost, 1)?,
+            Some(value) => {
+                self.known_cost = sum(self.known_cost, value)?;
+                if record.price.as_ref().is_some_and(|p| p.version.starts_with("reconstructed:" ) || p.version.starts_with("reconstructed-reference")) {
+                    self.reconstructed = sum(self.reconstructed, 1)?;
+                }
+            },
+            None => {
+                self.unknown_cost = sum(self.unknown_cost, 1)?;
+                let has_prices = record.price.as_ref().is_some_and(|p| p.rates != UsageRates::default());
+                let missing_measurement = record.price.as_ref().is_some_and(|p| {
+                    let tokens = [p.rates.input_cny_micros_per_million,p.rates.output_cny_micros_per_million,p.rates.cache_read_cny_micros_per_million,p.rates.cache_write_cny_micros_per_million].iter().any(Option::is_some);
+                    (tokens && (record.measurements.input_tokens.is_none()
+                      || (record.capability != "embedding" && record.measurements.output_tokens.is_none())
+                      || (record.capability != "embedding" && !(record.capability == "asr" && p.rates.cache_read_cny_micros_per_million.is_none() && p.rates.cache_write_cny_micros_per_million.is_none())
+                          && ((record.measurements.cache_read_tokens.is_none() && !(p.rates.cache_read_cny_micros_per_million.is_some() && p.rates.cache_read_cny_micros_per_million == p.rates.input_cny_micros_per_million))
+                              || (record.measurements.cache_write_tokens.is_none() && !(p.rates.cache_write_cny_micros_per_million.is_some() && p.rates.cache_write_cny_micros_per_million == p.rates.input_cny_micros_per_million))))))
+                    || (p.rates.audio_cny_micros_per_minute.is_some() && record.measurements.audio_ms.is_none())
+                    || (p.rates.image_cny_micros_each.is_some() && record.measurements.image_count.is_none())
+                });
+                if has_prices && missing_measurement { self.missing_measurement = sum(self.missing_measurement, 1)?; }
+                else { self.missing_price = sum(self.missing_price, 1)?; }
+            },
         }
         Ok(())
     }
@@ -845,6 +875,9 @@ impl Accumulator {
             },
             known_cost_cny_micros: self.known_cost,
             unknown_cost_call_count: self.unknown_cost,
+            missing_price_call_count: self.missing_price,
+            missing_measurement_call_count: self.missing_measurement,
+            reconstructed_cost_call_count: self.reconstructed,
             cost_status: if self.unknown_cost == 0 {
                 "complete"
             } else if self.unknown_cost == self.calls {
@@ -903,17 +936,19 @@ fn estimate_cost(
         } else {
             return Ok(None);
         };
-        let (read, write) = if capability == "embedding" {
+        let (read, write) = if capability == "embedding" || (capability == "asr" && rates.cache_read_cny_micros_per_million.is_none() && rates.cache_write_cny_micros_per_million.is_none()) {
             (
                 measured.cache_read_tokens.unwrap_or(0),
                 measured.cache_write_tokens.unwrap_or(0),
             )
         } else {
-            let (Some(read), Some(write)) =
-                (measured.cache_read_tokens, measured.cache_write_tokens)
-            else {
-                return Ok(None);
-            };
+            // A missing cache subset is not needed when it has the same price as
+            // ordinary input. Use zero only inside this algebraic partition;
+            // retain the original unknown measurement in the immutable ledger.
+            let same_input = |rate: Option<i64>| rate.is_some() && rate == rates.input_cny_micros_per_million;
+            let read = measured.cache_read_tokens.or_else(|| same_input(rates.cache_read_cny_micros_per_million).then_some(0));
+            let write = measured.cache_write_tokens.or_else(|| same_input(rates.cache_write_cny_micros_per_million).then_some(0));
+            let (Some(read), Some(write)) = (read, write) else { return Ok(None); };
             (read, write)
         };
         let uncached = input

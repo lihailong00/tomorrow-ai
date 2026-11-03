@@ -94,6 +94,8 @@ function ConnectionsSession({
   const [selected, setSelected] = useState<string | null>(null);
   const [token, setToken] = useState('');
   const [serverUrl, setServerUrl] = useState('');
+  const [account, setAccount] = useState('');
+  const [clientId, setClientId] = useState('');
   const [environment, setEnvironment] = useState<McpEnvironment>('production');
   const [toolOwner, setToolOwner] = useState<string | null>(null);
   const [tools, setTools] = useState<PersonalMcpTool[]>([]);
@@ -118,6 +120,8 @@ function ConnectionsSession({
         setSelected(null);
         setToken('');
         setServerUrl('');
+        setAccount('');
+        setClientId('');
         setToolOwner(null);
         setTools([]);
       }
@@ -214,6 +218,8 @@ function ConnectionsSession({
       return;
     setToken('');
     setServerUrl(item.server_url || '');
+    setAccount('');
+    setClientId('');
     setEnvironment(item.environment || 'production');
     setSelected(item.id);
     scope.selectedId = item.id;
@@ -228,6 +234,8 @@ function ConnectionsSession({
     scope.selectedId = null;
     setToken('');
     setServerUrl('');
+    setAccount('');
+    setClientId('');
   };
   const connect = (item: PersonalMcpConnection) =>
     run(item.id, async () => {
@@ -239,17 +247,27 @@ function ConnectionsSession({
         throw new Error('请先填写你本人的' + item.credential_label + '。');
       const address = item.requires_server_url ? serverUrl.trim() : undefined;
       if (item.requires_server_url && !address)
-        throw new Error('请先填写 Memos 服务地址。');
+        throw new Error('请先填写' + item.name + '服务地址。');
+      if (item.requires_account && !account.trim())
+        throw new Error('请先填写你本人的' + item.name + '账号。');
+      if (item.requires_client_id && !clientId.trim())
+        throw new Error('请先填写 Client ID。');
       const result = await client.connect(
         item.id,
         credential,
         environment,
         address,
+        {
+          ...(item.requires_account ? { account: account.trim() } : {}),
+          ...(item.requires_client_id ? { client_id: clientId.trim() } : {}),
+        },
       );
       if (!scope.active) return;
       updateConnection(result);
       setToken('');
       setServerUrl('');
+      setAccount('');
+      setClientId('');
       setSelected(null);
       scope.selectedId = null;
       setNotice(item.name + '已通过实际连接校验，现在可以在对话中使用。');
@@ -317,6 +335,9 @@ function ConnectionsSession({
                 checked_at: null,
               });
               setToken('');
+              setAccount('');
+              setClientId('');
+              setServerUrl('');
               setSelected(null);
               scope.selectedId = null;
               setActions(previous =>
@@ -440,8 +461,7 @@ function ConnectionsSession({
         }}
       />
       <Text style={[s.small, v.intro]}>
-        连接你自己的账号，让妥啦使用授权范围内的资料与服务。公共地图和模型服务的
-        Key 由服务器后台配置。
+        连接你自己的账号，让妥啦使用授权范围内的资料与服务。每个连接使用你本人的凭证，加密保存在当前登录的服务器。
       </Text>
       <ErrorNotice
         message={error}
@@ -572,13 +592,42 @@ function ConnectionsSession({
               </Text>
               {item.requires_server_url && (
                 <Field
-                  label="Memos 服务地址"
+                  label={
+                    item.id === 'memos'
+                      ? 'Memos 服务地址'
+                      : item.name + '服务地址'
+                  }
                   value={serverUrl}
                   onChangeText={setServerUrl}
                   placeholder="https://notes.example.com"
                   keyboardType="url"
                   autoCapitalize="none"
                   autoCorrect={false}
+                  editable={busy === null}
+                />
+              )}
+              {item.requires_account && (
+                <Field
+                  label={item.name + '账号'}
+                  value={account}
+                  onChangeText={setAccount}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  autoComplete="off"
+                  importantForAutofill="no"
+                  editable={busy === null}
+                />
+              )}
+              {item.requires_client_id && (
+                <Field
+                  label="Client ID"
+                  value={clientId}
+                  onChangeText={setClientId}
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  autoComplete="off"
+                  importantForAutofill="no"
                   editable={busy === null}
                 />
               )}
@@ -637,6 +686,8 @@ function ConnectionsSession({
                 disabled={
                   busy !== null ||
                   !token.trim() ||
+                  (item.requires_account === true && !account.trim()) ||
+                  (item.requires_client_id === true && !clientId.trim()) ||
                   (item.requires_server_url === true && !serverUrl.trim())
                 }
                 loading={busy === item.id}

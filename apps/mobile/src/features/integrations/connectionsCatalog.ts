@@ -2,6 +2,7 @@ import type { AppInputStatus } from '../../platform/appInputs';
 import type { HealthAvailability } from '../health/native';
 import type { HealthConnection } from '../health/types';
 import type { PersonalMcpConnection } from '../personal-mcp/types';
+import { walletStatusLabel, type WalletConnectionStatus } from '../personal-mcp/walletModel';
 import type { Integration } from './types';
 
 export type ConnectionCategory = 'local' | 'cloud' | 'devices';
@@ -33,6 +34,7 @@ export type ConnectionSnapshot = {
   native: AppInputStatus | null;
   integrations: Integration[] | null;
   mcp: PersonalMcpConnection[] | null;
+  wallet?: WalletConnectionStatus | null;
   mcpUpdates?: PersonalMcpConnection[];
   health: HealthConnection[] | null;
   systemHealth: HealthAvailability | null;
@@ -41,6 +43,15 @@ export type ConnectionSnapshot = {
 };
 
 const fallbackMcp = [
+  ['dida365', '滴答清单', '查看本人清单、待办与日程'],
+  ['fliggy', '飞猪', '查询旅行信息与个人授权的出行服务'],
+  ['jianguoyun', '坚果云', '读取本人授权的云端文件'],
+  ['baidu_maps', '百度地图', '查询地点、路线与地图服务'],
+  ['weread', '微信读书', '读取本人授权的书籍和阅读资料'],
+  ['weiyun', '腾讯微云', '查找本人授权的云端文件'],
+  ['luckin', '瑞幸咖啡', '使用本人授权的咖啡服务'],
+  ['qq_music', 'QQ 音乐', '查询本人授权的音乐服务'],
+  ['ima', 'ima', '查找本人授权的知识库与资料'],
   ['mcdonalds', '麦当劳', '查看账号授权范围内的服务'],
   ['didi', '滴滴出行', '使用本人授权的出行服务'],
   ['tencent_docs', '腾讯文档', '查找和读取自己的文档'],
@@ -161,25 +172,27 @@ export function connectionRows(
       };
     }),
   ];
-  const providers =
-    snapshot.mcp === null
-      ? fallbackMcp.map(([id, name, purpose]) => ({
-          id,
-          name,
-          purpose,
-          item: snapshot.mcpUpdates?.find(item => item.id === id),
-        }))
-      : snapshot.mcp.map(original => {
-          const item =
-            snapshot.mcpUpdates?.find(value => value.id === original.id) ||
-            original;
-          return {
-            id: item.id,
-            name: item.name,
-            purpose: item.description,
-            item,
-          };
-        });
+  // Keep choices visible even when an older server does not advertise them.
+  // A missing server entry is unavailable, never an invented connection.
+  const providerChoices = [
+    ...fallbackMcp,
+    ...(snapshot.mcp || [])
+      .filter(item => !fallbackMcp.some(([id]) => id === item.id))
+      .map(item => [item.id, item.name, item.description]),
+  ];
+  const providers = providerChoices.map(([id, name, purpose]) => {
+    const advertised = snapshot.mcp?.find(item => item.id === id);
+    const item =
+      snapshot.mcp === null || advertised
+        ? snapshot.mcpUpdates?.find(value => value.id === id) || advertised
+        : undefined;
+    return {
+      id,
+      name: item?.name || name,
+      purpose: item?.description || purpose,
+      item,
+    };
+  });
   const cloud: ConnectionRow[] = providers.map(
     ({ id, name, purpose, item }) => ({
       key: 'mcp:' + id,
@@ -188,7 +201,9 @@ export function connectionRows(
       purpose,
       method: '个人账号凭证 · 当前服务器加密保存',
       status: !item
-        ? '服务状态待确认'
+        ? snapshot.mcp === null
+          ? '服务状态待确认'
+          : '当前服务器尚未提供'
         : item.status === 'connected'
         ? '已连接'
         : item.status === 'needs_reconnect'
@@ -207,7 +222,8 @@ export function connectionRows(
       ),
       usable: item?.status === 'connected',
       attention: item?.status === 'needs_reconnect',
-      unavailable: item?.status === 'not_configured',
+      unavailable:
+        item?.status === 'not_configured' || (snapshot.mcp !== null && !item),
       target: { kind: 'mcp', id },
     }),
   );
@@ -215,14 +231,14 @@ export function connectionRows(
     key: 'mcp:alipay',
     name: '支付宝',
     category: 'cloud',
-    purpose: '正式通道尚未开通，保留个人账号接入入口',
-    method: '服务待开通 · 不读取账单或发起支付',
-    status: '服务待开通',
-    action: '查看说明',
-    added: false,
-    usable: false,
-    attention: false,
-    unavailable: true,
+    purpose: snapshot.wallet?.description ?? '正式通道尚未开通，保留个人账号接入入口',
+    method: snapshot.wallet?.binding_available ? '本人钱包 · 逐笔确认 · 仅妥啦交易记录' : '服务待开通 · 不读取账单或发起支付',
+    status: snapshot.wallet ? walletStatusLabel[snapshot.wallet.status] : '服务待开通',
+    action: snapshot.wallet?.binding_available ? '管理钱包' : '查看说明',
+    added: snapshot.wallet?.status === 'connected' || snapshot.wallet?.status === 'needs_reconnect',
+    usable: snapshot.wallet?.status === 'connected',
+    attention: snapshot.wallet?.status === 'needs_reconnect',
+    unavailable: !snapshot.wallet?.binding_available,
     target: { kind: 'mcp', id: 'alipay' },
   });
   cloud.push({
@@ -238,8 +254,31 @@ export function connectionRows(
     attention: false,
     target: { kind: 'integration', id: '*' },
   });
-  for (const item of snapshot.integrations || []) {
+  const integrationChoices: Integration[] = [
+    ...(snapshot.integrations || []),
+    ...(
+      [
+        ['qq_mail', 'QQ 邮箱', 'mail', '查找邮件并确认后发送'],
+        ['netease163', '163 邮箱', 'mail', '查找邮件并确认后发送'],
+        ['netease126', '126 邮箱', 'mail', '查找邮件并确认后发送'],
+        ['amap', '高德地图', 'map', '查询地点、路线和天气'],
+      ] as const
+    )
+      .filter(([id]) => !snapshot.integrations?.some(item => item.id === id))
+      .map(([id, name, mode, detail]) => ({
+        id,
+        name,
+        mode,
+        detail,
+        category: mode === 'mail' ? '邮件' : '出行',
+        status: 'not_configured' as const,
+        ...(mode === 'map' ? { credential_scope: 'user' as const } : {}),
+      })),
+  ];
+  for (const item of integrationChoices) {
     if (item.mode === 'import') continue;
+    const userMapSupported =
+      item.mode !== 'map' || item.credential_scope === 'user';
     cloud.push({
       key: 'integration:' + item.id,
       name: item.name,
@@ -249,22 +288,23 @@ export function connectionRows(
         item.mode === 'mail'
           ? '本人邮箱 · 客户端授权码'
           : item.mode === 'map'
-          ? '公共服务 · 后台配置'
+          ? '自己的开发者 Key · 地图查询'
           : item.mode === 'oauth'
           ? '平台账号授权'
           : '企业应用连接 · 需管理员配置',
-      status:
-        item.status === 'connected'
-          ? '已连接'
-          : item.status === 'not_configured'
-          ? '服务待开通'
-          : item.status === 'available'
-          ? '可使用'
-          : '未连接',
+      status: !userMapSupported
+        ? '服务器需升级'
+        : item.status === 'connected'
+        ? '已连接'
+        : item.status === 'not_configured'
+        ? '服务待开通'
+        : item.status === 'available'
+        ? '可使用'
+        : '未连接',
       action: item.status === 'connected' ? '管理' : '查看',
-      added: item.status === 'connected',
-      usable: item.status === 'connected',
-      attention: false,
+      added: userMapSupported && item.status === 'connected',
+      usable: userMapSupported && item.status === 'connected',
+      attention: !userMapSupported,
       unavailable: item.status === 'not_configured',
       target: { kind: 'integration', id: item.id },
     });

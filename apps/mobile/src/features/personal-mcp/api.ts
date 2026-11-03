@@ -17,11 +17,14 @@ export function personalMcpApi(api: ApiClient, signal: () => AbortSignal) {
       token: string,
       environment: McpEnvironment,
       serverUrl?: string,
+      identity?: { account?: string; client_id?: string },
     ) =>
       request<PersonalMcpConnection>(provider(id) + '/connect', 'POST', {
         token,
         environment,
         ...(serverUrl ? { server_url: serverUrl } : {}),
+        ...(identity?.account ? { account: identity.account } : {}),
+        ...(identity?.client_id ? { client_id: identity.client_id } : {}),
       }),
     test: (id: string) =>
       request<PersonalMcpConnection>(provider(id) + '/test', 'POST', {}),

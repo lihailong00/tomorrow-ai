@@ -30,6 +30,7 @@ import { nativeHealth } from '../health/native';
 import { PhotoIndexSettings } from '../photo-index/PhotoIndexSettings';
 import { PersonalMcpConnections } from '../personal-mcp/PersonalMcpConnections';
 import type { PersonalMcpConnection } from '../personal-mcp/types';
+import { readWalletMetadata } from '../personal-mcp/walletModel';
 import { integrationsApi } from './api';
 import { MailConnectionSheet } from './MailConnection';
 import type { Integration } from './types';
@@ -228,6 +229,7 @@ export function ConnectionsHub({
         () => healthApi(api, () => scope.controller.signal).list(),
         value => ({ health: value }),
       ),
+      receive('wallet', async () => readWalletMetadata(await api.request('/personal-wallet/alipay', 'GET', undefined, scope.controller.signal)), value => ({ wallet: value })),
     ];
     await Promise.all(tasks);
     if (current()) {
@@ -573,8 +575,8 @@ export function ConnectionsHub({
               <Text style={v.panelTitle}>连接方式</Text>
               <Text style={v.body}>{row.purpose}</Text>
               <Text style={[v.caption, { marginTop: 12 }]}>
-                个人邮箱使用你本人的客户端授权码。公共地图等服务的 Key
-                由服务器管理员配置；可用范围以当前服务目录为准。
+                个人邮箱使用你本人的客户端授权码。高德使用你自己申请的 Web 服务
+                Key，按当前用户加密保存；可用范围以当前服务目录为准。
               </Text>
             </View>
             <Button

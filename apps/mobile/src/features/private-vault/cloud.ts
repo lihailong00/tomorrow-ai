@@ -27,12 +27,15 @@ export class VaultCloud {
     this.queue = next;
     return next;
   }
-  private async request(method = 'GET', body?: unknown): Promise<VaultCloudState> {
+  private async request(method = 'GET', body?: unknown, signal?: AbortSignal): Promise<VaultCloudState> {
     if (this.disposed) throw new Error('资料所属连接已变化，请重新打开。');
     const controller = new AbortController();
+    const cancel = () => controller.abort();
+    signal?.addEventListener('abort', cancel);
+    if (signal?.aborted) controller.abort();
     this.controller = controller;
     try { return validateCloud(await this.api.request<VaultCloudState>(path, method, body, controller.signal)); }
-    finally { if (this.controller === controller) this.controller = null; }
+    finally { signal?.removeEventListener('abort', cancel); if (this.controller === controller) this.controller = null; }
   }
   read() { return this.serial(() => this.request()); }
   private async syncCurrent(): Promise<VaultCloudState | null> {
@@ -92,10 +95,14 @@ export class VaultCloud {
       throw new Error('云端副本正在变化，请稍后重试删除。');
     });
   }
-  restore(recovery: string) {
+  restore(recovery: string, onStage?: (phase: 'fetching' | 'decrypting') => void, signal?: AbortSignal) {
     return this.serial(async () => {
-      const remote = await this.request();
+      if (signal?.aborted) throw new Error('恢复已取消。');
+      onStage?.('fetching');
+      const remote = await this.request('GET', undefined, signal);
+      if (signal?.aborted) throw new Error('恢复已取消。');
       if (!remote.envelope) throw new Error('当前后端没有可恢复的云端副本。');
+      onStage?.('decrypting');
       return this.native.restore(this.scope, remote.envelope, recovery, remote.version);
     });
   }

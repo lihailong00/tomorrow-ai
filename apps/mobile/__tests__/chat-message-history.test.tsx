@@ -10,9 +10,10 @@ import { ChatScreen, createChatEntryState } from '../src/screens/Chat';
 import { Button, ErrorNotice } from '../src/ui/components';
 import type { Message } from '../src/domain/types';
 import { platform } from '../src/platform/ports';
+import { ConversationShareSheet } from '../src/features/conversation-share/ConversationShareSheet';
 
 jest.mock('../src/platform/ports', () => ({ platform: { share: jest.fn().mockResolvedValue(undefined) } }));
-jest.mock('../src/ui/visuals', () => ({ AssistantOrb: () => null, Icon: () => null }));
+jest.mock('../src/ui/visuals', () => ({ AssistantOrb: () => null, Icon: () => null, AmbientBackground: () => null }));
 jest.mock('../src/screens/Main', () => ({ ModeNotice: () => null }));
 beforeAll(() => { (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; });
 const message = (id: string, index: number): Message => ({
@@ -180,13 +181,17 @@ test.each(['api', 'entry', 'user', 'server', 'instance'])(
     await act(async () => tree.update(render(replacement, changed === 'entry' ? next : first)));
     await act(async () => oldShare());
     expect(platform.share).not.toHaveBeenCalled();
+    expect(tree.root.findAllByType(ConversationShareSheet)).toHaveLength(0);
     const currentShare = share();
     await act(async () => currentShare());
-    expect(platform.share).toHaveBeenCalledTimes(1);
-    expect(platform.share).toHaveBeenCalledWith('private reply');
+    const sheet = tree.root.findByType(ConversationShareSheet);
+    expect(sheet.props.initialSelectedId).toBe(assistant.id);
+    expect(sheet.props.candidates.map((item: Message) => item.id)).toEqual([assistant.id]);
+    // Opening the picker must never send private content to an external app.
+    expect(platform.share).not.toHaveBeenCalled();
     await act(async () => tree.unmount());
     await act(async () => currentShare());
-    expect(platform.share).toHaveBeenCalledTimes(1);
+    expect(platform.share).not.toHaveBeenCalled();
   },
 );
 

@@ -81,7 +81,7 @@ fn credentials() -> Credentials {
     Credentials {
         token: FIXTURE_TOKEN.into(),
         environment: "production".into(),
-        server_url: None,
+        server_url: None, account: None, client_id: None,
     }
 }
 

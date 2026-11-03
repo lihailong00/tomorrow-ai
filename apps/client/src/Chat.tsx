@@ -1,9 +1,11 @@
 import {memo, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent} from 'react';
-import {ArrowDown, ArrowUp, Brain, Check, ChevronDown, Lightbulb, LoaderCircle, MessageCircle, RotateCcw, Square, WandSparkles} from 'lucide-react';
+import {ArrowDown, ArrowUp, Check, CornerDownRight, Lightbulb, LoaderCircle, MessageCircle, RotateCcw, Square, WandSparkles, X} from 'lucide-react';
 import {useVirtualizer} from '@tanstack/react-virtual';
 import {initialChatStreamState, newRequestId, reduceChatStream, type ApiClient, type ChatIntent, type ChatStreamState, type Message, type ReasoningEffort, type User} from '@tada/client-core';
 import {Notice, Orb} from './Auth';
 import {CopyButton, Markdown} from './Markdown';
+import {ReasoningMenu} from './ReasoningMenu';
+import {composeFollowUpMessage, TextSelectionActions} from './TextSelectionActions';
 import {errorText} from './platform';
 
 type Row = Message & {delivery?: 'sending' | 'sent' | 'interrupted'; toolStatus?: string};
@@ -15,6 +17,7 @@ export function shouldSendOnEnter(event: {key: string; shiftKey: boolean; isComp
 export function Chat({api, conversationId, user, onConversation, onDone}: {api: ApiClient; conversationId: string | null; user: User; onConversation(id: string, title: string): void; onDone(): void}) {
   const [rows, setRows] = useState<Row[]>([]);
   const [draft, setDraft] = useState('');
+  const [quotedText, setQuotedText] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(!!conversationId);
   const [error, setError] = useState('');
@@ -40,7 +43,7 @@ export function Chat({api, conversationId, user, onConversation, onDone}: {api: 
   useEffect(() => {
     if (conversationId === currentConversation.current) return;
     const scope = ++loadingScope.current;
-    operation.current?.abort(); pending.current = null; setHasPending(false); setRows([]); setBusy(false); setError(''); setStopped(false); setBefore(null); currentConversation.current = conversationId;
+    operation.current?.abort(); pending.current = null; setHasPending(false); setRows([]); setBusy(false); setError(''); setStopped(false); setBefore(null); setQuotedText(null); currentConversation.current = conversationId;
     if (!conversationId) {setLoading(false); return;}
     setLoading(true);
     api.messages(conversationId, {limit: 60}).then(page => {
@@ -87,6 +90,11 @@ export function Chat({api, conversationId, user, onConversation, onDone}: {api: 
     } catch (e) {
       if (scope !== lifetime.current || pending.current !== item) return;
       applyProgress(item);
+      // A validated server completion is authoritative even if transport
+      // shutdown subsequently fails; never lock a finished reply for retry.
+      if (item.stream.status === 'complete' && item.stream.response) {
+        pending.current = null; setHasPending(false); onDone(); return;
+      }
       if (controller.signal.aborted) {setStopped(true);} else {setError(errorText(e));}
       setRows(previous => previous.map(row => row.id === item.assistantKey ? {...row, delivery: 'interrupted'} : row));
     } finally {
@@ -97,10 +105,11 @@ export function Chat({api, conversationId, user, onConversation, onDone}: {api: 
   function send(event?: FormEvent) {
     event?.preventDefault();
     if (!draft.trim() || busy || loading || pending.current) return;
-    const text = draft.trim();
+    const text = composeFollowUpMessage(draft.trim(), quotedText);
+    if (text.length > 20_000) {setError('引用和问题合计不能超过 20,000 字，请缩短后再发送。'); return;}
     const id = newRequestId();
     const item: Pending = {intent: {message: text, conversation_id: currentConversation.current, client_request_id: id, remember: false, upload_ids: [], reasoning_effort: reasoning}, stream: initialChatStreamState(), userKey: `${id}-user`, assistantKey: `${id}-assistant`};
-    pending.current = item; setDraft(''); setError(''); scrollWanted.current = true;
+    pending.current = item; setDraft(''); setQuotedText(null); setError(''); scrollWanted.current = true;
     setRows(prev => [...prev, {id: item.userKey, conversation_id: currentConversation.current ?? '', role: 'user', content: text, created_at: new Date().toISOString(), delivery: 'sending'}, {id: item.assistantKey, conversation_id: currentConversation.current ?? '', role: 'assistant', content: '', created_at: new Date().toISOString(), delivery: 'sending'}]);
     void run(item);
   }
@@ -121,6 +130,7 @@ export function Chat({api, conversationId, user, onConversation, onDone}: {api: 
   function insertPrompt(value: string) {setDraft(value); input.current?.focus();}
   const empty = rows.length === 0 && !loading;
   return <div className={`chat-workspace ${empty ? 'empty' : ''}`}>
+    <TextSelectionActions containerRef={viewport} resetKey={conversationId ?? 'new'} followUpDisabled={loading || hasPending && !busy} onFollowUp={text => {setQuotedText(text); input.current?.focus({preventScroll: true});}}/>
     <div className="chat-viewport" ref={viewport} onScroll={() => {const el = viewport.current; if (el) setAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 100);}}>
       {loading && <div className="center-loading"><LoaderCircle className="spin" size={22}/><p>正在打开对话…</p></div>}
       {empty && <div className="chat-welcome"><Orb/><div className="eyebrow">你的个人 AI 助手</div><h2>{user.name ? `${user.name}，` : ''}有什么想聊的？</h2><p>一个问题、一个想法，都可以从这里开始。</p><div className="prompt-grid"><button onClick={() => insertPrompt('结合我已有的事项和记忆，帮我理清今天最值得做的三件事。')}><span className="prompt-icon blue"><ListPromptIcon/></span><strong>理清今天的重点</strong><small>把繁杂的安排，变成清晰的下一步</small><ArrowUp size={15}/></button><button onClick={() => insertPrompt('我想学习一个新知识，请先问我感兴趣的方向，再带我一步步理解。')}><span className="prompt-icon purple"><Lightbulb size={19}/></span><strong>一起学点新知识</strong><small>从好奇开始，让理解更进一步</small><ArrowUp size={15}/></button><button onClick={() => insertPrompt('帮我把一个想法整理成可执行的计划。请先问我具体想做什么。')}><span className="prompt-icon peach"><WandSparkles size={19}/></span><strong>把想法变成行动</strong><small>一起拆解，找到现在就能做的事</small><ArrowUp size={15}/></button></div></div>}
@@ -130,7 +140,7 @@ export function Chat({api, conversationId, user, onConversation, onDone}: {api: 
     <div className={`composer-dock ${empty ? 'welcome-dock' : ''}`}><div className="composer-column">
       {error && <Notice>{error}{hasPending && !busy && <button className="inline-action" onClick={() => pending.current && void run(pending.current, true)}><RotateCcw size={14}/>继续接收</button>}</Notice>}
       {stopped && !error && <Notice tone="info">已停止接收，收到的内容已保留。服务器可能仍在处理。<button className="inline-action" disabled={busy} onClick={() => pending.current && void run(pending.current, true)}>继续接收</button></Notice>}
-      <form className={`composer ${busy ? 'receiving' : ''}`} onSubmit={send}><textarea ref={input} aria-label="发送消息" placeholder={hasPending && !busy ? '先继续接收上一条回复，或新建对话' : '发消息，或说说你的想法…'} rows={2} value={draft} disabled={loading || hasPending && !busy} maxLength={20_000} onChange={e => setDraft(e.target.value)} onCompositionStart={() => {composing.current = true;}} onCompositionEnd={() => {composing.current = false;}} onKeyDown={e => {if (!composing.current && shouldSendOnEnter(e)) {e.preventDefault(); send();}}}/><div className="composer-toolbar"><div className="composer-left"><label className={`reasoning-select ${reasoning !== 'off' ? 'enabled' : ''}`}><Brain size={16}/><select aria-label="思考强度" value={reasoning} disabled={busy || hasPending} onChange={e => setReasoning(e.target.value as ReasoningEffort)}><option value="off">思考关闭</option><option value="low">轻度思考</option><option value="high">深度思考</option><option value="max">尽力思考</option></select><ChevronDown size={12}/></label></div><div className="composer-right"><span>{busy ? '正在回复' : 'Enter 发送 · Shift Enter 换行'}</span>{busy ? <button className="send-button stop-button" type="button" aria-label="停止接收回复" title="停止接收回复，服务器可能仍在处理" onClick={() => operation.current?.abort()}><Square size={15} fill="currentColor"/></button> : <button className="send-button" disabled={!draft.trim() || loading || hasPending} type="submit" aria-label="发送"><ArrowUp size={20}/></button>}</div></div></form><p className="composer-footnote">AI 也会有疏漏，重要的信息请核实。</p>
+      <form className={`composer ${busy ? 'receiving' : ''}`} onSubmit={send}>{quotedText && <div className="composer-quote"><CornerDownRight size={15}/><div><strong>追问这段内容</strong><p>{quotedText}</p></div><button type="button" aria-label="取消引用" onClick={() => {setQuotedText(null); input.current?.focus();}}><X size={15}/></button></div>}<textarea ref={input} aria-label="发送消息" placeholder={hasPending && !busy ? '先继续接收上一条回复，或新建对话' : '发消息，或说说你的想法…'} rows={2} value={draft} disabled={loading || hasPending && !busy} maxLength={20_000} onChange={e => setDraft(e.target.value)} onCompositionStart={() => {composing.current = true;}} onCompositionEnd={() => {composing.current = false;}} onKeyDown={e => {if (!composing.current && shouldSendOnEnter(e)) {e.preventDefault(); send();}}}/><div className="composer-toolbar"><div className="composer-left"><ReasoningMenu value={reasoning} onChange={setReasoning} disabled={busy || hasPending}/></div><div className="composer-right"><span>{busy ? '正在回复' : 'Enter 发送 · Shift Enter 换行'}</span>{busy ? <button className="send-button stop-button" type="button" aria-label="停止接收回复" title="停止接收回复，服务器可能仍在处理" onClick={() => operation.current?.abort()}><Square size={15} fill="currentColor"/></button> : <button className="send-button" disabled={!draft.trim() || loading || hasPending} type="submit" aria-label="发送"><ArrowUp size={20}/></button>}</div></div></form><p className="composer-footnote">AI 也会有疏漏，重要的信息请核实。</p>
     </div></div>
   </div>;
 }
@@ -146,7 +156,7 @@ const MessageRow = memo(function MessageRow({row}: {row: Row}) {
   const user = row.role === 'user';
   return <article className={`message-row ${user ? 'user-row' : 'assistant-row'}`} aria-label={user ? '你发送的消息' : '妥啦的回复'}>
     {!user && <div className="assistant-name"><Orb small/><span>妥啦</span></div>}
-    {user ? <div className="user-bubble">{row.content}</div> : row.content ? <Markdown text={row.content}/> : <div className="reply-waiting"><span className="waiting-orb"/><span>{row.delivery === 'interrupted' ? '回复已中断' : row.toolStatus || '正在想…'}</span></div>}
+    {user ? <div className="user-bubble" data-selection-content data-message-id={row.id}>{row.content}</div> : row.content ? <div data-selection-content data-message-id={row.id}><Markdown text={row.content}/></div> : <div className="reply-waiting"><span className="waiting-orb"/><span>{row.delivery === 'interrupted' ? '回复已中断' : row.toolStatus || '正在想…'}</span></div>}
     {!user && row.content && row.toolStatus && <div className="tool-status"><LoaderCircle className="spin" size={13}/>{row.toolStatus}</div>}
     <div className="message-actions">{row.content && <CopyButton text={row.content} label="复制消息"/>}{user && row.delivery === 'sending' && <span>发送中</span>}{row.delivery === 'interrupted' && <span>已保留内容</span>}</div>
   </article>;

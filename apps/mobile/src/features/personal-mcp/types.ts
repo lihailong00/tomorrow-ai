@@ -8,6 +8,8 @@ export interface PersonalMcpConnection {
   credential_label: string;
   credential_kind?: 'token';
   requires_server_url?: boolean;
+  requires_account?: boolean;
+  requires_client_id?: boolean;
   server_url?: string | null;
   transport: string;
   status: 'not_configured' | 'not_connected' | 'connected' | 'needs_reconnect';

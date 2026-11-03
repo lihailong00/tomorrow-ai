@@ -1,8 +1,10 @@
 import {defineConfig} from 'vitest/config';
 import react from '@vitejs/plugin-react';
+import {version} from './package.json';
 
 export default defineConfig({
   plugins: [react()],
+  define: {__TADA_CLIENT_VERSION__: JSON.stringify(version)},
   resolve: {alias: {'@tada/client-core': new URL('../../packages/client-core/src/index.ts', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')}},
   base: './',
   worker: {format: 'es'},

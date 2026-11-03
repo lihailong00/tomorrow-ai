@@ -61,6 +61,14 @@ async fn retry_fences(repo: Repository) {
     )
     .await
     .unwrap();
+    repo.record_agent_event(&old_run.id, &old_run.token, 2, "text_start", &json!({"turn":1,"replace":true})).await.unwrap();
+    let retracted = repo.chat_stream(&owner.id, &request).await.unwrap();
+    assert_eq!(retracted.content, "");
+    repo.record_agent_event(&old_run.id, &old_run.token, 3, "text_delta", &json!({"turn":2,"delta":"旧片段"})).await.unwrap();
+    let restored = repo.chat_stream(&owner.id, &request).await.unwrap();
+    assert_eq!(restored.content, "旧片段");
+    let events = repo.chat_stream_events(&owner.id, &request, retracted.sequence, restored.sequence).await.unwrap();
+    assert_eq!(events.last().unwrap().body["replace"], true);
     let arguments = json!({"title":"Exactly one task","instruction":"Synthetic"});
     let effect = repo
         .execute_agent_tool_with_slot(

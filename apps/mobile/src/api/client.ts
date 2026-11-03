@@ -118,7 +118,7 @@ export class ApiClient {
     const multipart =
       typeof FormData !== 'undefined' && body instanceof FormData;
     const smsCodeRequest = path === '/auth/phone/code';
-    const personalMcpRequest = path.startsWith('/personal-mcp/');
+    const personalMcpRequest = path.startsWith('/personal-mcp/') || path.startsWith('/personal-wallet/');
     const healthReadRequest = /^\/health\/connections\/(huawei|xiaomi)\/(sync|finalize)$/.test(path);
     const timeout = setTimeout(
       () => controller.abort(),

@@ -40,6 +40,10 @@ pub struct Credentials {
     pub environment: String,
     #[serde(default)]
     pub server_url: Option<String>,
+    #[serde(default)]
+    pub account: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 impl Credentials {
@@ -58,6 +62,23 @@ impl Credentials {
                 .bytes()
                 .any(|value| value <= 0x20 || value == 0x7f)
             || (provider != "memos" && self.server_url.is_some())
+            || (provider != "jianguoyun" && self.account.is_some())
+            || (provider == "jianguoyun"
+                && !self.account.as_ref().is_some_and(|value| {
+                    !value.is_empty()
+                        && value.len() <= 320
+                        && value.trim() == value
+                        && !value
+                            .chars()
+                            .any(|c| c.is_control() || c.is_whitespace() || c == ':')
+                }))
+            || (provider != "ima" && self.client_id.is_some())
+            || (provider == "ima"
+                && !self.client_id.as_ref().is_some_and(|value| {
+                    !value.is_empty()
+                        && value.len() <= 256
+                        && value.bytes().all(|c| c > 0x20 && c < 0x7f)
+                }))
             || !(if provider == "baidu_netdisk" {
                 self.environment == "experience"
             } else {
@@ -67,7 +88,9 @@ impl Credentials {
         {
             return Err(invalid());
         }
-        if provider == "memos" { super::memos::validate(self)?; }
+        if provider == "memos" {
+            super::memos::validate(self)?;
+        }
         Ok(())
     }
 }
@@ -124,8 +147,35 @@ fn unauthorized() -> ConnectorError {
 
 pub async fn discover(provider: &str, credentials: &Credentials) -> Result<Vec<Value>> {
     credentials.validate(provider)?;
+    if provider == "fliggy" {
+        return timeout(DEADLINE, super::fliggy::discover(credentials))
+            .await
+            .map_err(|_| timed_out())?;
+    }
+    if provider == "jianguoyun" {
+        return timeout(DEADLINE, super::jianguoyun::discover(credentials))
+            .await
+            .map_err(|_| timed_out())?;
+    }
+    if provider == "ima" {
+        return timeout(DEADLINE, super::ima::discover(credentials))
+            .await
+            .map_err(|_| timed_out())?;
+    }
+    if provider == "weread" {
+        return timeout(DEADLINE, super::weread::discover(credentials))
+            .await
+            .map_err(|_| timed_out())?;
+    }
+    if provider == "qq_music" {
+        return timeout(DEADLINE, super::qq_music::discover(credentials))
+            .await
+            .map_err(|_| timed_out())?;
+    }
     if provider == "notion" {
-        return timeout(DEADLINE, super::notion::discover(credentials)).await.map_err(|_| timed_out())?;
+        return timeout(DEADLINE, super::notion::discover(credentials))
+            .await
+            .map_err(|_| timed_out())?;
     }
     if provider == "yinxiang" {
         return timeout(DEADLINE, super::yinxiang::discover(credentials))
@@ -135,9 +185,18 @@ pub async fn discover(provider: &str, credentials: &Credentials) -> Result<Vec<V
     timeout(DEADLINE, async {
         let mut connection = Connection::open(provider, credentials).await?;
         let result = async {
-            let mut tools = discover_on(&mut connection).await?;
+            let mut tools = if provider == "tencent_docs" {
+                let (count, bytes) = super::catalog::discovery_limits(provider);
+                discover_on_with_limits(&mut connection, count, bytes).await?
+            } else {
+                discover_on(&mut connection).await?
+            };
             if provider == "memos" {
-                tools.retain(|tool| tool["name"].as_str().is_some_and(super::memos::enabled_tool));
+                tools.retain(|tool| {
+                    tool["name"]
+                        .as_str()
+                        .is_some_and(super::memos::enabled_tool)
+                });
             }
             // The official stdio server can list its tools entirely offline.
             // A real account read is therefore required before claiming that a
@@ -161,8 +220,18 @@ pub async fn discover(provider: &str, credentials: &Credentials) -> Result<Vec<V
                 baidu_sse::validate_identity(&identity)?;
             }
             if provider == "memos" {
-                if !tools.iter().any(|tool| tool["name"] == "auth_get_current_user") { return Err(protocol_error()); }
-                let identity = connection.rpc("tools/call", json!({"name":"auth_get_current_user","arguments":{}})).await?;
+                if !tools
+                    .iter()
+                    .any(|tool| tool["name"] == "auth_get_current_user")
+                {
+                    return Err(protocol_error());
+                }
+                let identity = connection
+                    .rpc(
+                        "tools/call",
+                        json!({"name":"auth_get_current_user","arguments":{}}),
+                    )
+                    .await?;
                 super::memos::validate_identity(&identity)?;
             }
             Ok(tools)
@@ -176,13 +245,24 @@ pub async fn discover(provider: &str, credentials: &Credentials) -> Result<Vec<V
 }
 
 fn validate_yuque_identity(value: &Value) -> Result<()> {
-    if value["isError"] == true { return Err(unauthorized()); }
-    let identity = value["content"].as_array().into_iter().flatten()
+    if value["isError"] == true {
+        return Err(unauthorized());
+    }
+    let identity = value["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|part| part["text"].as_str())
         .filter_map(|text| serde_json::from_str::<Value>(text).ok())
-        .find(|user| user["id"].as_u64().is_some_and(|id|id>0)
-            && user["login"].as_str().is_some_and(|login|!login.trim().is_empty()));
-    if identity.is_none() { return Err(unauthorized()); }
+        .find(|user| {
+            user["id"].as_u64().is_some_and(|id| id > 0)
+                && user["login"]
+                    .as_str()
+                    .is_some_and(|login| !login.trim().is_empty())
+        });
+    if identity.is_none() {
+        return Err(unauthorized());
+    }
     Ok(())
 }
 
@@ -204,8 +284,41 @@ pub async fn call(
         return Err(invalid());
     }
     let arguments = call_arguments(provider, arguments);
+    if provider == "fliggy" {
+        return timeout(DEADLINE, super::fliggy::call(credentials, tool, arguments))
+            .await
+            .map_err(|_| timed_out())?;
+    }
+    if provider == "jianguoyun" {
+        return timeout(
+            DEADLINE,
+            super::jianguoyun::call(credentials, tool, arguments),
+        )
+        .await
+        .map_err(|_| timed_out())?;
+    }
+    if provider == "ima" {
+        return timeout(DEADLINE, super::ima::call(credentials, tool, arguments))
+            .await
+            .map_err(|_| timed_out())?;
+    }
+    if provider == "weread" {
+        return timeout(DEADLINE, super::weread::call(credentials, tool, arguments))
+            .await
+            .map_err(|_| timed_out())?;
+    }
+    if provider == "qq_music" {
+        return timeout(
+            DEADLINE,
+            super::qq_music::call(credentials, tool, arguments),
+        )
+        .await
+        .map_err(|_| timed_out())?;
+    }
     if provider == "notion" {
-        return timeout(DEADLINE, super::notion::call(credentials, tool, arguments)).await.map_err(|_| timed_out())?;
+        return timeout(DEADLINE, super::notion::call(credentials, tool, arguments))
+            .await
+            .map_err(|_| timed_out())?;
     }
     if provider == "yinxiang" {
         return timeout(
@@ -245,6 +358,14 @@ fn call_arguments(provider: &str, mut arguments: Value) -> Value {
 }
 
 async fn discover_on(connection: &mut Connection) -> Result<Vec<Value>> {
+    discover_on_with_limits(connection, MAX_TOOLS, MAX_BYTES).await
+}
+
+async fn discover_on_with_limits(
+    connection: &mut Connection,
+    max_tools: usize,
+    max_bytes: usize,
+) -> Result<Vec<Value>> {
     let mut tools = Vec::new();
     let mut cursors = Vec::new();
     let mut params = json!({});
@@ -270,11 +391,11 @@ async fn discover_on(connection: &mut Connection) -> Result<Vec<Value>> {
                 return Err(protocol_error());
             }
             tools.push(item.clone());
-            if tools.len() > MAX_TOOLS
+            if tools.len() > max_tools
                 || serde_json::to_vec(&tools)
                     .map_err(|_| protocol_error())?
                     .len()
-                    > MAX_BYTES
+                    > max_bytes
             {
                 return Err(oversized());
             }
@@ -371,20 +492,55 @@ struct HttpConnection {
     session: Option<HeaderValue>,
     version: String,
     next_id: u64,
+    tools_response_bytes: usize,
 }
 
 impl HttpConnection {
     async fn memos(credentials: &Credentials) -> Result<Self> {
         let (url, client) = super::memos::endpoint(credentials).await?;
         let mut headers = HeaderMap::new();
-        let mut auth = HeaderValue::from_str(&format!("Bearer {}", credentials.token)).map_err(|_| invalid())?;
+        let mut auth = HeaderValue::from_str(&format!("Bearer {}", credentials.token))
+            .map_err(|_| invalid())?;
         auth.set_sensitive(true);
         headers.insert(AUTHORIZATION, auth);
-        Ok(Self { client, url, headers, session: None, version: PROTOCOL.into(), next_id: 1 })
+        Ok(Self {
+            client,
+            url,
+            headers,
+            session: None,
+            version: PROTOCOL.into(),
+            next_id: 1,
+            tools_response_bytes: MAX_BYTES,
+        })
     }
     fn official(provider: &str, credentials: &Credentials) -> Result<Self> {
         let mut headers = HeaderMap::new();
         let address = match provider {
+            "dida365" => {
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {}", credentials.token))
+                        .map_err(|_| invalid())?,
+                );
+                "https://mcp.dida365.com"
+            }
+            "baidu_maps" => "https://mcp.map.baidu.com/mcp",
+            "luckin" => {
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {}", credentials.token))
+                        .map_err(|_| invalid())?,
+                );
+                "https://gwmcp.lkcoffee.com/order/user/mcp"
+            }
+            "weiyun" => {
+                headers.insert(
+                    "WyHeader",
+                    HeaderValue::from_str(&format!("mcp_token={}", credentials.token))
+                        .map_err(|_| invalid())?,
+                );
+                "https://www.weiyun.com/api/v3/mcpserver"
+            }
             "mcdonalds" => {
                 headers.insert(
                     AUTHORIZATION,
@@ -423,7 +579,17 @@ impl HttpConnection {
         if provider == "didi" {
             url.query_pairs_mut().append_pair("key", &credentials.token);
         }
-        Self::new(url, headers)
+        if provider == "baidu_maps" {
+            url.query_pairs_mut().append_pair("ak", &credentials.token);
+        }
+        for header in ["authorization", "wyheader", "x-tencent-meeting-token"] {
+            if let Some(value) = headers.get_mut(header) {
+                value.set_sensitive(true);
+            }
+        }
+        let mut connection = Self::new(url, headers)?;
+        connection.tools_response_bytes = super::catalog::discovery_limits(provider).1;
+        Ok(connection)
     }
     fn new(url: Url, headers: HeaderMap) -> Result<Self> {
         let client = Client::builder()
@@ -439,6 +605,7 @@ impl HttpConnection {
             session: None,
             version: PROTOCOL.into(),
             next_id: 1,
+            tools_response_bytes: MAX_BYTES,
         })
     }
     fn request(&self) -> reqwest::RequestBuilder {
@@ -488,7 +655,11 @@ impl HttpConnection {
             }
             self.session = Some(session.clone());
         }
-        read_http_response(response, id).await
+        if method == "tools/list" {
+            read_http_response_limited(response, id, self.tools_response_bytes).await
+        } else {
+            read_http_response(response, id).await
+        }
     }
     async fn notify(&mut self, method: &str) -> Result<()> {
         let response = self
@@ -529,10 +700,18 @@ fn rpc_result(value: Value, id: u64) -> Result<Value> {
     value.get("result").cloned().ok_or_else(protocol_error)
 }
 
-async fn read_http_response(mut response: reqwest::Response, id: u64) -> Result<Value> {
+async fn read_http_response(response: reqwest::Response, id: u64) -> Result<Value> {
+    read_http_response_limited(response, id, MAX_BYTES).await
+}
+
+async fn read_http_response_limited(
+    mut response: reqwest::Response,
+    id: u64,
+    max_bytes: usize,
+) -> Result<Value> {
     if response
         .content_length()
-        .is_some_and(|length| length > MAX_BYTES as u64)
+        .is_some_and(|length| length > max_bytes as u64)
     {
         return Err(oversized());
     }
@@ -554,7 +733,7 @@ async fn read_http_response(mut response: reqwest::Response, id: u64) -> Result<
     let mut consumed = 0;
     while let Some(chunk) = response.chunk().await.map_err(|_| upstream())? {
         consumed += chunk.len();
-        if consumed > MAX_BYTES {
+        if consumed > max_bytes {
             return Err(oversized());
         }
         body.extend_from_slice(&chunk);
@@ -739,3 +918,7 @@ impl StdioConnection {
 #[cfg(test)]
 #[path = "transport_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "docs_transport_capacity_tests.rs"]
+mod docs_capacity_tests;
