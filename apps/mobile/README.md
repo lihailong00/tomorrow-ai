@@ -1,4 +1,6 @@
-# 妥啦（Tada）— Android 首版
+# 妥啦 Android 客户端
+
+妥啦是 `tomorrow-ai` 项目的 App。
 
 React Native 0.82.1、React 19.1.1、TypeScript；原生 Android 包 `com.tomorrowai`，最低 Android 10（API 29）。[React Native 0.82 已停止上游支持](https://reactnative.dev/releases/)，当前固定版本用于首版构建，后续升级需验证原生依赖和鸿蒙迁移矩阵。
 
@@ -29,7 +31,7 @@ pnpm android
 
 ## 生成可独立启动的测试安装包
 
-在仓库根目录运行 `./scripts/Build-Android.ps1`，会查找 Node、JDK 17/21 与 Android SDK，安装锁定依赖、检查类型并构建 ARM64 手机测试包。Debug 包输出到 `artifacts/apk/candidates/debug/`。运行 `./scripts/Build-Android.ps1 -BuildType Release -Compact` 后，已验证签名的正式手机包才会更新 `artifacts/apk/tada-latest.apk`。版本号读取本目录 `package.json`。可通过 `-NodePath`、`-JavaHome`、`-AndroidHome` 指定本机工具；网络代理通过环境变量 `HTTPS_PROXY` / `HTTP_PROXY` 或 `-ProxyUrl` 临时传入。
+在仓库根目录运行 `./scripts/Build-Android.ps1`，会查找 Node、JDK 17/21 与 Android SDK，安装锁定依赖、检查类型并构建 ARM64 手机测试包。Debug 包输出到 `artifacts/apk/candidates/debug/`。运行 `./scripts/Build-Android.ps1 -BuildType Release -Compact` 后，签名校验通过的正式手机包会同时更新 `artifacts/apk/tomorrow-ai-latest.apk` 和兼容入口 `artifacts/apk/tada-latest.apk`。版本号读取本目录 `package.json`。可通过 `-NodePath`、`-JavaHome`、`-AndroidHome` 指定本机工具；网络代理通过环境变量 `HTTPS_PROXY` / `HTTP_PROXY` 或 `-ProxyUrl` 临时传入。
 
 模拟器单独运行 `./scripts/Build-Android.ps1 -Target Emulator`，仅构建 x86_64，输出到 `artifacts/apk/emulator/`，拥有独立的 `latest`、回退包和元数据，不会覆盖手机包。旧参数 `-Architectures` 仍支持单个 `arm64-v8a` 或 `x86_64` 并自动选择对应目录；混合架构会被拒绝。发布前还会检查 APK 的实际架构和 OCR 残留，验证失败时保留已有 `latest`。
 

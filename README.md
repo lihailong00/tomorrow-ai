@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/assets/readme/cover.svg" alt="妥啦 Tada：记住你在意的，推进你想做的。" width="100%" />
+  <img src="docs/assets/readme/cover.svg" alt="tomorrow-ai · 妥啦。记住你在意的，推进你想做的。" width="100%" />
 </p>
 
-<h1 align="center">妥啦 · Tada</h1>
+<h1 align="center">tomorrow-ai · 妥啦</h1>
 
 <p align="center">
   一个有记忆、能用工具、陪你把事情往前推进的个人 AI 助手。<br />
@@ -92,7 +92,7 @@
 ./scripts/Build-Android.ps1 -BuildType Release -Compact
 ```
 
-手机包输出到 `artifacts/apk/tada-latest.apk`。模拟器需要单独构建 `-Target Emulator`，详情见客户端文档。构建前请阅读 [开发存储约定](docs/development-storage-policy.md)。
+最新版手机包可从 `artifacts/apk/tomorrow-ai-latest.apk` 获取。模拟器需要单独构建 `-Target Emulator`，详情见客户端文档。构建前请阅读 [开发存储约定](docs/development-storage-policy.md)。
 
 ### 把后端部署到自己的机器
 
@@ -127,7 +127,7 @@ docker compose -f infra/selfhost/compose.yaml exec server cat /data/config/setup
 | 管理后台 | Web 页面管理模型、语音、连接、用户、用量与加密备份 |
 
 ```text
-Tada/
+tomorrow-ai/
 ├── apps/mobile       Android 客户端与平台适配
 ├── apps/client       共享 Web / 桌面界面
 ├── apps/desktop      Tauri 桌面外壳

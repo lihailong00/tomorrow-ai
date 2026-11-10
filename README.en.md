@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="docs/assets/readme/cover.svg" alt="Tada — a personal AI companion that remembers what matters and helps you take the next step." width="100%" />
+  <img src="docs/assets/readme/cover.svg" alt="tomorrow-ai · 妥啦. A personal AI companion that remembers what matters and helps you take the next step." width="100%" />
 </p>
 
-<h1 align="center">Tada · 妥啦</h1>
+<h1 align="center">tomorrow-ai · 妥啦</h1>
 
 <p align="center">
   A personal AI companion with memory, tools, and a sense of what comes next.<br />
@@ -16,16 +16,16 @@
   <a href="https://github.com/lihailong00/tomorrow-ai/issues">Feedback</a>
 </p>
 
-Tada connects the small things scattered across your day: a conversation worth remembering, an incoming request, a reply to prepare, or fifteen minutes for something you want to learn. **Keep the context, prepare the next step, and leave the decisions to you.**
+妥啦 brings together the small things scattered across your day, from conversations worth remembering to replies to prepare and things you want to learn. **Keep the context, prepare the next step, and leave the decisions to you.**
 
 <p align="center">
-  <a href="docs/assets/readme/product-preview.svg"><img src="docs/assets/readme/product-preview.svg" alt="Illustrative Tada scenarios: a daily brief and compact tasks, a conversation that prepares a reply, and personal memory and server choices." width="100%" /></a>
+  <a href="docs/assets/readme/product-preview.svg"><img src="docs/assets/readme/product-preview.svg" alt="Illustrations of a daily brief, a reply draft, and memory and server settings in 妥啦." width="100%" /></a>
   <br /><sub>Illustrations with fictional sample data, not runtime screenshots. Available capabilities depend on the platform and connected service.</sub>
 </p>
 
 ## What you can do
 
-| | In Tada |
+| | In the app |
 | --- | --- |
 | **Talk naturally** | Genuine streamed replies, visible tool activity, voice input, image understanding, Markdown tables, and code cards. |
 | **Keep useful context** | Automatic memory of explicitly stated preferences, goals, and facts, with sources and controls to edit, undo, forget, or disable automatic additions. |
@@ -49,13 +49,13 @@ Self-hosted business data does not pass through the official business server. Co
 
 ### Android
 
-Tada is an early development preview. No GitHub Release has been published yet. Follow the [Android build guide](apps/mobile/README.md) to build from source. With Node.js, a JDK, and Android SDK configured on Windows:
+The tomorrow-ai project is in early development. No GitHub Release has been published yet. Follow the [Android build guide](apps/mobile/README.md) to build from source. With Node.js, a JDK, and Android SDK configured on Windows:
 
 ```powershell
 ./scripts/Build-Android.ps1 -BuildType Release -Compact
 ```
 
-The phone APK is published locally as `artifacts/apk/tada-latest.apk`. Emulator builds use `-Target Emulator`. Read the [development storage policy](docs/development-storage-policy.md) before building.
+The latest phone APK is available locally at `artifacts/apk/tomorrow-ai-latest.apk`. Emulator builds use `-Target Emulator`. Read the [development storage policy](docs/development-storage-policy.md) before building.
 
 ### Self-host the backend
 
@@ -95,4 +95,4 @@ Android and Windows are preview clients. iOS and native HarmonyOS adapters, macO
 
 We welcome [issues](https://github.com/lihailong00/tomorrow-ai/issues) and contributions around integrations, mobile interaction, platform adapters, self-hosting, and documentation. Include a reproducible case and redact private content and credentials.
 
-The original Tada code is made available under [PolyForm Noncommercial 1.0.0](LICENSE). Noncommercial use, modification, and distribution are permitted under its terms. Commercial use requires separate permission. Third-party components and marks are subject to their respective terms and rights.
+The original tomorrow-ai code is made available under [PolyForm Noncommercial 1.0.0](LICENSE). Noncommercial use, modification, and distribution are permitted under its terms. Commercial use requires separate permission. Third-party components and marks are subject to their respective terms and rights.

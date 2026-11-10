@@ -1,4 +1,4 @@
-# 妥啦首版管理后台与自建部署
+# tomorrow-ai 管理后台与自建部署
 
 同一套客户端和后端支持官方服务与自建服务。客户端默认连接官方服务；自建部署者配置自己的模型等服务，用户在手机的服务连接页输入地址或扫描后台二维码。自建服务故障不会把用户业务数据转发给官方服务器。
 
@@ -36,7 +36,7 @@ docker compose -f infra/selfhost/compose.yaml exec server cat /data/config/setup
 如需更换监听地址/端口，可复制 `infra/selfhost/deployment.env.example` 到仓库外的私有路径，并显式指定：
 
 ```sh
-docker compose --env-file /private/tada-deployment.env -f infra/selfhost/compose.yaml up -d
+docker compose --env-file /private/tomorrow-ai-deployment.env -f infra/selfhost/compose.yaml up -d
 ```
 
 默认 `TADA_BIND=127.0.0.1`；推荐在同机使用 HTTPS 反向代理。可信局域网临时调试可设置 `TADA_BIND=0.0.0.0`，手机必须使用服务器局域网地址而非 `localhost`。这不改变公网应使用 HTTPS 的要求。
@@ -100,7 +100,7 @@ docker compose -f infra/selfhost/compose.yaml stop server
 # 该临时容器只运行恢复工具，不启动 API、Agent 或 Worker。
 docker compose -f infra/selfhost/compose.yaml run --rm --no-deps \
   --entrypoint python3 -e TADA_OFFLINE_RESTORE=1 \
-  -v /private/tada-backups:/restore:ro \
+  -v /private/tomorrow-ai-backups:/restore:ro \
   server /opt/tada/selfhost/restore.py /restore/backup.tadabak \
   --output /data/restore-check --apply --data-dir /data
 ```
@@ -117,7 +117,7 @@ Dockerfile 不固定 CPU 架构；Rust、Node 和 PostgreSQL 的基础镜像选�
 
 ```sh
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f infra/selfhost/Dockerfile -t YOUR_REGISTRY/tada-server:YOUR_VERSION --push .
+  -f infra/selfhost/Dockerfile -t YOUR_REGISTRY/tomorrow-ai-server:YOUR_VERSION --push .
 ```
 
 以上为发布示例，仓库未自动向任何镜像仓库推送。维护者应在两个架构完成实际启动和恢复验证后再标记对应发布版本，不因构建成功就宣称所有架构已验证。Compose 中的镜像名应替换为自己验证后的地址。
