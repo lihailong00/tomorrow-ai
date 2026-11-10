@@ -158,6 +158,7 @@ try {
   $sdkProperty = 'sdk.dir=' + $AndroidHome.Replace('\','/') + [Environment]::NewLine
   [System.IO.File]::WriteAllText((Join-Path $mobilePath 'android/local.properties'), $sdkProperty, [System.Text.UTF8Encoding]::new($false))
   $gradleArgs = @($buildPlan.GradleTask,'-PofflineBundle=true',('-PreactNativeArchitectures=' + $Architectures),('-PtadaCompactApk=' + $Compact.IsPresent.ToString().ToLowerInvariant()),'-Pkotlin.compiler.execution.strategy=in-process','--console=plain','--max-workers=4','--no-daemon')
+  if ($BuildType -eq 'Release') { $gradleArgs += '--no-configuration-cache' }
   if ($RunNativeTests) { $gradleArgs = @($buildPlan.NativeTestTask) + $gradleArgs }
   if ($NativeBuildDirectory) {
     $nativePath = [IO.Path]::GetFullPath($NativeBuildDirectory).Replace('\','/')

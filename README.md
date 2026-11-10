@@ -2,7 +2,7 @@
 
 支持导入 ChatGPT、Claude、DeepSeek 的官方对话 ZIP / JSON：手机「能力 → 导入 AI 对话」，电脑打开服务地址下的 `/ai-import`。先预览再确认，支持检索、去重更新与删除；导入不会自动写入长期记忆。范围与限制见 [对话导入说明](docs/ai-history-import.md)。
 
-GitHub 仓库：[lihailong00/Tada](https://github.com/lihailong00/Tada)。App 显示名称为“妥啦”，现有安装可覆盖升级。
+App 显示名称为“妥啦”。
 
 ### 管理后台与自建服务
 
@@ -36,13 +36,11 @@ Android 首发的个人 AI 助手首版。客户端使用 React Native / TypeScr
 
 ## 开始体验
 
-在 Android 10 或更新手机安装 `artifacts/apk/tada-latest.apk`。安装包已包含界面资源，无需 Metro，默认连接已部署的云端 HTTPS 服务：
-
-`https://api.example.invalid`
+在 Android 10 或更新手机安装自己构建的 APK。安装包已包含界面资源，无需 Metro。首次启动后，在「连接服务器」输入自己的服务地址。代码里的 `https://api.example.invalid` 是示例地址。
 
 首次使用手机号和短信验证码注册，并设置登录密码。之后使用手机号和密码登录，不发送短信。密码为 8–128 个字符，首尾空格会保留，不会自动去除。忘记密码时可通过短信验证码重置；重置成功会使该账号的全部旧会话失效，需要用新密码重新登录。旧版没有设置密码的手机号账号，也通过“忘记密码”设置首个密码。
 
-服务端开放手机号注册，设有按手机号、可信来源 IP 和全站滚动额度的短信防刷限制；云端全站最多 20 次发送尝试 / 24 小时。短信验证码仅用于注册和重置密码。密钥只保留在后端。旧安装若仍使用未自定义的模拟器默认地址，会清除旧会话后迁移到云端；用户自己设置的地址保留。
+服务端可以按部署策略开放手机号注册和短信验证。短信密钥仅保存在后端。
 
 本地开发时先启动后端：
 
@@ -63,7 +61,7 @@ Android 首发的个人 AI 助手首版。客户端使用 React Native / TypeScr
 
 账号、记忆、对话、计划、任务和上传文件保存在 `data/`，停止服务不会清除。日志位于 `artifacts/logs/`。启动脚本在后台运行 API 与 Worker，核查两者就绪后才报告成功。
 
-本地开发进程没有系统服务守护；运行中退出后需重新启动。云端三个服务由 systemd 守护。Pi 模式的 Worker 需要 API 工具网关与 Pi 服务在线，服务故障会进入持久重试，不能在 API 停机时独立完成模型任务。请一起备份数据库、上传文件和私有 `.env`。模型或转写在超时、崩溃后重试可能再次计费，事务防重保护业务操作与成果，不能保证供应商只扣费一次。当前 APK 使用测试签名，正式发布仍需独立签名；云端已启用 HTTPS。云端配置和防刷边界见 [部署说明](infra/deploy/README.md)。
+本地开发进程没有系统服务守护；运行中退出后需重新启动。云端三个服务由 systemd 守护。Pi 模式的 Worker 需要 API 工具网关与 Pi 服务在线，服务故障会进入持久重试，不能在 API 停机时独立完成模型任务。请一起备份数据库、上传文件和私有 `.env`。模型或转写在超时、崩溃后重试可能再次计费，事务防重保护业务操作与成果，不能保证供应商只扣费一次。正式构建需要自己的签名密钥。部署配置和防刷边界见 [部署说明](infra/deploy/README.md)。
 
 ## 本版可用范围
 
@@ -146,6 +144,8 @@ cargo check -p tomorrow-worker --features temporal --locked
 
 ### APK 存放与清理约定
 
+Release 构建从 `TADA_ANDROID_KEYSTORE`、`TADA_ANDROID_STORE_PASSWORD`、`TADA_ANDROID_KEY_ALIAS` 和 `TADA_ANDROID_KEY_PASSWORD` 读取签名配置。请将私钥和密码保存在仓库之外。调试构建使用 Android SDK 生成的本机签名。
+
 所有交付 APK 统一保存在 `artifacts/apk/`。`./scripts/Build-Android.ps1` 默认执行空间检查、构建、发布和收尾清理，无需另行运行删除命令：
 
 默认仅打 ARM64 手机包，根目录 `tada-latest.apk` 始终用于手机。模拟器使用 `./scripts/Build-Android.ps1 -Target Emulator`，x86_64 包发布到 `artifacts/apk/emulator/`，其 latest、回退包和元数据独立保存。发布前会验证实际架构并拒绝内置 OCR 残留；客户端不再携带本机 OCR 库与模型。
@@ -201,3 +201,7 @@ OpenAPI：运行中的 `GET /v1/openapi.json`；也可用 `cargo run -p tomorrow
 - [轻量图记忆首版：使用方式、来源校验与验证边界](docs/knowledge-graph.md)
 
 路线文档中的浏览器执行、跨外部服务的多步工具调用、语义检索、完整离线队列、远程推送、正式渠道发布与三端验证仍需后续实现和验收；当前 Pi 工具限于本产品的记忆、任务、计划和文本附件。
+
+## 许可证
+
+项目许可证待确定。
