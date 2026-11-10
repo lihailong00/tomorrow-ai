@@ -1,16 +1,26 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, AppState, Modal, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Text } from '../../ui/Text';
-import { Button } from '../../ui/components';
+import { Button, IconButton } from '../../ui/components';
+import { Icon } from '../../ui/visuals';
+import { colors } from '../../ui/theme';
 import { platform } from '../../platform/ports';
+import { phoneCalendar } from '../../platform/phoneCalendar';
 import { phoneAlarms, type AlarmAvailability, type PhoneAlarm } from '../../platform/phoneAlarms';
-import { alarmProposal, isAlarmRequest, type AlarmProposal } from './alarmProposal';
+import { isAlarmRequest, type AlarmProposal } from './alarmProposal';
 
-export function PhoneAlarmCard({ text, createdAt, messageId }: { text: string; createdAt: string; messageId: string }) {
+export function PhoneAlarmCard({ text }: { text: string }) {
+  const [error, setError] = useState('');
   if (!phoneAlarms.supported || !isAlarmRequest(text)) return null;
-  return <PhoneAlarmEditor key={messageId} initial={alarmProposal(text, createdAt)}
-    initialManage={/取消|删除|修改|改成|改到/.test(text)}
-    initialId={'alarm-' + messageId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 65)} />;
+  return <View>
+    {!!error && <Text accessibilityRole="alert">{error}</Text>}
+    <Button variant="secondary" onPress={async () => {
+      setError('');
+      try { await phoneAlarms.openSystemClock(); }
+      catch (failure) { setError(failure instanceof Error ? failure.message : '无法打开系统闹钟'); }
+    }}>打开系统闹钟</Button>
+  </View>;
 }
 
 export function PhoneAlarmLauncher() {
@@ -21,9 +31,15 @@ export function PhoneAlarmLauncher() {
       <Text style={styles.title}>本机闹铃</Text><Text>按具体日期提醒，也可以打开系统时钟。</Text>
     </Pressable>
     <Modal visible={open} animationType="slide" onRequestClose={() => setOpen(false)}>
-      <ScrollView contentContainerStyle={styles.modal}><Button variant="secondary" onPress={() => setOpen(false)}>关闭闹铃管理</Button>
-        <PhoneAlarmEditor initial={{ date: '', time: '', title: '提醒', needsReview: true }} />
-      </ScrollView>
+      <SafeAreaView style={styles.screen}>
+        <View style={styles.header}>
+          <Text accessibilityRole="header" style={styles.heading}>本机闹铃</Text>
+          <IconButton icon="close" label="关闭闹铃管理" onPress={() => setOpen(false)} />
+        </View>
+        <ScrollView contentContainerStyle={styles.modal} keyboardShouldPersistTaps="handled">
+          <PhoneAlarmEditor initial={{ date: '', time: '', title: '提醒', needsReview: true }} />
+        </ScrollView>
+      </SafeAreaView>
     </Modal>
   </>;
 }
@@ -61,18 +77,35 @@ export function PhoneAlarmEditor({ initial, initialId, initialManage }: { initia
   const edit = (row: PhoneAlarm) => {
     setId(row.id); setDate(row.date); setTime(row.time); setTitle(row.title); setReceipt(''); setError('');
   };
+  const pick = (field: 'date' | 'time') => run(async () => {
+    const value = await (field === 'date' ? phoneCalendar.pickDate(date) : phoneCalendar.pickTime(date, time));
+    if (value && alive.current) {
+      if (field === 'date') setDate(value);
+      else setTime(value);
+    }
+  }, false);
   return <View style={styles.card} testID="phone-alarm-card">
-    <Text style={styles.title}>在这台手机设置闹铃</Text>
-    <Text style={styles.small}>本机闹铃按具体日期响铃，不依赖服务器。系统时钟中的已有闹钟请在系统时钟修改。</Text>
-    {initial.needsReview && <Text style={styles.small}>请核对日期、上午或下午，再确认设置。</Text>}
-    <View style={styles.row}>
-      <TextInput accessibilityLabel="闹铃日期" placeholder="YYYY-MM-DD" value={date} onChangeText={setDate} editable={!busy} maxLength={10} style={[styles.input, styles.flex]} />
-      <TextInput accessibilityLabel="闹铃时间" placeholder="HH:mm" value={time} onChangeText={setTime} editable={!busy} maxLength={5} style={[styles.input, styles.flex]} />
+    <Text style={styles.title}>设置闹铃</Text>
+    <Text style={styles.small}>{initial.needsReview ? '确认日期和时间后，闹铃会按手机时区响铃。' : '按手机时区响铃，无需联网。'}</Text>
+    <View style={styles.fields}>
+      {([
+        { key: 'date', label: '日期', icon: 'calendar', value: date, setValue: setDate, format: 'YYYY-MM-DD' },
+        { key: 'time', label: '时间', icon: 'clock', value: time, setValue: setTime, format: 'HH:mm' },
+      ] as const).map(field => <View key={field.key} style={styles.flex}>
+        <Text style={styles.small}>{field.label}</Text>
+        {phoneCalendar.dateTimePickerSupported ? <Pressable accessibilityRole="button" accessibilityLabel={'闹铃' + field.label}
+          accessibilityValue={{ text: field.value || '未选择' }} disabled={busy} onPress={() => { void pick(field.key); }} style={[styles.input, styles.picker]}>
+          <Icon name={field.icon} color={colors.action} size={18} />
+          <Text style={field.value ? styles.value : styles.small}>{field.value || `选择${field.label}`}</Text>
+        </Pressable> : <TextInput accessibilityLabel={'闹铃' + field.label} placeholder={field.format} value={field.value}
+          onChangeText={field.setValue} editable={!busy} maxLength={field.format.length} style={styles.input} />}
+      </View>)}
     </View>
+    <Text style={styles.small}>提醒内容</Text>
     <TextInput accessibilityLabel="闹铃提醒内容" value={title} onChangeText={setTitle} editable={!busy} maxLength={120} style={styles.input} />
-    {!availability && <Button variant="secondary" disabled={busy} onPress={() => run(async () => {})}>检查本机闹铃权限</Button>}
-    {availability && !availability.exact && <Button disabled={busy} variant="secondary" onPress={() => run(async () => { await phoneAlarms.openExactSettings(); }, false)}>允许闹钟和提醒</Button>}
-    {availability && !availability.notifications && <Button disabled={busy} variant="secondary" onPress={() => run(async () => {
+    {!availability && <Button variant="ghost" disabled={busy} onPress={() => run(async () => {})}>检查本机闹铃权限</Button>}
+    {availability && !availability.exact && <Button disabled={busy} variant="ghost" onPress={() => run(async () => { await phoneAlarms.openExactSettings(); }, false)}>允许闹钟和提醒</Button>}
+    {availability && !availability.notifications && <Button disabled={busy} variant="ghost" onPress={() => run(async () => {
       await platform.requestNotifications();
       if (alive.current) await phoneAlarms.openNotificationSettings();
     }, false)}>开启通知和闹铃声音</Button>}
@@ -81,11 +114,12 @@ export function PhoneAlarmEditor({ initial, initialId, initialManage }: { initia
     </Button>
     {!!receipt && <Text accessibilityRole="alert" style={styles.receipt}>{receipt}</Text>}
     {!!error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
-    <Button disabled={busy} variant="secondary" onPress={() => run(async () => {
+    <View style={styles.system}>
+    <Button disabled={busy} variant="ghost" onPress={() => run(async () => {
       await phoneAlarms.openSystemClock();
       if (alive.current) setReceipt('已打开系统时钟，请在系统时钟里确认修改结果。');
     }, false)}>打开系统闹钟</Button>
-    <Button disabled={busy || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time) || !title.trim()} variant="secondary" onPress={() => Alert.alert(
+    <Button disabled={busy || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time) || !title.trim()} variant="ghost" onPress={() => Alert.alert(
       '在系统时钟里新建', `将预填 ${time} 和提醒内容。系统接口不能传递日期 ${date || '（未选）'}，请在系统时钟核对日期及重复设置；这一步不会确认闹钟已设置。`,
       [{ text: '取消', style: 'cancel' }, { text: '前往系统时钟', onPress: () => run(async () => {
         if (!alive.current) return;
@@ -93,6 +127,7 @@ export function PhoneAlarmEditor({ initial, initialId, initialManage }: { initia
         if (alive.current) setReceipt('已打开系统时钟的新建页，日期和保存结果请在系统时钟确认。');
       }, false) }],
     )}>在系统时钟新建（需核对日期）</Button>
+    </View>
     {rows.length > 0 && <Button variant="secondary" disabled={busy} onPress={() => setManage(value => !value)}>{manage ? '收起已有闹铃' : `管理本机闹铃（${rows.length}）`}</Button>}
     {manage && rows.map(row => <View key={row.id} style={styles.saved}>
       <Text>{row.date} {row.time} · {row.title}</Text>
@@ -103,14 +138,21 @@ export function PhoneAlarmEditor({ initial, initialId, initialManage }: { initia
           if (alive.current) setReceipt('已取消并删除这条本机闹铃。');
         })}>取消闹铃</Button></View>
     </View>)}
-    <Text style={styles.small}>请保持通知、闹铃声音及系统的闹钟权限开启。按设置时的手机时区计时；勿扰、静音和厂商省电设置可能影响提醒。</Text>
+    <Text style={styles.small}>请保持闹铃声音和通知开启。勿扰、静音和省电设置可能影响响铃。</Text>
   </View>;
 }
 const styles = StyleSheet.create({
   card: { backgroundColor: '#FFFFFF', borderColor: '#E1E7F4', borderWidth: 1, borderRadius: 22, padding: 16, gap: 10, marginVertical: 10 },
-  title: { fontSize: 17, fontWeight: '600', color: '#30394D' }, small: { fontSize: 12, lineHeight: 19, color: '#697286' },
+  title: { fontSize: 17, fontWeight: '600', color: colors.ink }, small: { fontSize: 13, lineHeight: 20, color: colors.secondary },
+  heading: { fontSize: 22, color: colors.ink, fontWeight: '600', flex: 1 },
+  header: { paddingHorizontal: 20, paddingVertical: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  screen: { flex: 1, backgroundColor: colors.background },
+  fields: { flexDirection: 'row', gap: 10, marginTop: 4 },
+  picker: { flexDirection: 'row', alignItems: 'center', minHeight: 48, gap: 7, backgroundColor: colors.blueLight, marginTop: 4 },
+  value: { flexShrink: 1, color: colors.ink, fontSize: 14, fontWeight: '500' },
+  system: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line, marginTop: 4 },
   row: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' }, flex: { flex: 1 },
   input: { borderWidth: 1, borderColor: '#DFE5F0', borderRadius: 12, color: '#30394D', padding: 12, fontSize: 15 },
   saved: { paddingTop: 10, borderTopWidth: 1, borderTopColor: '#E9ECF3', gap: 6 },
-  receipt: { color: '#337B65', fontSize: 14 }, error: { color: '#AE4356', fontSize: 14 }, modal: { flex: 1, padding: 20, paddingTop: 48 },
+  receipt: { color: '#337B65', fontSize: 14 }, error: { color: '#AE4356', fontSize: 14 }, modal: { paddingHorizontal: 20, paddingBottom: 24 },
 });

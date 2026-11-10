@@ -59,7 +59,7 @@ test('reattached snapshot preserves the active tool label before any answer text
   const controller = createChatStreamController({ api, intent, isCurrent: () => true,
     onChange: progress => changes.push(progress.status), onComplete: jest.fn() });
   await controller.start();
-  expect(changes).toContain('正在搜索…');
+  expect(changes).toContain('正在搜索网页…');
   controller.dispose();
 });
 

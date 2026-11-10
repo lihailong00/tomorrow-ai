@@ -18,7 +18,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Semaphore;
 use tomorrow_domain::Repository;
 pub use validation::PaymentInput;
-const UNAVAILABLE_REASON: &str = "支付宝移动端 Agent Pay 需获邀开通；本服务尚未配置正式接入通道。";
+const UNAVAILABLE_REASON: &str = "当前服务尚未启用支付宝个人钱包。启用后由你本人在支付宝完成授权，无需填写商户密钥。";
 
 #[derive(Clone)]
 pub struct PersonalWalletState {
@@ -33,9 +33,14 @@ struct Inner {
 }
 impl PersonalWalletState {
     pub async fn new(repository: Repository) -> Result<Self> {
-        let crypto = std::env::var("CONNECTOR_ENCRYPTION_KEY")
-            .ok()
-            .and_then(|key| Crypto::from_hex(&key).ok());
+        Self::with_configuration(repository, &std::env::vars().collect()).await
+    }
+    pub async fn with_configuration(
+        repository: Repository,
+        values: &HashMap<String, String>,
+    ) -> Result<Self> {
+        let crypto = values.get("CONNECTOR_ENCRYPTION_KEY")
+            .and_then(|key| Crypto::from_hex(key).ok());
         let provisioned = crypto
             .as_ref()
             .and_then(|_| runtime::CliRuntime::configured());
@@ -92,8 +97,15 @@ impl PersonalWalletState {
     pub async fn test(&self, user: &str) -> Result<Value> {
         let runtime = self.runtime(user)?;
         let _permit = self.inner.operations.try_acquire().map_err(|_| busy())?;
-        let result = runtime.execute(Operation::Check).await?;
+        let result = runtime.execute(Operation::Check).await.map_err(validation::authorization_error)?;
         let status = validation::wallet_state(&result);
+        if status == "not_connected" {
+            // The provider can report unbound until the user enters the
+            // binding code. Keep an existing challenge's original expiry.
+            if let Some(value) = self.saved_authorization(user).await? {
+                return Ok(value);
+            }
+        }
         self.save_status(user, status, None).await?;
         let mut value = self.status(user).await?;
         if let Some(link) = validation::public_link(&result) {
@@ -110,13 +122,14 @@ impl PersonalWalletState {
         if self.cached_status(user).await? == "binding" {
             return Err(busy());
         }
-        let current = runtime.execute(Operation::Check).await?;
-        if validation::wallet_state(&current) == "connected" {
+        let current = runtime.execute(Operation::Check).await.map_err(validation::authorization_error)?;
+        let state = validation::wallet_state(&current);
+        if state == "connected" {
             self.save_status(user, "connected", None).await?;
             return self.status(user).await;
         }
         // Do not turn a network/security failure into repeated applications.
-        if !validation::succeeded(&current) {
+        if state != "not_connected" && !validation::succeeded(&current) {
             let reason = validation::field(&current, &["message"]).unwrap_or("");
             let detail = current.get("reason").and_then(Value::as_str).unwrap_or("");
             if ![reason, detail].iter().any(|text| {
@@ -124,16 +137,16 @@ impl PersonalWalletState {
                     || text.contains("尚未提交")
                     || text.contains("WALLET_NOT_EXISTS")
             }) {
-                return Err(validation::provider_error());
+                return Err(validation::authorization_error(validation::provider_error()));
             }
         }
         if let Some(value) = self.saved_authorization(user).await? {
             return Ok(value);
         }
-        let result = runtime.execute(Operation::Apply).await?;
+        let result = runtime.execute(Operation::Apply).await.map_err(validation::authorization_error)?;
         let link = validation::public_link(&result)
             .filter(|_| validation::succeeded(&result))
-            .ok_or_else(validation::provider_error)?;
+            .ok_or_else(|| validation::authorization_error(validation::provider_error()))?;
         self.save_status(user, "awaiting_authorization", Some(&link))
             .await?;
         let mut value = self.status(user).await?;
@@ -192,7 +205,7 @@ impl PersonalWalletState {
     }
 }
 fn availability() -> Value {
-    json!({"id":"alipay","name":"支付宝","kind":"wallet","status":"not_configured","description":"连接你本人的支付宝账号；本版仅提供个人钱包绑定入口，不执行付款。","reason":UNAVAILABLE_REASON,"help_url":"https://aipay.alipay.com/wallet-guide","qualification_url":"https://aipay.alipay.com/products/mobile-agent-pay","binding_available":false,"payment_available":false,"protocol_version":1,"history_scope":"tada_transactions_only"})
+    json!({"id":"alipay","name":"支付宝","kind":"wallet","status":"not_configured","description":"连接本人支付宝，授权后处理支持的订单付款，并核对妥啦交易记录。","reason":UNAVAILABLE_REASON,"help_url":"https://aipay.alipay.com/wallet-guide","qualification_url":"https://aipay.alipay.com/wallet-guide","binding_available":false,"payment_available":false,"protocol_version":1,"history_scope":"tada_transactions_only","integration_type":"official_personal_wallet","requires_merchant_keys":false})
 }
 fn not_configured() -> ConnectorError {
     ConnectorError::new(

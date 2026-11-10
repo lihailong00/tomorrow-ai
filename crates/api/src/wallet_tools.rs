@@ -50,7 +50,7 @@ pub(super) async fn execute(
                 .map_err(tomorrow_connectors::ConnectorError::into_domain)?;
             let pending = payment["status"] == "pending";
             return Ok(
-                json!({"status":if pending {json!("confirmation_required")}else{payment["status"].clone()},"payment":payment,"message":if pending {"付款尚未执行，请用户到能力 → 支付宝核对并确认。不得代替用户确认，也不要重复创建请求。"}else{"已返回这笔订单的原请求状态，没有创建或再次执行付款。"}}),
+                json!({"status":if pending {json!("confirmation_required")}else{payment["status"].clone()},"payment":payment,"message":if pending {"付款尚未执行，等待用户在发起操作的界面核对并确认。不得代替用户确认，也不要重复创建请求。"}else{"已返回这笔订单的原请求状态，没有创建或再次执行付款。"}}),
             );
         }
         "get_alipay_payment" => {

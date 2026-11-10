@@ -5,7 +5,8 @@ param(
   [string]$AndroidHome,
   [string]$AaptPath,
   [string]$ExpectedPackage = 'com.tomorrowai',
-  [ValidateRange(1,120)][int]$LockTimeoutSeconds = 30
+  [ValidateRange(1,120)][int]$LockTimeoutSeconds = 30,
+  [switch]$ResetRollback
 )
 
 $ErrorActionPreference = 'Stop'
@@ -276,10 +277,13 @@ try {
     return [pscustomobject]@{ Published = $false; Reason = 'older_version'; VersionCode = $incoming.VersionCode; LatestVersionCode = $latestCode; ApkPath = $sourcePath; LatestApkPath = $latestPath; MetadataPath = $metadataPath; RollbackApkPath = $(if ($rollback) { $rollbackPath } else { $null }); Cleanup = [pscustomobject]@{ RemovedFiles = @(); SkippedFiles = @(); FreedBytes = 0L } }
   }
 
-  if ($previous -and $previous.Sha256 -cne $sha) {
+  if ($ResetRollback) {
+    $rollback = $null
+  } elseif ($previous -and $previous.Sha256 -cne $sha) {
     $rollback = $previous
     $replaceRollback = $true
-  } elseif (-not $rollback -and $previous) {
+  } elseif (-not $rollback -and $previous -and
+      (-not $previousMetadata -or -not $previousMetadata.PSObject.Properties['rollback'])) {
     # Upgrade an old schema-1 output folder without discarding its older usable
     # package. Unknown/newborn inputs are not adopted as a trusted rollback.
     foreach ($candidate in Get-ChildItem -LiteralPath $script:outputPath -File -Force) {
@@ -317,7 +321,15 @@ try {
   # writers; metadata commits last, and any failed replacement restores aliases.
   Replace-PublishedFile $firstStage $latestPath ($prefix + '-tada.backup')
   Replace-PublishedFile $secondStage $legacyPath ($prefix + '-legacy.backup')
-  if ($replaceRollback) { Replace-PublishedFile $rollbackStage $rollbackPath ($prefix + '-rollback.backup') }
+  $rollbackBackup = $prefix + '-rollback.backup'
+  if ($replaceRollback) {
+    Replace-PublishedFile $rollbackStage $rollbackPath $rollbackBackup
+  } elseif ($ResetRollback -and [IO.File]::Exists($rollbackPath)) {
+    Assert-OutputFile $rollbackPath
+    Assert-OutputFile $rollbackBackup
+    [IO.File]::Move($rollbackPath, $rollbackBackup)
+    $script:replaced.Add([pscustomobject]@{ Destination = $rollbackPath; Backup = $rollbackBackup; Removed = $true })
+  }
   Replace-PublishedFile $metadataStage $metadataPath ($prefix + '-metadata.backup')
   foreach ($alias in @($latestPath,$legacyPath)) {
     Assert-OutputFile $alias
@@ -342,7 +354,9 @@ try {
     for ($index = $script:replaced.Count - 1; $index -ge 0; $index--) {
       $item = $script:replaced[$index]
       try {
-        if ($item.Existed) {
+        if ($item.PSObject.Properties['Removed']) {
+          [IO.File]::Move($item.Backup, $item.Destination)
+        } elseif ($item.Existed) {
           $displaced = $item.Backup + '.replaced'
           Assert-OutputFile $displaced
           [IO.File]::Replace($item.Backup, $item.Destination, $displaced, $true)

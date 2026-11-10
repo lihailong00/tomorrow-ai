@@ -9,15 +9,21 @@ import React, {
 } from 'react';
 import { ApiClient, errorMessage } from '../api/client';
 import type { AuthSession, Memory, Schedule, User } from '../domain/types';
-import type { Preferences } from '../platform/ports';
+import type { LocalFile, Preferences } from '../platform/ports';
 import type { HealthReceipt } from '../domain/healthLink';
 
 export type MainTab = 'today' | 'tasks' | 'memories' | 'capabilities';
+export type InitialChatInput = {
+  text: string;
+  attachment?: LocalFile;
+  recording?: LocalFile;
+  voiceMode?: boolean;
+};
 export type Route =
   | { name: 'main'; tab?: MainTab }
   | { name: 'settings'; section?: 'account' | 'server' }
   | { name: 'help' }
-  | { name: 'chat'; conversationId?: string; prompt?: string }
+  | { name: 'chat'; conversationId?: string; prompt?: string; initialInput?: InitialChatInput }
   | { name: 'task'; id: string }
   | { name: 'newTask' }
   | { name: 'todos' }

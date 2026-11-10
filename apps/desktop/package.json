@@ -1,6 +1,6 @@
 {
   "name": "@tada/desktop",
-  "version": "0.1.2",
+  "version": "0.1.6",
   "private": true,
   "packageManager": "pnpm@11.25.0",
   "description": "妥啦 desktop shell for Windows, macOS and Linux",

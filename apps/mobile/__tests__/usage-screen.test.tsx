@@ -102,7 +102,8 @@ it('opens a bounded native calendar, cancels drafts, then applies both inclusive
   await view.press('统计周期自定义');
   expect(view.tree.root.findAllByType(UsageDateRange)).toHaveLength(1);
   await view.press('最近30天');
-  expect(view.text()).toContain('已选 30 天，包含开始和结束当天。');
+  expect(view.text()).toContain('已选 30 天');
+  expect(view.text()).toContain('包含首尾两天');
   await view.press('取消选择时间段');
   expect(request.mock.calls.filter(call => call[0].includes('period=custom'))).toHaveLength(0);
   expect(view.text()).toContain('2026.11.01');

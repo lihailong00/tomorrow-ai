@@ -50,7 +50,7 @@ import { UsageScreen } from './src/features/usage/UsageScreen';
 import { PrivateVaultScreen } from './src/features/private-vault/PrivateVaultScreen';
 import { appInputs } from './src/platform/appInputs';
 import { phoneSources } from './src/platform/phoneSources';
-import { PhoneSourcesEntry } from './src/features/phone-sources/PhoneSourcesEntry';
+import { HomeComposer, type HomeComposerDraft } from './src/features/today/HomeComposer';
 import { photoIndex } from './src/platform/photoIndex';
 import {
   ArtifactsScreen,
@@ -67,6 +67,7 @@ import { AmbientBackground, AssistantOrb, Icon } from './src/ui/visuals';
 import { SidebarNavigation } from './src/features/navigation/SidebarNavigation';
 import { HelpScreen } from './src/features/navigation/HelpScreen';
 import { LocationProvider } from './src/features/location/LocationProvider';
+import { DidiRideStatus } from './src/features/personal-mcp/DidiRideStatus';
 
 function Application() {
   const [booting, setBooting] = useState(true);
@@ -244,6 +245,10 @@ function Application() {
     return () => { unsubscribe(); identityGuard.dispose(); };
   }, [identityGuard]);
   useEffect(() => () => api.dispose(), [api]);
+  const homeDraft = useMemo<HomeComposerDraft>(
+    () => ({ text: '', file: null, voiceMode: false }),
+    [preferences.serverUrl, preferences.instance?.id, session?.user.id],
+  );
   useForegroundNotifications(api, session?.user.id);
   const linkContext = useRef({ api, session });
   linkContext.current = { api, session };
@@ -385,7 +390,7 @@ function Application() {
   } else {
     switch (route.name) {
       case 'chat':
-        currentChatEntry = getEntryState(scope => createChatEntryState(route.conversationId, route.prompt, scope));
+        currentChatEntry = getEntryState(scope => createChatEntryState(route.conversationId, route.prompt, scope, route.initialInput));
         page = (
           <ChatScreen
             conversationId={route.conversationId}
@@ -489,7 +494,7 @@ function Application() {
       default:
         page =
           activeTab === 'today' ? (
-            <HomeScreen onTasks={() => selectTab('tasks')} />
+            <HomeScreen onTasks={() => selectTab('tasks')} pendingInputs={pendingInputs} />
           ) : activeTab === 'tasks' ? (
             <TodosScreen />
           ) : activeTab === 'memories' ? (
@@ -500,6 +505,7 @@ function Application() {
     }
   }
   const main = route.name === 'main';
+  const today = main && activeTab === 'today' && Boolean(session) && preferences.onboarded;
   const chatPage = route.name === 'chat' && Boolean(session);
   const chatSurface = chatPage || (route.name === 'conversations' && Boolean(session));
   const capabilitiesSurface = main && activeTab === 'capabilities' && Boolean(session);
@@ -619,7 +625,7 @@ function Application() {
               />
             )}
           </View>}
-          {session && pendingInputs > 0 && route.name !== 'integrations' && (
+          {session && !today && pendingInputs > 0 && route.name !== 'integrations' && (
             <Pressable accessibilityRole="button" accessibilityLabel="查看待接收的手机资料"
               onPress={() => navigate({ name: 'integrations' })}
               style={{ marginHorizontal: 20, marginBottom: 8, paddingHorizontal: 16, paddingVertical: 11, borderRadius: 18, backgroundColor: '#EAF1FF' }}>
@@ -627,42 +633,16 @@ function Application() {
             </Pressable>
           )}
           {session && <GrowthFeedbackBanner />}
-          {session && main && activeTab === 'today' && <PhoneSourcesEntry autoOpen onShowTodos={() => navigate({name: 'todos'})} />}
+          {session && <DidiRideStatus />}
           <KeyboardAvoidingView
             key={entry.key}
             style={s.fill}
             behavior={platform.keyboardBehavior}
           >
             {page}
+            {today && <HomeComposer savedDraft={homeDraft} />}
           </KeyboardAvoidingView>
-          {session && main && activeTab === 'today' && (
-            <View style={shell.dockArea}>
-              <View style={shell.dock}>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="我的附件"
-                  onPress={() => navigate({ name: 'uploads' })}
-                  style={shell.dockButton}
-                >
-                  <Icon name="plus" size={23} color={colors.secondary} />
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="和助手聊聊，打开文字与语音对话"
-                  onPress={() => navigate({ name: 'chat' })}
-                  style={shell.dockPrompt}
-                >
-                  <Text style={shell.dockText} numberOfLines={1}>
-                    有什么想一起做的？
-                  </Text>
-                  <View style={shell.dockMic}>
-                    <Icon name="mic" size={21} color={colors.accent} />
-                  </View>
-                </Pressable>
-              </View>
-            </View>
-          )}
-          {session && main && (
+          {session && main && !(today && keyboardVisible) && (
             <View style={s.tabs} accessibilityRole="tablist">
               {tabs.map(item => (
                 <Pressable
@@ -716,45 +696,6 @@ const shell = StyleSheet.create({
   chatHeaderButton: { width: 44, minHeight: 44, borderRadius: 22, backgroundColor: 'rgba(255,255,255,0.7)', alignItems: 'center', justifyContent: 'center' },
   selectedTab: {
     backgroundColor: 'rgba(234,241,255,0.85)',
-  },
-  dockArea: { paddingHorizontal: 20, paddingTop: 10, paddingBottom: 8 },
-  dock: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    minHeight: 60,
-    padding: 5,
-    borderRadius: 32,
-    borderWidth: 1,
-    borderColor: '#FFFFFF',
-    backgroundColor: 'rgba(255,255,255,0.92)',
-    shadowColor: '#61739A',
-    shadowOffset: { width: 0, height: 5 },
-    shadowRadius: 15,
-    shadowOpacity: 0.08,
-    elevation: 2,
-  },
-  dockButton: {
-    width: 46,
-    height: 46,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  dockPrompt: {
-    flex: 1,
-    minHeight: 46,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-  },
-  dockText: { flex: 1, fontSize: 14, color: colors.secondary },
-  dockMic: {
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#EDF3FE',
-    borderRadius: 24,
   },
 });
 export default function App() {

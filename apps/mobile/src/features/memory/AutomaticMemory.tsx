@@ -25,6 +25,8 @@ export function AutomaticMemorySettings() {
         <Text style={styles.title}>从聊天中自动记住</Text>
         <Switch
           accessibilityLabel="从聊天中自动记住"
+          trackColor={{ false: '#D5DDED', true: '#95A8E7' }}
+          thumbColor={data.value?.enabled ? '#435CB5' : '#FFFFFF'}
           value={data.value?.enabled ?? false}
           disabled={data.loading || busy || !data.value}
           onValueChange={async enabled => {
@@ -43,7 +45,7 @@ export function AutomaticMemorySettings() {
         />
       </View>
       <Text style={styles.small}>
-        默认开启，使用当前配置的模型整理你明确说过的偏好、目标和近况。可在记忆页查看、纠正或忘记；关闭后停止自动新增。
+        用当前模型整理你明确说过的偏好、目标和近况。关闭后停止自动新增，已有记忆仍保留。
       </Text>
       {error || data.error ? (
         <Pressable onPress={data.refresh} accessibilityRole="button">
@@ -197,10 +199,10 @@ export function AutomaticMemoryNotice({
 }
 const styles = StyleSheet.create({
   settings: {
-    padding: 18,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    marginBottom: 18,
+    padding: 13,
+    backgroundColor: '#F1F4FB',
+    borderRadius: 14,
+    gap: 6,
   },
   row: {
     flexDirection: 'row',

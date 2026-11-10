@@ -415,6 +415,21 @@ impl Repository {
     ) -> Result<bool, DomainError> {
         let mut transaction = self.pool.begin().await?;
         let time = now();
+        let daily_news = claim.task.kind == crate::daily_news::KIND;
+        if daily_news {
+            let job: crate::daily_news::NewsJob = serde_json::from_str(&claim.task.instruction)
+                .map_err(|_| DomainError::Internal("新闻任务格式无效".into()))?;
+            let current_date = crate::daily_news::local_date(time, &job.settings.timezone);
+            let active = sqlx::query("UPDATE schedules SET enabled=enabled WHERE id=$1 AND user_id=$2 AND enabled=1 AND prompt=$3 AND NOT EXISTS(SELECT 1 FROM admin_user_controls c WHERE c.user_id=schedules.user_id AND c.disabled<>0)")
+                .bind(format!("{}{}", crate::daily_news::PREFIX, claim.user_id)).bind(&claim.user_id)
+                .bind(crate::daily_news::snapshot(job.clone())?).execute(&mut *transaction).await?.rows_affected() != 0;
+            if !active || current_date.as_deref() != Some(job.date.as_str()) {
+                sqlx::query("UPDATE tasks SET status='cancelled',claimed_until=0,updated_at=$1 WHERE id=$2 AND user_id=$3 AND status='running' AND attempts=$4")
+                    .bind(time).bind(&claim.task.id).bind(&claim.user_id).bind(claim.attempt).execute(&mut *transaction).await?;
+                transaction.commit().await?;
+                return Ok(false);
+            }
+        }
         let artifact_id = new_id();
         let changed=sqlx::query("UPDATE tasks SET status='succeeded',progress=100,result=$1,summary=$2,model_mode=$3,artifact_id=$4,error=NULL,claimed_until=0,updated_at=$5 WHERE id=$6 AND user_id=$7 AND status='running' AND attempts=$8 AND claimed_until>=$5")
             .bind(content).bind(content.chars().take(160).collect::<String>()).bind(model_mode).bind(&artifact_id).bind(time).bind(&claim.task.id).bind(&claim.user_id).bind(claim.attempt).execute(&mut *transaction).await?.rows_affected();
@@ -431,9 +446,9 @@ impl Repository {
             created_at: timestamp(time),
         };
         let notification = Notification {
-            id: new_id(),
-            title: "任务已完成".into(),
-            body: claim.task.title.clone(),
+            id: if daily_news { format!("daily-news:{}", claim.task.id) } else { new_id() },
+            title: if daily_news { "每日新闻已就绪" } else { "任务已完成" }.into(),
+            body: if daily_news { "查看今天的兴趣简报和新闻来源".into() } else { claim.task.title.clone() },
             task_id: Some(claim.task.id.clone()),
             read: false,
             created_at: timestamp(time),
@@ -450,6 +465,9 @@ impl Repository {
                 serde_json::to_string(&notification),
             ),
         ] {
+            if daily_news && kind == "notification" && !content.contains("\n\n[阅读原文](") {
+                continue;
+            }
             let body = body.map_err(|e| DomainError::Internal(e.to_string()))?;
             sqlx::query("INSERT INTO resources(id,user_id,kind,body,created_at,updated_at)VALUES($1,$2,$3,$4,$5,$5)").bind(id).bind(&claim.user_id).bind(kind).bind(body).bind(time).execute(&mut *transaction).await?;
         }
@@ -481,7 +499,7 @@ impl Repository {
             .execute(&self.pool).await?.rows_affected() == 1)
     }
     pub async fn schedules(&self, user_id: &str) -> Result<Vec<Schedule>, DomainError> {
-        sqlx::query("SELECT * FROM schedules WHERE user_id=$1 ORDER BY created_at DESC")
+        sqlx::query("SELECT * FROM schedules WHERE user_id=$1 AND id NOT LIKE 'daily-news:%' ORDER BY created_at DESC")
             .bind(user_id)
             .fetch_all(&self.pool)
             .await?
@@ -500,12 +518,13 @@ impl Repository {
         let search = if connection.backend_name() == "PostgreSQL" {
             "strpos(title,$4)>0 OR strpos(prompt,$4)>0"
         } else { "instr(title,$4)>0 OR instr(prompt,$4)>0" };
-        let sql = format!("SELECT * FROM schedules WHERE user_id=$1 AND ($4='' OR {search}) ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3");
+        let sql = format!("SELECT * FROM schedules WHERE user_id=$1 AND id NOT LIKE 'daily-news:%' AND ($4='' OR {search}) ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3");
         let items = sqlx::query(&sql).bind(user_id).bind(limit + 1).bind(offset).bind(query.unwrap_or(""))
             .fetch_all(&mut *connection).await?.iter().map(schedule_from).collect::<Result<Vec<_>,_>>()?;
         Ok(finish_page(items, offset, limit))
     }
     pub async fn schedule(&self, user_id: &str, id: &str) -> Result<Schedule, DomainError> {
+        if id.starts_with(crate::daily_news::PREFIX) { return Err(DomainError::NotFound); }
         let row = sqlx::query("SELECT * FROM schedules WHERE user_id=$1 AND id=$2")
             .bind(user_id)
             .bind(id)
@@ -575,6 +594,7 @@ impl Repository {
         id: &str,
         input: UpdateSchedule,
     ) -> Result<Schedule, DomainError> {
+        if id.starts_with(crate::daily_news::PREFIX) { return Err(DomainError::NotFound); }
         let title = input.title.as_deref()
             .map(|value| validate_text(value, "计划名称", 120)).transpose()?;
         let instruction = input.instruction.as_deref()
@@ -620,6 +640,7 @@ impl Repository {
         }
     }
     pub async fn delete_schedule(&self, user_id: &str, id: &str) -> Result<(), DomainError> {
+        if id.starts_with(crate::daily_news::PREFIX) { return Err(DomainError::NotFound); }
         let rows = sqlx::query("DELETE FROM schedules WHERE user_id=$1 AND id=$2")
             .bind(user_id)
             .bind(id)
@@ -661,9 +682,19 @@ impl Repository {
                 continue;
             };
             let schedule = schedule_from(&row)?;
-            let key = format!("schedule:{}:{due}", schedule.id);
-            sqlx::query("INSERT INTO tasks(id,user_id,title,prompt,kind,status,created_at,updated_at,schedule_id,idempotency_key)VALUES($1,$2,$3,$4,'briefing','queued',$5,$5,$6,$7)ON CONFLICT(idempotency_key)DO NOTHING")
-                .bind(new_id()).bind(user_id).bind(schedule.title).bind(schedule.instruction).bind(time).bind(schedule.id).bind(key).execute(&mut *transaction).await?;
+            let (kind, prompt, key) = if schedule.id.starts_with(crate::daily_news::PREFIX) {
+                let Some(job) = crate::daily_news::occurrence(&schedule.instruction, due, time) else {
+                    transaction.commit().await?;
+                    continue;
+                };
+                let key = format!("schedule:{}:{}", schedule.id, job.date);
+                let prompt = serde_json::to_string(&job).map_err(|_| DomainError::Internal("新闻任务格式无效".into()))?;
+                (crate::daily_news::KIND, prompt, key)
+            } else {
+                ("briefing", schedule.instruction, format!("schedule:{}:{due}", schedule.id))
+            };
+            sqlx::query("INSERT INTO tasks(id,user_id,title,prompt,kind,status,created_at,updated_at,schedule_id,idempotency_key)VALUES($1,$2,$3,$4,$5,'queued',$6,$6,$7,$8)ON CONFLICT(idempotency_key)DO NOTHING")
+                .bind(new_id()).bind(user_id).bind(schedule.title).bind(prompt).bind(kind).bind(time).bind(schedule.id).bind(key).execute(&mut *transaction).await?;
             transaction.commit().await?;
             count += 1;
         }
@@ -733,6 +764,29 @@ impl Repository {
         limit: i64,
         before: Option<&str>,
     ) -> Result<(Vec<Message>, Option<i64>), DomainError> {
+        self.message_page(user_id, conversation_id, offset, limit, before, false).await
+    }
+
+    /// Model context omits requests whose accepted user message has no committed reply.
+    /// Display history retains those messages so the user can retry them in place.
+    pub async fn chat_context_messages(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Message>, DomainError> {
+        Ok(self.message_page(user_id, conversation_id, 0, limit, None, true).await?.0)
+    }
+
+    async fn message_page(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        offset: i64,
+        limit: i64,
+        before: Option<&str>,
+        for_model: bool,
+    ) -> Result<(Vec<Message>, Option<i64>), DomainError> {
         self.conversation(user_id, conversation_id).await?;
         validate_page(offset, limit)?;
         if let Some(id) = before {
@@ -749,9 +803,21 @@ impl Repository {
         let conversation = if postgres { "CAST(body AS JSONB)->>'conversation_id'" } else { "json_extract(body, '$.conversation_id')" };
         let activity = if postgres { "CAST(body AS JSONB)->>'created_at'" } else { "json_extract(body, '$.created_at')" };
         let seconds = if postgres { "EXTRACT(EPOCH FROM CAST(whole_seconds AS TIMESTAMPTZ))" } else { "CAST(strftime('%s', whole_seconds) AS BIGINT)" };
+        let completed_turns = if for_model {
+            "AND NOT EXISTS (
+                SELECT 1 FROM chat_message_turns t
+                JOIN chat_message_requests q ON q.user_id=t.user_id
+                    AND q.user_message_id=t.user_message_id AND q.revision=t.revision
+                JOIN chat_streams stream ON stream.request_key=q.request_key AND stream.user_id=q.user_id
+                WHERE t.user_id=resources.user_id AND t.user_message_id=resources.id
+                    AND t.conversation_id=$2 AND t.deleted=0 AND stream.status<>'done'
+                    AND NOT EXISTS (SELECT 1 FROM resources reply
+                        WHERE reply.id=t.assistant_id AND reply.user_id=t.user_id AND reply.kind='message')
+            )"
+        } else { "" };
         let query = format!("WITH activity_rows AS (
             SELECT body,id,{activity} AS activity FROM resources
-            WHERE user_id=$1 AND kind='message' AND {conversation}=$2
+            WHERE user_id=$1 AND kind='message' AND {conversation}=$2 {completed_turns}
         ), normalized AS (
             SELECT body,id,
                 substr(activity,1,19) || CASE WHEN upper(substr(activity,length(activity),1))='Z' THEN 'Z' ELSE substr(activity,length(activity)-5,6) END AS whole_seconds,
@@ -1159,6 +1225,7 @@ impl Repository {
         sqlx::raw_sql(include_str!("../../../migrations/sqlite/014_daily_growth.sql"))
             .execute(&pool).await?;
         crate::usage::initialize(&pool).await?;
+        sqlx::raw_sql(include_str!("../../../migrations/sqlite/016_growth_journeys.sql")).execute(&pool).await?;
         crate::chat_messages::initialize(&pool).await?;
         sqlx::raw_sql(crate::automatic_memory::SCHEMA).execute(&pool).await?;
         sqlx::raw_sql(crate::private_vault::SCHEMA).execute(&pool).await?;

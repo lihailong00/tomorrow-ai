@@ -59,7 +59,10 @@ async function setup(options: { items?: Message[]; older?: boolean } = {}) {
     text: () => tree.root.findAllByType(Text).map(n => n.props.children).join('\n'),
     node,
     input: async (value: string) => { await act(async () => tree.root.findByType(TextInput).props.onChangeText(value)); },
-    longpress: async (id = 'u1') => { await act(async () => tree.root.findAll(n => n.props.testID === `chat-message-${id}` && typeof n.props.onLongPress === 'function')[0].props.onLongPress({ nativeEvent: { pageX: 340, pageY: 620 } })); },
+    longpress: async (id = 'u1') => {
+      const key = state.getSnapshot().messages.find(message => message.id === id)?.client_key ?? id;
+      await act(async () => tree.root.findAll(n => n.props.testID === `chat-message-${key}` && typeof n.props.onLongPress === 'function')[0].props.onLongPress({ nativeEvent: { pageX: 340, pageY: 620 } }));
+    },
     press: async (label: string) => { await act(async () => { await node(label).props.onPress(); }); },
     action: async (name: string) => { await act(async () => { await tree.root.findByType(ChatMessageActions).props.onAction(name); }); },
     owner: async () => { await act(async () => tree.update(render({ ...api }, 'other'))); },
@@ -203,14 +206,45 @@ test('stale menu callback and late deletion result cannot mutate a different acc
   expect(second.state.getSnapshot().messages.map(m => m.id)).toEqual(['u1', 'a1', 'u2', 'a2']); await second.unmount();
 });
 
-test('mutating message actions are fenced while another reply is streaming', async () => {
-  const app = await setup(); const pending = deferred<void>(); app.api.chatStream.mockReturnValueOnce(pending.promise);
+test('the just-sent message can be edited locally while its reply streams, then submitted explicitly', async () => {
+  const app = await setup();
+  const pending = deferred<void>();
+  const sent = { ...later, id: 'u3', content: '新问题' };
+  const result = { ...laterAnswer, id: 'a4', content: '原问题的回复' };
+  app.api.chatStream.mockImplementationOnce(async (_intent, receive) => {
+    receive({ id: 1, event: 'accepted', data: { conversation_id: 'c', user_message: sent, message_id: result.id } });
+    receive({ id: 2, event: 'text_delta', data: { delta: '原问题的' } });
+    await pending.promise;
+    receive({ id: 3, event: 'done', data: { response: { conversation_id: 'c', user_message: sent, message: result } } });
+  });
   await app.input('新问题'); await act(async () => { void app.node('发送消息').props.onPress(); });
-  await app.longpress(); const menu = app.tree().root.findByType(ChatMessageActions);
-  expect(menu.props.blocked).toBe(true);
-  await app.action('edit'); expect(app.state.getSnapshot().editing).toBeNull();
+  await app.input('保留这条未发送草稿');
+  await app.longpress('u3');
+  expect(app.node('修改').props.disabled).toBe(false);
+  expect(app.node('追问').props.disabled).toBe(true);
   await app.action('delete'); expect(app.tree().root.findAllByType(ChatDeleteConfirmation)).toHaveLength(0);
-  await app.unmount(); await act(async () => pending.resolve());
+  await app.press('修改'); expect(app.state.getSnapshot().draft).toBe(sent.content);
+  await app.input('暂时改一下');
+  await app.press('取消修改消息');
+  expect(app.state.getSnapshot().draft).toBe('保留这条未发送草稿');
+  await app.longpress('u3'); await app.press('修改'); await app.input('更正的新问题');
+  expect(app.node('提交修改').props.disabled).toBe(true);
+  await app.press('提交修改'); // Even a stale tap cannot submit early.
+  expect(app.api.chatStream).toHaveBeenCalledTimes(1);
+  expect(app.state.getSnapshot().messages.find(message => message.id === 'u3')?.content).toBe(sent.content);
+  await act(async () => pending.resolve());
+  expect(app.state.getSnapshot().draft).toBe('更正的新问题');
+  expect(app.node('提交修改').props.disabled).toBe(false);
+  expect(app.api.chatStream).toHaveBeenCalledTimes(1);
+  app.api.chatStream.mockImplementationOnce(async (intent, receive) => {
+    receive({ id: 1, event: 'done', data: { response: { conversation_id: 'c', user_message: { ...sent, content: intent.message },
+      message: { ...result, id: 'a5' }, removed_message_ids: ['u3', 'a4'] } } });
+  });
+  await app.press('提交修改');
+  expect(app.api.chatStream).toHaveBeenCalledTimes(2);
+  expect(app.api.chatStream.mock.calls[1][0]).toMatchObject({ replace_message_id: 'u3', message: '更正的新问题' });
+  expect(app.state.getSnapshot().draft).toBe('保留这条未发送草稿');
+  await app.unmount();
 });
 
 test('failed or still-sending user messages cannot open the sent-message menu', async () => {

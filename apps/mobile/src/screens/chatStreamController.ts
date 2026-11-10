@@ -2,9 +2,15 @@ import type { ApiClient } from '../api/client';
 import { errorMessage } from '../api/client';
 import { ChatTransportError, type SseEvent } from '../api/chatSse';
 import type { ChatIntent, ChatResponse, Message } from '../domain/types';
-import { updateActivity, type ChatActivity } from './chatActivity';
+import { toolActivityLabel, updateActivity, type ChatActivity } from './chatActivity';
+import { readChatInteraction, type ChatInteraction } from '../features/location/chatInteraction';
+import { detectPermissionInspection, type DeviceAction, type PermissionReport } from '../features/app-permissions/inspection';
+import { createPermissionSession, performDeviceAction, type DeviceResult, type PermissionSession } from '../features/app-permissions/session';
 
 export type ChatProgress = {
+  interaction?: ChatInteraction;
+  permissionApprovalNeeded?: boolean;
+  permissionReport?: PermissionReport;
   sequence: number;
   phase: 'sending' | 'replying' | 'reconnecting' | 'failed' | 'complete';
   status: string;
@@ -20,14 +26,9 @@ export type ChatProgress = {
   removedMessageIds?: string[];
 };
 
-function toolLabel(tool: unknown) {
-  const name = typeof tool === 'string' ? tool.toLowerCase() : '';
-  if (name === 'research_plan') return '正在整理调查清单…';
-  if (name === 'research_review') return '正在核对来源与未确认事项…';
-  if (/create|save|update|delete|cancel|approve|write/.test(name)) return '正在处理操作…';
-  if (/search|find/.test(name)) return '正在搜索…';
-  if (/read|get|list|fetch|memory|upload/.test(name)) return '正在读取资料…';
-  return '正在使用工具…';
+function toolLabel(tool: unknown, activity?: unknown) {
+  if (tool === 'research_review') return '正在核对来源与未确认事项…';
+  return `正在${toolActivityLabel(tool, activity)}…`;
 }
 
 function toolEndLabel(tool: unknown, isError: unknown) {
@@ -39,12 +40,17 @@ function toolEndLabel(tool: unknown, isError: unknown) {
 }
 
 type Options = {
-  api: Pick<ApiClient, 'chatStream'>;
+  api: Pick<ApiClient, 'chatStream'> & Partial<Pick<ApiClient, 'request'>>;
   intent: ChatIntent;
   isCurrent: () => boolean;
   onChange: (progress: ChatProgress) => void;
   onComplete: (response: ChatResponse) => void;
+  permissionSession?: PermissionSession;
 };
+
+function isDeviceAction(card?: ChatInteraction): card is ChatInteraction & DeviceAction {
+  return card?.kind === 'app_permission_inspection' || card?.kind === 'system_settings';
+}
 
 /** A route-owned durable turn. Disconnects never mutate its original payload. */
 export function createChatStreamController(options: Options) {
@@ -59,14 +65,23 @@ export function createChatStreamController(options: Options) {
   let active = false;
   let terminal = false;
   let connection: AbortController | undefined;
+  const device = options.permissionSession ?? createPermissionSession();
+  let inspection: Promise<DeviceResult> | undefined;
+  let inspectionDecision: { cardId: string; approved: boolean } | undefined;
+  let inspectionSubmission: { cardId: string; connection: AbortController } | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let cancelWait: (() => void) | undefined;
   const current = () => !disposed && options.isCurrent();
+  const needsSelection = (card: DeviceAction) => (card.kind === 'system_settings'
+    ? card.destination === 'selected_app' : card.scope === 'selected_app') && !device.selected();
+  const needsPermissionApproval = (card?: ChatInteraction) => isDeviceAction(card) &&
+    intent.app_permission_tool_supported === true && inspectionDecision?.cardId !== card.id && !needsSelection(card);
   const publish = (change: Partial<ChatProgress>) => {
     if (!current()) return;
     progress = { ...progress, ...change };
-    if (change.phase === 'failed') progress = { ...progress, activities: progress.activities?.map(item =>
+    if (change.phase === 'failed') progress = { ...progress, interaction: undefined, activities: progress.activities?.map(item =>
       item.state === 'running' ? { ...item, state: 'interrupted' as const } : item) };
+    progress.permissionApprovalNeeded = needsPermissionApproval(progress.interaction);
     options.onChange(progress);
   };
   const complete = (response: ChatResponse) => {
@@ -75,7 +90,7 @@ export function createChatStreamController(options: Options) {
       throw new ChatTransportError('invalid_response', '回复结果不完整，请重新连接。');
     }
     terminal = true;
-    publish({ phase: 'complete', status: '', error: undefined, response,
+    publish({ phase: 'complete', status: '', error: undefined, response, interaction: undefined,
       activities: progress.activities?.map(item => item.state === 'running' ? { ...item, state: 'interrupted' as const } : item),
       content: response.message.content, conversationId: response.conversation_id,
       userMessage: response.user_message ?? progress.userMessage,
@@ -83,6 +98,51 @@ export function createChatStreamController(options: Options) {
       assistantId: response.message.id, assistantCreatedAt: response.message.created_at });
     if (current()) options.onComplete(response);
     connection?.abort();
+  };
+  const readInteraction = (value: unknown) => {
+    const card = readChatInteraction(value);
+    if (!isDeviceAction(card)) return card;
+    const supported = card.kind === 'system_settings' ? intent.device_settings_supported
+      : (card.permission || card.scope || card.mode) ? intent.device_settings_supported
+      : intent.app_permission_tool_supported || (intent.app_permission_inspection_supported && detectPermissionInspection(intent.message) === card.inspection);
+    if (!supported ||
+      !connection || !options.api.request || Date.now() >= card.expires_at * 1000) return undefined;
+    if (needsPermissionApproval(card)) return card;
+    const transport = connection;
+    if (inspectionSubmission?.cardId !== card.id || inspectionSubmission.connection !== transport) {
+      if (inspectionSubmission?.cardId !== card.id) inspection = undefined;
+      inspectionSubmission = { cardId: card.id, connection: transport };
+      const cancelled = inspectionDecision?.cardId === card.id && !inspectionDecision.approved;
+      const missingSelection = needsSelection(card);
+      inspection ??= cancelled || missingSelection ? Promise.resolve({})
+        : performDeviceAction(device, card);
+      void inspection.then(async ({ report, settings }) => {
+        const stillWaiting = () => current() && !terminal && connection === transport &&
+          progress.interaction?.id === card.id && !transport.signal.aborted && Date.now() < card.expires_at * 1000;
+        if (!stillWaiting()) return;
+        if (report) {
+          device.remember(report);
+          publish({ permissionReport: report, status: '正在同步检查状态…' });
+        }
+        const result = report ? {
+          status: report.unavailable.length > 0 ? 'partial' : 'completed',
+          scanned: report.scanned, flagged: report.flagged,
+        } : { status: missingSelection ? 'needs_selection' : 'unavailable' };
+        const path = `/chat/interactions/${card.run_id}/${card.id}`;
+        const body = cancelled ? { kind: 'cancel' } : card.kind === 'system_settings'
+          ? { kind: 'system_settings', status: settings === 'requested' ? 'opened' : settings === 'system_settings' ? 'fallback' : result.status }
+          : { kind: 'app_permission_inspection', result };
+        try {
+          await options.api.request?.(path, 'POST', body, transport.signal);
+        } catch {
+          // The status submission is idempotent, including after an uncertain POST.
+          if (!stillWaiting()) return;
+          try { await options.api.request?.(path, 'POST', body, transport.signal); }
+          catch { if (stillWaiting()) publish({ status: '暂时无法同步检查状态…' }); }
+        }
+      });
+    }
+    return card;
   };
   const receive = (event: SseEvent) => {
     if (!current() || terminal) return;
@@ -94,7 +154,8 @@ export function createChatStreamController(options: Options) {
     }
     if (event.event === 'snapshot') {
       if (event.id < progress.sequence) return;
-      publish({ sequence: event.id,
+      const interaction = readInteraction(body.interaction);
+      publish({ sequence: event.id, interaction,
         activities: body.tool_status?.tool ? updateActivity(progress.activities, body.tool_status, event.id, body.tool_status.status === 'tool_end') : progress.activities,
         content: typeof body.content === 'string' ? body.content : progress.content,
         conversationId: body.conversation_id ?? progress.conversationId,
@@ -103,14 +164,23 @@ export function createChatStreamController(options: Options) {
         assistantCreatedAt: typeof body.message_created_at === 'string' ? body.message_created_at : progress.assistantCreatedAt,
         removedMessageIds: Array.isArray(body.removed_message_ids) ? body.removed_message_ids : progress.removedMessageIds,
         phase: 'replying', error: undefined,
-        status: ['running', 'tool_start'].includes(body.tool_status?.status)
-          ? toolLabel(body.tool_status.tool) : body.tool_status?.status === 'tool_end'
+        status: isDeviceAction(interaction)
+          ? (needsPermissionApproval(interaction) ? '等待确认手机操作…' : '正在处理手机操作…') : ['running', 'tool_start'].includes(body.tool_status?.status)
+          ? toolLabel(body.tool_status.tool, body.tool_status.activity) : body.tool_status?.status === 'tool_end'
             ? toolEndLabel(body.tool_status.tool, body.tool_status.is_error) : '正在回复…' });
       if (body.response) { complete(body.response); return; }
       if (body.status === 'interrupted' || body.status === 'failed') {
         terminal = true;
         publish({ phase: 'failed', status: '', error: body.error || '回复中断，已保留收到的内容，可重试。' });
         connection?.abort();
+      }
+      return;
+    }
+    if (event.event === 'interaction') {
+      if (event.id >= progress.sequence) {
+        const interaction = readInteraction(body.card);
+        publish({ interaction, ...(isDeviceAction(interaction)
+          ? { status: needsPermissionApproval(interaction) ? '等待确认手机操作…' : '正在处理手机操作…' } : {}) });
       }
       return;
     }
@@ -137,7 +207,7 @@ export function createChatStreamController(options: Options) {
           phase: 'replying', status: '正在回复…', error: undefined });
         break;
       case 'tool_start':
-        publish({ phase: 'replying', status: toolLabel(body.tool), activities: updateActivity(progress.activities, body, event.id, false) });
+        publish({ phase: 'replying', status: toolLabel(body.tool, body.activity), activities: updateActivity(progress.activities, body, event.id, false) });
         break;
       case 'tool_end':
         publish({ status: toolEndLabel(body.tool, body.is_error), activities: updateActivity(progress.activities, body, event.id, true) });
@@ -163,7 +233,7 @@ export function createChatStreamController(options: Options) {
     terminal = false;
     const attempt = ++generation;
     publish({ phase: 'sending', status: retry ? '正在重试回复…' : '发送中…', error: undefined,
-      ...(retry ? { activities: [] } : {}) });
+      ...(retry ? { activities: [], interaction: undefined } : {}) });
     let failures = 0;
     let explicitRetry = retry;
     try {
@@ -203,6 +273,14 @@ export function createChatStreamController(options: Options) {
     intent,
     getSnapshot: () => progress,
     start: () => connect(false),
+    respondToPermissionInspection(cardId: string, approved: boolean) {
+      const card = progress.interaction;
+      if (!current() || terminal || !connection || card?.id !== cardId || !needsPermissionApproval(card) ||
+          Date.now() >= card.expires_at * 1000) return;
+      inspectionDecision = { cardId, approved };
+      publish({ status: approved ? '正在处理手机操作…' : '正在取消操作…' });
+      readInteraction(card);
+    },
     retry: () => progress.phase === 'failed' ? connect(true) : Promise.resolve(),
     dispose: () => {
       disposed = true;

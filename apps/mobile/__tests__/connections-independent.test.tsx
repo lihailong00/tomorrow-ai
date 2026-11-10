@@ -94,9 +94,9 @@ describe('independent connections catalog acceptance', () => {
   it('does not fabricate connected states when server or native catalogs are missing', () => {
     const result = rows();
     expect(result.some(row => row.added || row.usable)).toBe(false);
-    expect(result.find(row => row.key === 'mcp:alipay')!.unavailable).toBe(true);
-    expect(result.find(row => row.key === 'health:huawei')!.status).toBe('服务状态待确认');
-    expect(result.find(row => row.key === 'health:apple')!.status).toContain('不支持直接连接');
+    expect(result.find(row => row.key === 'mcp:alipay')).toBeUndefined();
+    expect(result.find(row => row.key === 'health:huawei')).toBeUndefined();
+    expect(result.find(row => row.key === 'health:apple')).toBeUndefined();
   });
 
   it('retains expired personal credentials in management without presenting them as usable', () => {
@@ -121,8 +121,7 @@ describe('independent connections catalog acceptance', () => {
     expect(result.find(row => row.key === 'health:system')!.added).toBe(false);
     expect(result.find(row => row.key === 'health:system')!.usable).toBe(false);
     expect(result.find(row => row.key === 'health:system')!.status).toContain('查看授权范围');
-    expect(result.find(row => row.key === 'health:huawei')!.unavailable).toBe(true);
-    expect(result.find(row => row.key === 'health:huawei')!.usable).toBe(false);
+    expect(result.find(row => row.key === 'health:huawei')).toBeUndefined();
   });
 
   it('retains email connectors and separates public service readiness from a connected personal account', () => {
@@ -132,10 +131,7 @@ describe('independent connections catalog acceptance', () => {
       { id: 'wechat', name: '微信', category: '聊天', mode: 'import', status: 'available', detail: '主动导入' },
     ] });
     expect(result.find(row => row.key === 'integration:qq_mail')!.method).toContain('本人邮箱');
-    expect(result.find(row => row.key === 'integration:amap')!.added).toBe(false);
-    expect(result.find(row => row.key === 'integration:amap')!.method).toContain('自己的开发者 Key');
-    expect(result.find(row => row.key === 'integration:amap')!.status).toContain('服务器需升级');
-    expect(result.find(row => row.key === 'integration:amap')!.usable).toBe(false);
+    expect(result.find(row => row.key === 'integration:amap')).toBeUndefined();
     expect(result.find(row => row.key === 'integration:wechat')).toBeUndefined();
   });
 
@@ -153,7 +149,7 @@ describe('independent connections catalog acceptance', () => {
       supported: true, notification_access: false, selected_apps: ['wechat'],
       installed_apps: ['wechat'], pending_count: 0,
     } });
-    expect(filterConnectionRows(result, 'devices', '  微信  ', false).map(row => row.key)).toEqual(['app:wechat', 'app:wecom', 'mcp:weread']);
+    expect(filterConnectionRows(result, 'devices', '  微信  ', false).map(row => row.key)).toEqual(['app:wechat', 'app:wecom']);
     expect(filterConnectionRows(result, 'cloud', '', true).map(row => row.key)).toEqual(['app:wechat']);
     expect(filterConnectionRows(result, 'local', '不存在的应用', false)).toEqual([]);
   });
@@ -322,7 +318,7 @@ describe('independent real React Native interaction acceptance', () => {
     try {
       await view.press('外部设备');
       await view.search('微信');
-      expect(view.rowLabels().map(label => label.split('，')[0])).toEqual(['微信', '企业微信', '微信读书']);
+      expect(view.rowLabels().map(label => label.split('，')[0])).toEqual(['微信', '企业微信']);
       expect(view.rowLabels().some(label => label.includes('已连接'))).toBe(false);
     } finally { await view.unmount(); }
   });
@@ -357,6 +353,8 @@ describe('independent real React Native interaction acceptance', () => {
       await view.row('mcp:yinxiang');
       expect(view.text()).not.toContain('其他平台秘密');
       expect(view.text()).not.toContain('其他平台私密参数');
+      expect(view.text()).not.toContain('测试连接');
+      await view.press('管理连接');
       await view.button('测试连接');
       expect(view.text()).toContain('测试凭据已失效');
       expect(view.text()).toContain('需要重新连接');

@@ -12,8 +12,9 @@ const dependencyPath = path.join(__dirname, 'node_modules');
 const sharedDependencies = fs.realpathSync(dependencyPath);
 // Worktrees may share dependencies through a junction. Metro must index its
 // real target as well as the application's own sources.
-const config = sharedDependencies === dependencyPath ? {} : {
-  watchFolders: [sharedDependencies],
+const config = {
+  watchFolders: [path.resolve(__dirname, '../../packages/client-core/src'),
+    ...(sharedDependencies === dependencyPath ? [] : [sharedDependencies])],
   resolver: { nodeModulesPaths: [sharedDependencies] },
 };
 

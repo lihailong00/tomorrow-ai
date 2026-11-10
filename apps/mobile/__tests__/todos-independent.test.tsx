@@ -65,11 +65,16 @@ it('keeps independent source/kind rows and truthful loaded group counts, then pa
     return {items:[],next_offset:null};
   });
   const app=await mount(<TodosScreen/>,{request,baseUrl:'https://fixture.invalid'});
-  expect(texts(app.tree)).toContain('事项learn');expect(texts(app.tree)).toContain('你添加');expect(texts(app.tree)).toContain('分享资料');expect(texts(app.tree)).toContain('等待后续 · 1+');expect(texts(app.tree)).not.toContain('事项waiting');
+  expect(texts(app.tree)).toContain('事项learn');expect(texts(app.tree)).toContain('你添加');expect(texts(app.tree)).toContain('分享资料');expect(texts(app.tree)).not.toContain('等待后续');expect(texts(app.tree)).not.toContain('事项waiting');
   await press(app.tree,'加载更多事项');
   expect(app.tree.root.findAllByType(Text).filter(n=>n.props.children==='事项learn')).toHaveLength(1);expect(texts(app.tree)).toContain('事项older');expect(texts(app.tree)).toContain('对话');
   await act(async()=>{app.tree.root.findAll(n=>n.props.accessibilityRole==='tab'&&childText(n.props.children)==='全部'&&typeof n.props.onPress==='function')[0].props.onPress();});
   expect(request.mock.calls.some(([path])=>path.includes('filter=active')&&path.includes('scope=all'))).toBe(true);
+  expect(texts(app.tree)).toContain('等待后续');
+  expect(texts(app.tree)).toContain('事项waiting');
+  expect(texts(app.tree)).toContain('加载更多等待后续');
+  await act(async()=>{app.tree.root.findAll(n=>n.props.accessibilityLabel==='发现 1 条待办建议'&&typeof n.props.onPress==='function')[0].props.onPress();});
+  expect(app.ctx.navigate).toHaveBeenCalledWith({name:'todo',id:'candidate'});
   await app.close();
 });
 

@@ -4,3 +4,4 @@ export * from './server';
 export * from './transport';
 export * from './stream';
 export * from './api';
+export * from './mapPicker';

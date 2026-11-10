@@ -182,6 +182,7 @@ pub(crate) fn evaluate(revision: i64, values: &HashMap<String, String>) -> Confi
         ("wps", "WPS 云端授权", "WPS"),
         ("feishu", "飞书云端授权", "FEISHU"),
         ("dingtalk", "钉钉云端授权", "DINGTALK"),
+        ("slack", "Slack 工作区授权", "SLACK"),
     ] {
         // Static names keep missing-field metadata and serialization independent
         // of the actual credential values.
@@ -197,6 +198,7 @@ pub(crate) fn evaluate(revision: i64, values: &HashMap<String, String>) -> Confi
                 "FEISHU_CLIENT_SECRET",
                 "FEISHU_REDIRECT_URI",
             ],
+            "SLACK" => &["SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET", "SLACK_REDIRECT_URI"],
             _ => &[
                 "DINGTALK_CLIENT_ID",
                 "DINGTALK_CLIENT_SECRET",

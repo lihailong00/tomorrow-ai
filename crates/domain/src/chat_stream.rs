@@ -434,10 +434,21 @@ pub(crate) async fn append_event_tx(
     Ok(())
 }
 
-// Only bounded public web-operation metadata reaches the client. In particular,
-// do not forward raw arguments, tool results, or research conclusions/reasoning.
+// Only bounded operation metadata reaches the client; never raw arguments,
+// tool results, addresses, credentials or research conclusions/reasoning.
 fn public_activity(body: &Value) -> Value {
     let mut value = json!({});
+    let tool = body["tool"].as_str().unwrap_or_default();
+    if matches!(tool, "list_mcp_tools" | "call_mcp_tool" | "read_integration") || tool.starts_with("mcp_") {
+        let activity = &body["activity"];
+        if let (Some(provider), Some(operation)) = (activity["provider"].as_str(), activity["operation"].as_str()) {
+            if matches!(provider, "amap" | "baidu_maps" | "didi" | "liepin" | "fliggy" | "dida365" | "jianguoyun" | "weread" | "weiyun" | "luckin" | "qq_music" | "ima" | "mcdonalds" | "tencent_docs" | "yuque" | "notion" | "memos" | "tencent_meeting" | "feishu" | "baidu_netdisk" | "yinxiang")
+                && matches!(operation, "discover" | "estimate" | "geocode" | "route" | "nearby" | "price" | "menu" | "offers" | "flights" | "hotels" | "execute") {
+                value["provider"] = json!(provider);
+                value["operation"] = json!(operation);
+            }
+        }
+    }
     let research = &body["research"];
     if body["tool"] == "web_search" {
         if let Some(query) = research["query"].as_str() {
@@ -469,6 +480,8 @@ mod public_activity_tests {
 
     #[test]
     fn exposes_only_bounded_public_operation_fields() {
+        assert_eq!(public_activity(&json!({"tool":"call_mcp_tool","activity":{"provider":"didi","operation":"estimate","address":"private","token":"private","label":"success"}})),json!({"provider":"didi","operation":"estimate"}));
+        assert_eq!(public_activity(&json!({"tool":"call_mcp_tool","activity":{"provider":"didi","operation":"success","address":"private"}})),json!({}));
         let body = json!({"tool":"web_fetch","research":{"url":"https://name:secret@example.com/notice?token=private#section","reason":"not public"},"args":{"password":"private"}});
         assert_eq!(
             public_activity(&body),

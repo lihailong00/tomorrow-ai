@@ -474,7 +474,7 @@ fn tools() -> Vec<Value> {
         ),
         tool(
             "notion_create_page",
-            "将 Markdown 文章或日记保存为指定父页面下的新页面；目标必须由用户指定或确认。需本人在我的连接确认。",
+            "将 Markdown 文章或日记保存为指定父页面下的新页面；目标必须由用户指定或确认。需本人在发起操作的界面确认。",
             json!({"parent_page_id":id,"title":string(200),"content":string(10000)}),
             vec!["parent_page_id", "title", "content"],
         ),

@@ -38,7 +38,7 @@ export function useForegroundNotifications(
             continue;
           }
           seen.add(item.id);
-          if (!item.read) {
+          if (!item.read && !item.id.startsWith('daily-news:')) {
             // Never request permission here. A declined permission does not interrupt the app.
             await platform
               .showNotification(item.title, item.body)

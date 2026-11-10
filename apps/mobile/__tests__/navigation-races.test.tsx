@@ -114,7 +114,7 @@ async function setup(api: object) {
     press: async (label: string, wait = true) => {
       await act(async () => {
         const button = tree.root.findAllByType(Button).find(n => n.props.children === label)
-          ?? tree.root.findAll(n => n.props.accessibilityLabel === (label === '保存记忆' ? '记住这件事' : label) && n.props.onPress)[0];
+          ?? tree.root.findAll(n => n.props.accessibilityLabel === (label === '保存记忆' ? '记住这件事' : label === '重试' ? '重试回复' : label) && n.props.onPress)[0];
         const operation = button.props.onPress();
         if (wait) await operation;
       });

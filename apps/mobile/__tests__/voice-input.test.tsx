@@ -68,7 +68,7 @@ async function setup() {
     navigation = useRouteStack(client);
     const route = navigation.entry.route;
     return (
-      <AppProvider value={{ api: client, invalidate: jest.fn(), formatDate: () => '' } as unknown as AppContextValue}>
+      <AppProvider value={{ api: client, preferences: { reviewVoiceTranscript: false }, invalidate: jest.fn(), formatDate: () => '' } as unknown as AppContextValue}>
         <React.Fragment key={navigation.entry.key}>
           {route.name === 'chat' ? <ChatScreen
             conversationId={route.conversationId}

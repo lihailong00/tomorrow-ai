@@ -15,8 +15,8 @@ export function messageMenuPosition(anchor: MessageAnchor, width: number, height
 }
 
 /** A native anchored menu; selection uses Android/iOS' actual selectable Text. */
-export function ChatMessageActions({ anchor, timestamp, hasText, blocked, role = 'user', onAction, onClose }: {
-  anchor: MessageAnchor; timestamp: string; hasText: boolean; blocked: boolean;
+export function ChatMessageActions({ anchor, timestamp, hasText, blocked, editBlocked, role = 'user', onAction, onClose }: {
+  anchor: MessageAnchor; timestamp: string; hasText: boolean; blocked: boolean; editBlocked: boolean;
   role?: 'user' | 'assistant';
   onAction: (action: MessageAction) => void; onClose: () => void;
 }) {
@@ -25,7 +25,8 @@ export function ChatMessageActions({ anchor, timestamp, hasText, blocked, role =
   const [measuredHeight, setMeasuredHeight] = useState<number>();
   const assistant = role === 'assistant';
   const action = (name: MessageAction, label: string, icon: Parameters<typeof Icon>[0]['name'], compact = false) => {
-    const disabled = (blocked && ['edit', 'quote', 'branch', 'delete', 'memory', 'todos'].includes(name)) || (!hasText && name !== 'delete');
+    const disabled = (name === 'edit' ? editBlocked : blocked && ['quote', 'branch', 'delete', 'memory', 'todos'].includes(name)) ||
+      (!hasText && name !== 'delete');
     return <Pressable key={name} accessibilityRole="button" accessibilityLabel={label} disabled={disabled}
       onPress={() => onAction(name)} style={[compact ? css.topAction : css.row, disabled && css.disabled]}>
       <Icon name={icon} size={compact ? 21 : 19} color={name === 'delete' ? '#c84c63' : '#5665be'} />

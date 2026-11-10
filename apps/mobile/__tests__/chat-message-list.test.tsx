@@ -520,6 +520,43 @@ test('drag and momentum own same-row streaming reflow until momentum ends', asyn
   expect(app.viewport.anchor).toEqual({ id: old.id, offset: 476 });
 });
 
+test('released drag keeps the same visible text through streaming growth and the final reply layout', async () => {
+  const reply = { ...message(1), role: 'assistant' as const, content: '正在阅读的正文', stream_status: '正在回复…' };
+  const app = await setup([reply]);
+  await app.bounds(); app.measure(reply.id, 0, 900);
+  await app.native(400, true); await app.end(400);
+  app.engine().scrollToOffset.mockClear();
+
+  const extended = { ...reply, content: reply.content + '接下来生成的内容' };
+  await app.update([extended]);
+  app.measure(reply.id, 0, 960);
+  // Native can report its old offset after measuring the new row, but before
+  // the layout callback that normally applies the reading correction.
+  await app.native(400); await app.commit();
+  expect(app.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 460, animated: false });
+  await app.native(460);
+
+  await app.update([{ ...extended, stream_status: undefined }]);
+  await app.commit(); // Completion can render before the new controls are measured.
+  app.measure(reply.id, 0, 1020); await app.commit();
+  expect(app.engine().scrollToOffset).toHaveBeenLastCalledWith({ offset: 520, animated: false });
+  await app.native(520);
+  expect(app.viewport.anchor).toEqual({ id: reply.id, offset: 496 });
+  expect(app.viewport.followTail).toBe(false);
+});
+
+test('ending a live drag near the bottom does not rearm auto-follow on completion', async () => {
+  const reply = { ...message(1), role: 'assistant' as const, stream_status: '正在回复…' };
+  const app = await setup([reply]);
+  await app.bounds(); app.measure(reply.id, 0, 900);
+  await app.native(0, true); await app.end(0);
+  app.engine().scrollToOffset.mockClear();
+  await app.update([{ ...reply, stream_status: undefined }]);
+  await app.native(0); await app.commit();
+  expect(app.viewport.followTail).toBe(false);
+  expect(app.engine().scrollToOffset).not.toHaveBeenCalled();
+});
+
 test('accessibility scroll without gesture events saves actual measured reading intent after arrival', async () => {
   const app = await setup(allMessages(), { id: 'message-6', offset: 175 });
   await app.bounds(); app.measure('message-6', 6000, 900); await app.commit();

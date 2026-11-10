@@ -26,36 +26,32 @@ async function render(briefing: string) {
 }
 const hasID = (tree: ReactTestRenderer, id: string) => tree.root.findAllByType(View).some(node => node.props.testID === id);
 
-test('home preview strips screenshot heading/list/bold/link source and stays clamped to five native lines', async () => {
+test('home keeps saved briefing content behind an explicit open action', async () => {
   const tree = await render(sample);
-  const preview = tree.root.findAllByType(Text).find(node => node.props.testID === 'home-briefing-preview')!;
-  expect(preview.props.numberOfLines).toBe(5);
-  expect(preview.props.children).toContain('今日简报 · 2026年11月2日');
-  expect(preview.props.children).toContain('• 任务总数：1 条');
-  expect(preview.props.children).toContain('查看资料');
-  expect(preview.props.children).not.toMatch(/(^|\n)#{1,6} |\*\*|\]\(|```|\| ---/);
-  expect(hasID(tree, 'home-briefing-markdown')).toBe(false);
+  expect(tree.root.findAllByType(ResultText)).toHaveLength(0);
+  expect(tree.root.findAllByType(Text).some(node => node.props.children === '今日简报 · 2026年11月2日')).toBe(false);
+  await act(async () => tree.root.findByProps({ accessibilityLabel: '查看简报' }).props.onPress());
+  expect(tree.root.findAllByType(Text).some(node => node.props.children === '最近一次简报')).toBe(true);
 });
 
-test('expansion renders headings, list, table and whole code through shared renderer; collapse restores excerpt', async () => {
+test('briefing renders full Markdown and closing returns to the uncluttered home', async () => {
   const tree = await render(sample);
-  await act(async () => tree.root.findByProps({ testID: 'home-briefing-toggle' }).props.onPress());
+  await act(async () => tree.root.findByProps({ accessibilityLabel: '查看简报' }).props.onPress());
   expect(tree.root.findByType(ResultText).props.content).toBe(sample);
   const heading = tree.root.findAllByType(Text).find(node => node.props.children === '一、今日概况');
   expect(heading).toBeDefined();
   expect(hasID(tree, 'markdown-table')).toBe(true);
   expect(hasID(tree, 'native-code-block')).toBe(true);
   expect(tree.root.findAllByType(Text).some(node => node.props.children === '末尾内容完整保留。')).toBe(true);
-  expect(tree.root.findByProps({ testID: 'home-briefing-toggle' }).props.accessibilityState.expanded).toBe(true);
-  await act(async () => tree.root.findByProps({ testID: 'home-briefing-toggle' }).props.onPress());
+  await act(async () => tree.root.findByProps({ accessibilityLabel: '关闭简报' }).props.onPress());
   expect(tree.root.findAllByType(ResultText)).toHaveLength(0);
-  expect(tree.root.findByProps({ testID: 'home-briefing-toggle' }).props.accessibilityState.expanded).toBe(false);
 });
 
-test.each(['', ' \n\t '])('empty briefing %j keeps useful fallback and no expand action', async briefing => {
+test.each(['', ' \n\t ', '你有 0 个进行中的任务、0 条记忆。点击生成简报，后台会依据已保存的资料整理。'])('empty briefing %j offers generation on demand', async briefing => {
   const tree = await render(briefing);
+  await act(async () => tree.root.findByProps({ accessibilityLabel: '查看简报' }).props.onPress());
   expect(tree.root.findAllByType(Text).some(node => String(node.props.children).includes('还没有生成简报'))).toBe(true);
-  expect(tree.root.findAllByProps({ testID: 'home-briefing-toggle' })).toHaveLength(0);
+  expect(tree.root.findAllByProps({ accessibilityLabel: '更新今日简报' }).length).toBeGreaterThan(0);
 });
 
 test('excerpt respects code and table boundaries without changing full source or leaking their Markdown fences', () => {

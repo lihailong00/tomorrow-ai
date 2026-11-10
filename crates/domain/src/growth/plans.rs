@@ -30,6 +30,7 @@ fn item_conflict() -> DomainError {
 impl Repository {
     pub async fn daily_plan(&self, user: &str) -> Result<DailyPlan, DomainError> {
         let prefs = self.growth_preferences(user).await?;
+        let journey_kind = self.growth_journey_focus_kind(user).await?;
         let today = local_date(now(), &prefs.timezone)?;
         let row=sqlx::query("SELECT p.id,p.local_date,p.status,p.error,p.timezone,p.attempts,p.dispatches,t.status AS task_status FROM growth_daily_plans p LEFT JOIN tasks t ON t.id=p.task_id WHERE p.user_id=$1 AND (p.local_date=$2 OR (p.timezone<>$3 AND p.created_at>$4)) ORDER BY CASE WHEN p.local_date=$2 THEN 0 ELSE 1 END,p.created_at DESC LIMIT 1")
             .bind(user).bind(&today).bind(&prefs.timezone).bind(now()-20*3600).fetch_optional(&self.pool).await?;
@@ -65,6 +66,9 @@ impl Repository {
             let spare:i64=sqlx::query_scalar("SELECT COUNT(*) FROM growth_plan_items WHERE user_id=$1 AND plan_id=$2 AND status='spare'").bind(user).bind(&id).fetch_one(&self.pool).await?;
             for row in rows {
                 let mut item: DailyPlanItem = parse(row.get("body"))?;
+                // A route already owns this goal's next action. Preserve user-accepted
+                // items, but do not advertise another unaccepted duplicate for it.
+                if row.get::<String,_>("status")=="suggested" && row.get::<Option<String>,_>("todo_id").is_none() && journey_kind.as_deref()==Some(item.kind.as_str()){continue;}
                 item.status = row.get("status");
                 item.version = row.get("version");
                 item.focus = row.get::<i64, _>("focus") != 0;
@@ -385,7 +389,9 @@ impl Repository {
         let mut seen = std::collections::HashSet::new();
         let mut budget = 0;
         let mut existing_used = false;
+        let journey_kind = self.growth_journey_focus_kind(&claim.user_id).await?;
         for p in proposals.items {
+            if p.todo_id.is_none() && journey_kind.as_deref()==Some(p.kind.as_str()){continue;}
             if ![
                 "general",
                 "learning",

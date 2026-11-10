@@ -8,10 +8,14 @@ import type { InstanceManifest } from '../src/domain/instance';
 import type { Today } from '../src/domain/types';
 import { platform } from '../src/platform/ports';
 import { HomeScreen } from '../src/screens/Main';
+import { ResultText } from '../src/ui/ResultText';
 import { ErrorNotice, Loading } from '../src/ui/components';
 
 jest.mock('../src/platform/ports', () => ({
   platform: { onForeground: jest.fn() },
+}));
+jest.mock('../src/features/todos/api', () => ({
+  listTodos: jest.fn().mockResolvedValue({ items: [], next_offset: null }),
 }));
 jest.mock('../src/ui/visuals', () => ({
   Icon: () => null,
@@ -94,6 +98,11 @@ const text = (tree: ReactTestRenderer) =>
     .findAllByType(Text)
     .map(node => [node.props.children].flat().join(''))
     .join(' ');
+const openBrief = async (tree: ReactTestRenderer) => {
+  await act(async () => tree.root.findByProps({ accessibilityLabel: '查看简报' }).props.onPress());
+};
+const briefContent = (tree: ReactTestRenderer) =>
+  tree.root.findAllByType(ResultText).map(node => node.props.content).join(' ');
 async function mount(
   anonymous: typeof fetch,
   accounts: typeof fetch,
@@ -175,7 +184,8 @@ test('foreground queues a Home GET after its aborted cold-start anonymous check,
       '正在查看今天的安排…',
     );
     await act(async () => second.resolve(response(manifest)));
-    expect(text(app.tree)).toContain(today.briefing);
+    await openBrief(app.tree);
+    expect(briefContent(app.tree)).toBe(today.briefing);
     expect(errors(app.tree)).toEqual([]);
     expect(accounts).toHaveBeenCalledTimes(1);
     expect(accounts.mock.calls[0]).toEqual([
@@ -261,6 +271,7 @@ test('foreground refreshes only Home reads and never automatically replays an un
   });
   const app = await mount(anonymous, accounts as typeof fetch);
   try {
+    await openBrief(app.tree);
     await act(async () =>
       app.tree.root
         .findByProps({ accessibilityLabel: '更新今日简报' })
@@ -276,7 +287,7 @@ test('foreground refreshes only Home reads and never automatically replays an un
       'GET',
     ]);
     expect(anonymous).toHaveBeenCalledTimes(3);
-    expect(text(app.tree)).toContain(today.briefing);
+    expect(briefContent(app.tree)).toBe(today.briefing);
   } finally {
     await app.close();
   }
@@ -292,7 +303,8 @@ test('foreground recovery also works when the child Home subscribes before the p
     expect(accounts).toHaveBeenCalledTimes(2);
     expect(anonymous).toHaveBeenCalledTimes(2);
     expect(errors(app.tree)).toEqual([]);
-    expect(text(app.tree)).toContain(today.briefing);
+    await openBrief(app.tree);
+    expect(briefContent(app.tree)).toBe(today.briefing);
   } finally {
     await app.close();
   }
@@ -355,8 +367,8 @@ test('changing account and API before the scheduled microtask cancels the old re
     expect(accounts).toHaveBeenCalledTimes(1);
     expect(nextAnonymous).toHaveBeenCalledTimes(1);
     expect(nextAccounts).toHaveBeenCalledTimes(1);
-    expect(text(app.tree)).toContain('新账号简报');
-    expect(text(app.tree)).not.toContain(today.briefing);
+    await openBrief(app.tree);
+    expect(briefContent(app.tree)).toBe('新账号简报');
   } finally {
     await app.close();
     nextGuard.dispose();

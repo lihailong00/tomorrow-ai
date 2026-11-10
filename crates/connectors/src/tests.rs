@@ -354,6 +354,58 @@ async fn refresh_is_real_http_and_new_tokens_remain_encrypted() {
 }
 
 #[tokio::test]
+async fn calendar_agenda_reads_only_an_authorized_calendar_and_filters_cancelled_events() {
+    use axum::extract::Query;
+    use std::collections::HashMap;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let start = "2026-11-07T00:00:00+08:00";
+    let end = "2026-11-09T00:00:00+08:00";
+    let upstream = Router::new().route("/events", get(move |Query(query): Query<HashMap<String, String>>| async move {
+        assert_eq!(query["timeMin"], start);
+        assert_eq!(query["timeMax"], end);
+        assert_eq!(query["singleEvents"], "true");
+        assert_eq!(query["showDeleted"], "false");
+        Json(json!({
+            "nextPageToken": "more",
+            "items": [
+                {"summary":"取消的活动","status":"cancelled"},
+                {"summary":"全天活动","status":"confirmed","start":{"date":"2026-11-07"},
+                    "end":{"date":"2026-11-08"},"htmlLink":"https://calendar.google.com/calendar/event?id=test"}
+            ]
+        }))
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let mut config = config();
+    config.endpoints.calendar = format!("http://{address}/events");
+    let (state, owner, other, _, _) = fixture(Some(config)).await;
+    store_tokens(&state, &owner, Service::Calendar, now() + 3600).await;
+    assert!(
+        state
+            .calendar_agenda(&other, start, end)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let agenda = state
+        .calendar_agenda(&owner, start, end)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(agenda["truncated"], true);
+    let items = agenda["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["start"], "2026-11-07");
+    assert_eq!(items[0]["end_exclusive"], "2026-11-08");
+    assert_eq!(
+        items[0]["source_link"],
+        "https://calendar.google.com/calendar/event?id=test"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn disconnect_is_local_first_even_when_remote_revocation_fails() {
     let (endpoint, receiver) = mock_http(
         "500 Internal Server Error",

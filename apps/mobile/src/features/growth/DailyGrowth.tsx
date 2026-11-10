@@ -31,7 +31,7 @@ export function GrowthEntry() {
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={enabled ? '查看我的成长' : '开启每日成长'}
-      onPress={() => navigate({ name: enabled ? 'growth' : 'growthSettings' })}
+      onPress={() => navigate({ name: 'growth' })}
       style={s.entry}
     >
       {summary && enabled && (
@@ -470,12 +470,6 @@ export function DailyRecommendations({
         <Text style={[s.small, { marginVertical: 12 }]}>
           今天留点空白也可以。原有事项和已经积累的成长都会保留。
         </Text>
-      )}
-      {daily.items.length > 0 && (
-        <View style={[s.groupHeading, { marginTop: 18 }]}>
-          <Text style={s.section}>其他事项</Text>
-          <Text style={s.muted}>原来的待办，一直都在</Text>
-        </View>
       )}
     </View>
   );

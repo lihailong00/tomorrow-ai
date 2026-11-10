@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
 import type { ChatActivity as Activity } from '../screens/chatActivity';
+import { groupedActivities } from '../screens/chatActivity';
 import { Text } from './Text';
 import { chatAppearance as colors } from './ChatAppearance';
 import { Icon } from './visuals';
@@ -15,18 +16,20 @@ export function ChatActivity({ items = [], status }: { items?: readonly Activity
       {status ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="history" size={16} color={colors.accent} />}
       <View style={css.copy}>
         <Text style={css.title}>{status || '查看执行记录'}</Text>
-        {latest?.detail ? <Text style={css.detail} numberOfLines={2}>{latest.label} · {latest.detail}</Text> : null}
+        {latest && !expanded && (status !== `正在${latest.label}…` || !!latest.detail) && <Text style={css.detail} numberOfLines={1}>
+          {status === `正在${latest.label}…` ? latest.detail : latest.label + (latest.detail ? ` · ${latest.detail}` : '')}
+        </Text>}
       </View>
       <Icon name={expanded ? 'arrowUp' : 'chevronDown'} size={14} color={colors.secondary} />
     </Pressable>
     {expanded && <View style={css.history}>
       {!items.length && <Text style={css.detail}>等待执行信息…</Text>}
-      {items.map(item => <View key={item.id} style={css.step}>
+      {groupedActivities(items).map(item => <View key={item.id} style={css.step}>
         <Text style={[css.marker, item.state === 'failed' && css.failed]}>
           {item.state === 'running' ? '进行中' : item.state === 'complete' ? '已完成' : item.state === 'failed' ? '未成功' : '已中断'}
         </Text>
-        <View style={css.copy}><Text style={css.title}>{item.label}</Text>
-          {!!item.detail && <Text style={css.detail} numberOfLines={3}>{item.detail}</Text>}</View>
+        <View style={css.copy}><Text style={css.title} numberOfLines={2}>{item.label}{item.count > 1 ? ` ×${item.count}` : ''}</Text>
+          {!!item.detail && <Text style={css.detail} numberOfLines={2}>{item.detail}</Text>}</View>
       </View>)}
       {items.length === 24 && <Text style={css.detail}>显示最近 24 步</Text>}
     </View>}

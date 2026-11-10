@@ -11,6 +11,8 @@ import { resolveModel } from './config.js';
 import { executeRun as executeRunBase, RunError, safeToolResult, validateRun, type Bridge, type RunEvent, type RunInput } from './runtime.js';
 import { createDeepSeekWeb } from './web.js';
 import { captureRuntimeContext, contextPrompt, validRuntimeContext, type RuntimeContext } from './request-context.js';
+import { projectMealMenu } from './meal-menu.js';
+import { toolInputs } from './tool-inputs.js';
 
 function locationContext(): RuntimeContext {
   return { server_time_utc: '2026-11-03T04:00:00.000Z', local_time: '2026-11-03T12:00:00.000+08:00',
@@ -73,6 +75,61 @@ test('real Pi transcript receives one scoped snapshot across tool turns, exclude
   await executeRun(input(), settings, bridge().value, undefined, undefined,
     fakeStream([[{ type: 'text', text: '你好' }]], value => { next = JSON.stringify(value); }));
   assert.equal(next.includes('121.4737'), false);
+});
+
+test('nearby pet hospital lookup uses the location card and real map results before the first model turn', async () => {
+  const message = '那你看下附近有什么宠物医院吧，我想赶紧去。';
+  const original = input();
+  const fixture = bridge();
+  const tools = ['request_location', 'list_integrations', 'read_integration'].map(name => ({ name, description: name,
+    parameters: { type: 'object', properties: {}, additionalProperties: true } }));
+  const calls: string[] = [];
+  let mapQuery: unknown;
+  let modelMessages: Message[] = [];
+  let callsAtFirstModelTurn: string[] = [];
+  const source = { source: 'amap', operation: 'nearby', status: 'completed', items: [{ title: '示例宠物医院', distance_m: 100 }] };
+  const executionBridge: Bridge = { ...fixture.value, tool: async (name, args) => {
+    calls.push(name);
+    if (name === 'request_location') return { status: 'answered', location: locationContext().location };
+    if (name === 'list_integrations') return { items: [{ id: 'amap', status: 'connected' }] };
+    mapQuery = args;
+    return source;
+  } };
+  await executeRun({ ...original, messages: [{ role: 'user', content: message }], tools }, settings, executionBridge, undefined, undefined,
+    fakeStream([[{ type: 'text', text: '高德找到示例宠物医院。' }]], value => {
+      callsAtFirstModelTurn = [...calls];
+      modelMessages = (value as { messages: Message[] }).messages;
+    }));
+  assert.deepEqual(callsAtFirstModelTurn, ['request_location', 'list_integrations', 'read_integration']);
+  assert.deepEqual(mapQuery, { provider: 'amap', query: { operation: 'nearby', keywords: '宠物医院', location: '121.478223,31.228458', limit: 5 } });
+  assert.ok(JSON.stringify(modelMessages).includes('示例宠物医院'));
+  assert.ok(!getCurrentTools(modelMessages).some(tool => tool.name === 'request_location'));
+  assert.ok(fixture.events.some(event => event.kind === 'tool_start' && event.body.tool === 'read_integration' &&
+    (event.body.activity as { operation?: string }).operation === 'nearby'));
+});
+
+test('named nearby lookup uses the named center and cancellation never queries Amap', async () => {
+  const tools = ['request_location', 'list_integrations', 'read_integration'].map(name => ({ name, description: name, parameters: { type: 'object' } }));
+  for (const [content, expected] of [
+    ['上海陆家嘴附近的宠物医院', ['list_integrations', 'read_integration']],
+    ['附近有什么宠物医院', ['request_location']],
+    ['我没有要查询附近医院', []],
+    ['附近宠物医院的API接口类型怎么写', []],
+  ] as const) {
+    const calls: string[] = [];
+    const mapQueries: unknown[] = [];
+    const testBridge: Bridge = { ...bridge().value, tool: async (name, args) => {
+      calls.push(name);
+      if (name === 'list_integrations') return { items: [{ id: 'amap', status: 'connected' }] };
+      if (name === 'request_location') return { status: 'cancelled' };
+      mapQueries.push(args);
+      return { source: 'amap', operation: 'nearby', status: 'completed', items: [] };
+    } };
+    await executeRun({ ...input(), messages: [{ role: 'user', content }], tools }, settings, testBridge, undefined, undefined,
+      fakeStream([[{ type: 'text', text: '收到。' }]]));
+    assert.deepEqual(calls, expected);
+    if (expected.length === 2) assert.deepEqual(mapQueries, [{ provider: 'amap', query: { operation: 'nearby', keywords: '宠物医院', address: '上海陆家嘴', limit: 5 } }]);
+  }
 });
 
 const settings = resolveModel({ DEEPSEEK_API_KEY: 'model-key-never-in-transcript' });
@@ -159,9 +216,10 @@ function fakeStream(replies: AssistantMessage['content'][], observe?: (value: un
   };
 }
 
-function deltaStream(replies: AssistantMessage['content'][], deltas?: (string[] | null)[]): StreamFn {
+function deltaStream(replies: AssistantMessage['content'][], deltas?: (string[] | null)[], observe?: (context: unknown) => void): StreamFn {
   let index = 0;
-  return (model) => {
+  return (model, context) => {
+    observe?.(context);
     const stream = createAssistantMessageEventStream();
     const turn = Math.min(index++, replies.length - 1);
     const content = replies[turn]!;
@@ -256,7 +314,7 @@ test('personal MCP bridge can discover tools at runtime and preserves user confi
     toolCall('list_mcp_tools', { provider: 'didi' }, 2),
     toolCall('call_mcp_tool', { provider: 'didi', tool: 'taxi_estimate', arguments: {} }, 3),
     toolCall('call_mcp_tool', { provider: 'didi', tool: 'taxi_create_order', arguments: { estimate_trace_id: 'estimate-id' } }, 4),
-    [{ type: 'text', text: '快车预估 30 元。叫车请求尚未执行，请到“我的连接”检查并确认。' }],
+    [{ type: 'text', text: '快车预估 30 元。叫车请求尚未执行，请核对当前对话中的确认卡。' }],
   ], context => contexts.push(JSON.stringify(context))));
   assert.equal(called.length, 6);
   assert.deepEqual(called.map(item => item.name), ['list_mcp_connections', 'list_mcp_tools', 'list_mcp_connections', 'list_mcp_tools', 'call_mcp_tool', 'call_mcp_tool']);
@@ -266,6 +324,10 @@ test('personal MCP bridge can discover tools at runtime and preserves user confi
   assert.ok(contexts[0]?.includes('不能代替用户确认'));
   assert.ok(result.content.includes('尚未执行'));
   assert.ok(!request.tools.some(tool => /confirm|credential|token/.test(tool.name)));
+  const activities=fixture.events.filter(event=>event.kind==='tool_start').map(event=>event.body.activity);
+  assert.ok(activities.some(value=>JSON.stringify(value)===JSON.stringify({provider:'didi',operation:'discover'})));
+  assert.ok(activities.some(value=>JSON.stringify(value)===JSON.stringify({provider:'didi',operation:'estimate'})));
+  assert.ok(!JSON.stringify(activities).includes('estimate_trace_id'));
 });
 
 test('run validation permits the integrated MCP tool set and retains a bounded tool budget', () => {
@@ -286,12 +348,116 @@ test('oversized MCP reads report omitted content instead of claiming the whole d
   assert.ok(!JSON.stringify(result).includes('x'.repeat(100)));
 });
 
-test('the bounded full menu budget does not change the default document result budget', () => {
-  const menu={status:'completed',result:{items:[{code:'real-menu-code',conditions:'x'.repeat(53500)}]}};
-  assert.equal(JSON.parse(safeToolResult(menu,'call_mcp_tool')).error.code,'tool_result_too_large');
-  const complete=JSON.parse(safeToolResult(menu,'call_mcp_tool',64000));
-  assert.deepEqual(complete,menu);
-  assert.equal(complete.result.items[0]!.code,'real-menu-code');
+test('menu projection reads full structured/text JSON and recovers only complete official product entries from a prefix', () => {
+  const structured = { success: true, data: { categories: [{ name: '主餐', meals: [{ code: '11002' }] }], meals: {
+    ...Object.fromEntries(Array.from({length: 100}, (_, i) => [String(20000 + i), { name: '甜筒', image: 'x'.repeat(3000) }])),
+    11002: { name: '双人套餐', currentPrice: '55.50', withOrder: { membershipCode: '106', image: 'private' } },
+  } } };
+  for (const representation of [{ structuredContent: structured }, { content: [{type:'text',text:JSON.stringify(structured)}] }]) {
+    const result = projectMealMenu({ status:'completed', result: representation })!;
+    const data = result.result.structuredContent.data;
+    assert.equal(data.items.length, 48);
+    assert.equal(data.source_menu_count, 101);
+    assert.equal(data.partial, true);
+    assert.equal(data.recovered_from_json_prefix, false);
+    assert.deepEqual(JSON.parse(JSON.stringify(data.items[0])), { code: '11002', name: '双人套餐', currentPrice: '55.50', withOrder:{membershipCode:'106'}, categories:['主餐'] });
+    assert.ok(JSON.stringify(result).length < 48000);
+  }
+  const cut = '{"success":true,"data":{"meals":{"11002":{"name":"双人\\\"餐","currentPrice":"45","noise":{"x":"}],"}},"11003":{"name":"未读完';
+  const fromText = (text: string) => projectMealMenu({status:'completed',result:{content:[{type:'text',text}]}})?.result.structuredContent.data;
+  assert.equal(fromText(cut)?.recovered_from_json_prefix, true);
+  assert.deepEqual(fromText(cut)?.items.map(item => item.code), ['11002']);
+  assert.deepEqual(fromText(cut.slice(0, cut.indexOf(',"11003"')))?.items.map(item => item.code), ['11002']);
+  assert.equal(fromText(cut.replace('true', 'false')), undefined);
+});
+
+test('store lookup binds the verified point, while explicit places and missing coordinates keep their own paths', () => {
+  const args = { provider:'mcdonalds', tool:'query-nearby-stores', arguments:{ searchType:2, city:'北京', keyword:'北京' } };
+  assert.ok('error' in toolInputs(undefined,[{role:'assistant',content:'北京的麦当劳'}, {role:'user',content:'为什么给我定到北京了？'}]).bind('call_mcp_tool',args));
+  const runtime = locationContext();
+  const named = toolInputs(runtime,[{role:'user',content:'查北京西单附近的麦当劳套餐'}]).bind('call_mcp_tool',args);
+  assert.ok('arguments' in named);
+  assert.deepEqual(named.arguments, { ...args, arguments: { ...args.arguments, beType: 1 } });
+  const bound = toolInputs(runtime,[{role:'user',content:'我想吃麦当劳，推荐什么？'}]).bind('call_mcp_tool',args);
+  assert.ok('arguments' in bound);
+  assert.deepEqual((bound.arguments as typeof args).arguments, {
+    searchType:3, beType:1, latitude:runtime.location!.map_coordinates!.latitude, longitude:runtime.location!.map_coordinates!.longitude,
+  });
+  assert.ok('error' in toolInputs(runtime,[{role:'user',content:'查上海静安寺附近的麦当劳套餐'}]).bind('call_mcp_tool',args));
+});
+
+test('a nearby store follow-up adapts verified coordinates to a keyword-only catalog once', async () => {
+  const messages = [
+    { role: 'user', content: '我昨天点的麦当劳还挺好吃的，你看一下呢。' },
+    { role: 'assistant', content: '查到了昨天的订单。' },
+    { role: 'user', content: '那他们还有什么汉堡呢？' },
+    { role: 'assistant', content: '昨天的店还是你附近的店？' },
+    { role: 'user', content: '就我附近的这个店。' },
+  ];
+  const inputs = toolInputs(locationContext(), messages);
+  const args = { provider: 'mcdonalds', tool: 'query-nearby-stores', arguments: { searchType: 2, city: '北京', keyword: '王府井' } };
+  inputs.observe('list_mcp_tools', { provider: 'mcdonalds' }, { items: [{
+    name: 'query-nearby-stores', inputSchema: { properties: {
+      searchType: { type: 'string' }, beType: { type: 'number' }, city: { type: 'string' }, keyword: { type: 'string' },
+    } },
+  }] });
+  const operations: string[] = [];
+  const prepare = () => inputs.prepare('call_mcp_tool', args, () => true, async (name, params) => {
+    assert.equal(name, 'read_integration');
+    const query = params.query as { operation: string; location: string };
+    assert.equal(query.location, '121.4782230593,31.2284577376');
+    operations.push(query.operation);
+    return query.operation === 'reverse_geocode'
+      ? { source: 'amap', operation: 'reverse_geocode', city: '上海市' }
+      : { source: 'amap', operation: 'nearby', status: 'completed',
+        items: [{ title: '麦当劳（星桥店）', distance_m: 470 }] };
+  });
+  const [first, second] = await Promise.all([prepare(), prepare()]);
+  assert.ok('arguments' in first);
+  assert.deepEqual(first.arguments, { ...args, arguments: { searchType: '2', beType: 1, city: '上海', keyword: '麦当劳(星桥店)' } });
+  assert.deepEqual(second, first);
+  assert.deepEqual(operations, ['reverse_geocode', 'nearby']);
+  const withoutMap = await inputs.prepare('call_mcp_tool', args, () => false, async () => assert.fail('no tool available'));
+  assert.ok('error' in withoutMap);
+  assert.equal(withoutMap.error.code, 'store_location_unresolved');
+});
+
+test('the delegated two-person follow-up checks real menu codes and quotes after retracting a premature question', async () => {
+  const request=input(); request.runtime_context = locationContext(); request.messages=[
+    {role:'user',content:'我想吃麦当劳了，然后双人的套餐吧，你看下都多少钱？'},
+    {role:'assistant',content:'按北京关键词查到了门店。'},
+    {role:'user',content:'为什么给我定到北京了？你看我现在在哪儿？'},
+    {role:'assistant',content:'刚才用了错误位置。'},
+    {role:'user',content:'又不知道选啥，你看一下，你直接给我推荐吧，两个人吃的。'},
+  ];
+  request.tools=['list_mcp_connections','list_mcp_tools','call_mcp_tool'].map(name=>({name,description:name,parameters:{type:'object',properties:{provider:{type:'string'},tool:{type:'string'},arguments:{type:'object'},query:{type:'string'},limit:{type:'integer'}}}}));
+  const fixture=bridge(); const calls: unknown[] = []; const contexts: string[] = [];
+  fixture.value.tool=async(name,args)=>{
+    if (name==='list_mcp_connections') return {items:[{id:'mcdonalds',name:'麦当劳',status:'connected'}]};
+    if (name==='list_mcp_tools') return {items:[{name:'calculate-price',inputSchema:{type:'object'}}]};
+    if (name!=='call_mcp_tool') return {};
+    calls.push(args);
+    const {tool} = args as {tool: string};
+    if (tool==='query-nearby-stores') {
+      assert.equal((args as {arguments: {searchType: number}}).arguments.searchType, 3);
+      return {status:'completed',result:{structuredContent:{success:true,data:[{storeCode:'nearby-fixture'}]}}};
+    }
+    if (tool==='query-meals') return {status:'completed',result:{content:[{type:'text',text:JSON.stringify({success:true,data:{meals:{11002:{name:'双人套餐',image:'x'.repeat(300000)}}}})}]}};
+    return {status:'completed',result:{structuredContent:{success:true,data:{price:5990,productList:[{productCode:'11002',productName:'双人套餐'}]}}}};
+  };
+  const mealCall = (tool:string,args: Extract<AssistantMessage['content'][number], {type:'toolCall'}>['arguments']): AssistantMessage['content'] =>
+    [{type:'toolCall',id:tool,name:'call_mcp_tool',arguments:{provider:'mcdonalds',tool,arguments:args}}];
+  const result=await executeRun(request,settings,fixture.value,undefined,undefined,deltaStream([
+    mealCall('query-nearby-stores',{searchType:2,city:'北京',keyword:'北京'}),
+    mealCall('query-meals',{storeCode:'nearby-fixture',orderType:1,beType:1}),
+    [{type:'text',text:'你想先挑哪个套餐？'}],
+    mealCall('calculate-price',{storeCode:'nearby-fixture',orderType:1,beType:1,items:[{productCode:'11002',quantity:1}]}),
+    [{type:'text',text:'推荐到店自取双人套餐，已核价 59.90 元。'}],
+  ], undefined, context => {contexts.push(JSON.stringify(context));}));
+  assert.equal(result.content,'推荐到店自取双人套餐，已核价 59.90 元。');
+  assert.deepEqual(calls.map(call => (call as {tool:string}).tool), ['query-nearby-stores','query-meals','calculate-price']);
+  assert.ok(contexts.some(context => context.includes('11002') && !context.includes('x'.repeat(100))));
+  assert.ok(fixture.events.some(event=>event.kind==='text_start'&&event.body.replace===true));
 });
 
 test('meal recommendations retry a draft that mixes unquoted menu entries into the priced shortlist', async () => {

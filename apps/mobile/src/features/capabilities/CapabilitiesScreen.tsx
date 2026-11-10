@@ -21,19 +21,22 @@ import {
 } from '../../platform/phoneSources';
 import { Text } from '../../ui/Text';
 import { Button, ErrorNotice, Loading, Notice } from '../../ui/components';
-import { Icon, IconName } from '../../ui/visuals';
+import { Icon } from '../../ui/visuals';
 import { integrationsApi } from '../integrations/api';
 import { CloudConnection } from '../integrations/IntegrationsScreen';
 import { MailConnectionSheet } from '../integrations/MailConnection';
+import { connectionGuide } from '../integrations/connectionGuides';
 import { healthApi } from '../health/api';
 import { personalMcpApi } from '../personal-mcp/api';
 import { PersonalMcpConnections } from '../personal-mcp/PersonalMcpConnections';
+import { McpConnectionCard, McpConnectionRow } from '../personal-mcp/McpConnectionCard';
 import type { PersonalMcpConnection } from '../personal-mcp/types';
 import { readWalletMetadata } from '../personal-mcp/walletModel';
 import { PhoneSourcesEntry } from '../phone-sources/PhoneSourcesEntry';
 import { PhoneAlarmLauncher } from '../phone-alarms/PhoneAlarmCard';
 import { mentionsAlarm } from '../phone-alarms/alarmProposal';
 import { phoneAlarms } from '../../platform/phoneAlarms';
+import { CapabilityLogo } from './CapabilityLogo';
 import {
   buildHubEntries,
   capabilityAppearance as c,
@@ -50,13 +53,6 @@ const categories: Array<'全部' | HubCategory> = [
   '健康',
   '手机',
 ];
-const categoryIcons: Record<HubCategory, IconName> = {
-  邮箱: 'attachment',
-  日程: 'calendar',
-  文件: 'file',
-  健康: 'memory',
-  手机: 'bell',
-};
 
 export function CapabilitiesScreen() {
   const { api, user, preferences, revision, navigate } = useApp();
@@ -171,7 +167,11 @@ export function CapabilitiesScreen() {
         mcp: mcp.value?.items,
         wallet: wallet.value,
         notifications: notifications.value,
-        phone: phone.value,
+        phone: phone.value ?? {
+          supported: phoneSources.supported,
+          selected: 0,
+          readable: 0,
+        },
       }),
     [
       legacy.value,
@@ -187,6 +187,10 @@ export function CapabilitiesScreen() {
   const showPhoneAlarm = phoneAlarms.supported && (!query.trim() || mentionsAlarm(query)) &&
     (Boolean(query.trim()) || category === '全部' || category === '手机');
   const selected = entries.find(entry => entry.key === opened);
+  const selectedMcp = selected?.kind === 'mcp' || selected?.kind === 'wallet' || selected?.kind === 'liepin-guide';
+  useEffect(() => {
+    if (opened && opened !== 'privacy' && !selected) setOpened(null);
+  }, [opened, selected]);
   const mailToConnect =
     selected?.kind === 'integration' &&
     selected.source.mode === 'mail' &&
@@ -220,10 +224,12 @@ export function CapabilitiesScreen() {
     if (owner.active) domestic.setValue(next);
   };
   const stateLabel = (entry: HubEntry) =>
-    entry.state === 'connected'
+    entry.kind === 'liepin-guide'
+      ? '查看接入'
+      : entry.state === 'connected'
       ? '已连接'
       : entry.state === 'reconnect'
-      ? '重新授权'
+      ? entry.kind === 'wallet' ? '待核实' : '重新授权'
       : entry.state === 'unavailable'
       ? '暂不可用'
       : entry.kind === 'integration' && entry.source.mode === 'import'
@@ -244,25 +250,7 @@ export function CapabilitiesScreen() {
         pressed && { opacity: 0.65 },
       ]}
     >
-      <View
-        style={[
-          v.icon,
-          entry.category === '健康' && v.rose,
-          entry.category === '邮箱' && v.teal,
-        ]}
-      >
-        <Icon
-          name={categoryIcons[entry.category]}
-          size={21}
-          color={
-            entry.category === '健康'
-              ? '#B26583'
-              : entry.category === '邮箱'
-              ? '#467F73'
-              : c.accent
-          }
-        />
-      </View>
+      <CapabilityLogo entry={entry} />
       <View style={v.fill}>
         <Text style={v.name}>{entry.name}</Text>
         <Text style={v.description} numberOfLines={2}>
@@ -301,7 +289,19 @@ export function CapabilitiesScreen() {
         }
       >
         <Text style={v.title}>能力</Text>
-        <Text style={v.subtitle}>连接你常用的工具，让帮助更贴近生活。</Text>
+        <Text style={v.subtitle}>发现和管理妥啦可以使用的工具。</Text>
+        <View style={v.search}>
+          <Icon name="search" size={17} color={c.secondary} />
+          <TextInput
+            value={query}
+            onChangeText={setQuery}
+            accessibilityLabel="搜索应用或用途"
+            placeholder="搜索应用或用途（含已连接）"
+            placeholderTextColor="#858DA0"
+            style={v.input}
+            autoCorrect={false}
+          />
+        </View>
         {!!failures.length && (
           <ErrorNotice
             message={failures
@@ -313,51 +313,22 @@ export function CapabilitiesScreen() {
         )}
         {loading && !ready ? <Loading label="正在查看连接状态…" /> : null}
         <View testID="capabilities-connected-section">
+          {groups.connected.length > 0 && <>
           <View style={v.section}>
             <Text style={v.sectionTitle}>
               已连接<Text style={v.count}> {groups.connected.length} 项</Text>
             </Text>
             {groups.connected.some(entry => entry.state === 'reconnect') ? (
-              <Text style={v.warning}>有连接需要重新授权</Text>
+              <Text style={v.warning}>有连接需要检查</Text>
             ) : null}
           </View>
-          {groups.connected.length ? (
-            <View style={v.group}>{groups.connected.map(row)}</View>
-          ) : (
-            <View style={v.empty}>
-              <Icon name="sparkles" size={25} color={c.accent} />
-              <Text style={v.emptyTitle}>
-                {loading
-                  ? '正在核实连接状态'
-                  : failures.length
-                  ? '部分连接状态暂时无法确认'
-                  : '从一个熟悉的工具开始'}
-              </Text>
-              <Text style={v.emptyBody}>
-                {failures.length
-                  ? '请刷新重试。下方已确认可用的入口仍可使用。'
-                  : '选择下方的邮箱、手机资料或其他工具，按你的需要授权。'}
-              </Text>
-            </View>
-          )}
+          <View style={v.group}>{groups.connected.map(row)}</View>
+          </>}
         </View>
         {!!notice && <Notice>{notice}</Notice>}
         <View testID="capabilities-available-section">
           <View style={v.section}>
-            <Text style={v.sectionTitle}>添加更多连接</Text>
-            <Text style={v.count}>按你的需要选择</Text>
-          </View>
-          <View style={v.search}>
-            <Icon name="search" size={17} color={c.secondary} />
-            <TextInput
-              value={query}
-              onChangeText={setQuery}
-              accessibilityLabel="搜索应用或用途"
-              placeholder="搜索应用或用途（含已连接）"
-              placeholderTextColor="#858DA0"
-              style={v.input}
-              autoCorrect={false}
-            />
+            <Text style={v.sectionTitle}>可添加的连接</Text>
           </View>
           <View style={v.filters}>
             {categories.map(item => (
@@ -380,7 +351,6 @@ export function CapabilitiesScreen() {
               </Pressable>
             ))}
           </View>
-          {showPhoneAlarm && <PhoneAlarmLauncher />}
           {available.length ? (
             <View style={v.group}>{available.map(row)}</View>
           ) : showPhoneAlarm ? null : query.trim() && groups.connected.length ? (
@@ -422,6 +392,7 @@ export function CapabilitiesScreen() {
               <Text style={v.link}>查看全部 {groups.available.length} 项</Text>
             </Pressable>
           ) : null}
+          {showPhoneAlarm && <PhoneAlarmLauncher />}
         </View>
         <View style={[v.group, v.secondaryGroup]}>
           <Pressable
@@ -478,6 +449,7 @@ export function CapabilitiesScreen() {
             accessibilityViewIsModal
           >
             <View style={v.sheetHeader}>
+              {selectedMcp && selected ? <CapabilityLogo entry={selected} /> : null}
               <Text style={v.sheetTitle}>
                 {selected?.name ||
                   (opened === 'privacy' ? '数据怎么用，你说了算' : '连接详情')}
@@ -512,7 +484,7 @@ export function CapabilitiesScreen() {
                   </Text>
                 </>
               ) : null}
-              {selected ? (
+              {selected && !selectedMcp ? (
                 <>
                   <Text style={v.body}>{selected.detail}</Text>
                   <View style={v.permission}>
@@ -523,7 +495,24 @@ export function CapabilitiesScreen() {
                   </View>
                 </>
               ) : null}
-              {selected?.state === 'unavailable' ? (
+              {selected?.kind === 'liepin-guide' ? (
+                <McpConnectionCard
+                  status={mcp.loading ? '检查中' : mcp.error ? '状态未知' : '暂未开通'}
+                  description={mcp.loading ? '正在检查当前服务器是否支持猎聘。'
+                    : mcp.error ? '暂时无法确认连接状态，可以重新检查。'
+                    : '当前服务器尚未开通猎聘。可以先查看官方授权说明。'}
+                  action={<Button accessibilityLabel="打开猎聘官方授权页"
+                    loading={action.busy} onPress={() => action.run(async () => {
+                      const guide = connectionGuide('liepin');
+                      if (!guide) throw new Error('猎聘授权入口暂不可用');
+                      await platform.openUrl(guide.url);
+                    })}>
+                    查看猎聘授权说明
+                  </Button>}>
+                  <McpConnectionRow label="重新检查" accessibilityLabel="刷新猎聘连接状态"
+                    disabled={mcp.loading || action.busy} onPress={mcp.refresh} />
+                </McpConnectionCard>
+              ) : selected?.state === 'unavailable' && !selectedMcp && selected.key !== 'integration:slack' ? (
                 <Text style={v.body}>
                   当前服务或设备尚未启用这项连接。可以先使用其他来源，或在服务设置中联系管理员完成配置。
                 </Text>
@@ -645,6 +634,7 @@ export function CapabilitiesScreen() {
                   key={selected.key}
                   providerId={selected.source.id}
                   onConnectionChange={receiveMcp}
+                  hideTitle
                 />
               ) : null}
             </ScrollView>
@@ -754,15 +744,15 @@ const v = StyleSheet.create({
     lineHeight: 22,
     color: c.secondary,
     marginTop: 6,
-    marginBottom: 7,
+    marginBottom: 14,
   },
   section: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     gap: 8,
-    marginTop: 25,
-    marginBottom: 12,
+    marginTop: 18,
+    marginBottom: 6,
   },
   sectionTitle: {
     fontSize: 14,
@@ -795,8 +785,6 @@ const v = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  rose: { backgroundColor: '#FAEDF2' },
-  teal: { backgroundColor: '#E9F4F0' },
   name: { fontSize: 15, lineHeight: 22, fontWeight: '500', color: c.ink },
   description: {
     fontSize: 12,
@@ -829,7 +817,7 @@ const v = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 6,
-    marginVertical: 12,
+    marginBottom: 12,
   },
   chip: {
     paddingHorizontal: 12,

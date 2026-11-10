@@ -5,7 +5,14 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import {
+  Alert,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View,
+} from 'react-native';
 import { errorMessage, type ApiClient } from '../../api/client';
 import { useApp } from '../../app/context';
 import { platform } from '../../platform/ports';
@@ -21,6 +28,14 @@ import {
 import { Text } from '../../ui/Text';
 import { colors, styles as s } from '../../ui/theme';
 import { healthApi, healthAuthorizationUrl } from './api';
+import {
+  healthDate,
+  HealthOverview,
+  HealthRecordDetails,
+  HealthSheet,
+  HealthSourceList,
+  type HealthSourceOption,
+} from './HealthOverview';
 import { nativeHealth, type HealthAvailability } from './native';
 import {
   clearHealthBuckets,
@@ -43,7 +58,11 @@ import {
 let nextHealthSession = 0;
 export function HealthScreen({
   initialReceipt,
-}: { initialReceipt?: HealthReceipt } = {}) {
+  connectionOnlyProvider,
+}: {
+  initialReceipt?: HealthReceipt;
+  connectionOnlyProvider?: HealthConnection['id'];
+} = {}) {
   const { api, user, preferences, back } = useApp();
   // A deep-link offer belongs to the account and instance that received it.
   // Re-rendering it after an identity switch must not offer it to the new owner.
@@ -79,6 +98,7 @@ export function HealthScreen({
       preferences.instance?.id,
       initialReceipt?.provider,
       initialReceipt?.receipt,
+      connectionOnlyProvider,
     ],
   );
   return user ? (
@@ -87,6 +107,7 @@ export function HealthScreen({
       api={api}
       back={back}
       initialReceipt={initial}
+      connectionOnlyProvider={connectionOnlyProvider}
       storageKey={healthStorageKey(
         user.id,
         api.baseUrl,
@@ -109,9 +130,9 @@ const nativeMetrics: HealthMetric[] = [
   'workout',
   'weight',
 ];
-function dateLabel(value: string) {
-  return new Date(value).toLocaleString();
-}
+const vendorIds = ['huawei', 'xiaomi'] as const;
+const defaultSelection: HealthMetric[] = ['steps'];
+type HealthPanel = 'sources' | 'records' | HealthProvider;
 function MetricSelection({
   values,
   selected,
@@ -150,11 +171,13 @@ function HealthSession({
   storageKey,
   back,
   initialReceipt,
+  connectionOnlyProvider,
 }: {
   api: ApiClient;
   storageKey: string;
   back: () => void;
   initialReceipt?: HealthReceipt;
+  connectionOnlyProvider?: HealthConnection['id'];
 }) {
   const scope = useMemo(
     () => ({
@@ -176,7 +199,7 @@ function HealthSession({
   catalog.current = connections;
   const [receiptProvider, setReceiptProvider] = useState<
     HealthConnection['id']
-  >(initialReceipt?.provider ?? 'huawei');
+  >(connectionOnlyProvider ?? initialReceipt?.provider ?? 'huawei');
   const [receipt, setReceipt] = useState(initialReceipt?.receipt ?? '');
   const form = useRef({ receipt, provider: receiptProvider });
   form.current = { receipt, provider: receiptProvider };
@@ -185,13 +208,24 @@ function HealthSession({
   );
   const [buckets, setBuckets] = useState<HealthBucket[]>([]);
   const bucketRef = useRef<HealthBucket[]>([]);
-  const [selection, setSelection] = useState<HealthMetric[]>(['steps']);
+  const [selection, setSelection] = useState<
+    Partial<Record<HealthProvider, HealthMetric[]>>
+  >({});
   const [source, setSource] = useState<HealthProvider | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [panel, setPanel] = useState<HealthPanel | null>(
+    initialReceipt?.provider ?? null,
+  );
+  const [busy, setBusy] = useState<string | null>(
+    connectionOnlyProvider ? null : 'loading',
+  );
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [durable, setDurable] = useState(healthStorageAvailable());
+  const [privacyExpanded, setPrivacyExpanded] = useState(false);
+  const [receiptExpanded, setReceiptExpanded] = useState(
+    Boolean(initialReceipt),
+  );
 
   const refresh = useCallback(async () => {
     if (!scope.active || scope.refreshing || locked.current) return;
@@ -200,7 +234,9 @@ function HealthSession({
     setRefreshing(true);
     const result = await Promise.allSettled([
       client.list(),
-      nativeHealth.availability(),
+      connectionOnlyProvider
+        ? Promise.resolve(null)
+        : nativeHealth.availability(),
     ]);
     if (!scope.active || sequence !== scope.refresh) return;
     scope.refreshing = false;
@@ -215,24 +251,27 @@ function HealthSession({
       setAvailability(null);
       setError('系统健康能力检查失败，请重试。');
     }
-  }, [client, scope]);
+  }, [client, scope, connectionOnlyProvider]);
 
   useEffect(() => {
     if (scope.controller.signal.aborted)
       scope.controller = new AbortController();
     scope.active = true;
     const revision = scope.revision;
-    void loadHealthBuckets(storageKey)
-      .then(saved => {
-        if (scope.active && scope.revision === revision) {
-          bucketRef.current = saved;
-          setBuckets(saved);
-          setSource(saved[0]?.provider ?? null);
-        }
-      })
-      .catch(failure => {
-        if (scope.active) setError(errorMessage(failure));
-      });
+    if (!connectionOnlyProvider)
+      void loadHealthBuckets(storageKey)
+        .then(saved => {
+          if (scope.active && scope.revision === revision) {
+            bucketRef.current = saved;
+            setBuckets(saved);
+          }
+        })
+        .catch(failure => {
+          if (scope.active) setError(errorMessage(failure));
+        })
+        .finally(() => {
+          if (scope.active && scope.revision === revision) setBusy(null);
+        });
     void refresh();
     const unsubscribe = platform.onForeground(() => {
       void refresh();
@@ -244,10 +283,10 @@ function HealthSession({
       scope.controller.abort();
       unsubscribe();
     };
-  }, [scope, refresh, storageKey]);
+  }, [scope, refresh, storageKey, connectionOnlyProvider]);
 
   const run = async (operation: string, action: () => Promise<void>) => {
-    if (!scope.active || locked.current) return;
+    if (!scope.active || locked.current || busy === 'loading') return;
     locked.current = true;
     ++scope.revision;
     ++scope.refresh;
@@ -286,6 +325,7 @@ function HealthSession({
     bucketRef.current = next;
     setBuckets(next);
     setSource(provider);
+    setPanel(null);
     try {
       const saved = await saveHealthBuckets(storageKey, next);
       if (scope.active) {
@@ -322,8 +362,12 @@ function HealthSession({
       ],
     );
   };
+  const selectedMetrics = (provider: HealthProvider) =>
+    selection[provider] ?? defaultSelection;
   const requested = (connection: HealthConnection) =>
-    selection.filter(metric => connection.metrics.includes(metric));
+    selectedMetrics(connection.id).filter(metric =>
+      connection.metrics.includes(metric),
+    );
   const readable = (connection: HealthConnection) =>
     requested(connection).filter(
       metric =>
@@ -344,10 +388,12 @@ function HealthSession({
           result.authorization_url,
         );
         await platform.openUrl(url);
-        if (scope.active)
+        if (scope.active) {
+          setReceiptExpanded(true);
           setNotice(
             '完成厂商授权后，请返回妥啦输入一次性确认码并确认连接。连接完成后仍需单独点击读取记录。',
           );
+        }
       });
     });
   const finalize = () => {
@@ -433,6 +479,9 @@ function HealthSession({
               );
               bucketRef.current = next;
               setBuckets(next);
+              setSource(current =>
+                current === connection.id ? null : current,
+              );
               await saveHealthBuckets(storageKey, next);
               const list = await client.list();
               if (scope.active) {
@@ -450,7 +499,7 @@ function HealthSession({
     void run('native', async () => {
       if (!availability || availability.status !== 'available')
         throw new Error('此设备暂不支持系统健康读取。');
-      const metrics = selection.filter(metric =>
+      const metrics = selectedMetrics(availability.provider).filter(metric =>
         nativeMetrics.includes(metric),
       );
       if (!metrics.length) throw new Error('请先选择要读取的健康项目。');
@@ -481,366 +530,447 @@ function HealthSession({
         },
       ],
     );
-  const bucket = buckets.find(item => item.provider === source);
+  const systemProvider =
+    availability?.provider ??
+    (Platform.OS === 'ios' ? 'apple_health' : 'health_connect');
+  const providerIds = new Set<HealthProvider>([
+    ...vendorIds,
+    systemProvider,
+    ...buckets.map(item => item.provider),
+  ]);
+  const sources: HealthSourceOption[] = [...providerIds].map(id => {
+    const saved = buckets.some(
+      item => item.provider === id && item.records.length > 0,
+    );
+    const connection = connections.find(item => item.id === id);
+    if (id === 'huawei' || id === 'xiaomi') {
+      return {
+        id,
+        name: providerLabels[id],
+        status: connection
+          ? statuses[connection.status]
+          : refreshing
+          ? '检查中'
+          : '未开通',
+        channel: '厂商账号',
+        canView: saved || connection?.status === 'connected',
+      };
+    }
+    const status =
+      availability?.provider === id ? availability.status : undefined;
+    return {
+      id,
+      name: providerLabels[id],
+      status:
+        status === 'available'
+          ? '可读取'
+          : status === 'requires_update'
+          ? '需要更新'
+          : refreshing
+          ? '检查中'
+          : '暂不可用',
+      channel: '本机读取',
+      canView: saved || status === 'available',
+    };
+  });
+  const lastRead = buckets.reduce<HealthBucket | undefined>(
+    (latest, item) =>
+      item.records.length &&
+      (!latest || Date.parse(item.synced_at) > Date.parse(latest.synced_at))
+        ? item
+        : latest,
+    undefined,
+  );
+  const active =
+    sources.find(item => item.id === source && item.canView) ??
+    sources.find(item => item.id === lastRead?.provider) ??
+    sources.find(item =>
+      connections.some(
+        connection =>
+          connection.id === item.id && connection.status === 'connected',
+      ),
+    );
+  const bucket = buckets.find(item => item.provider === active?.id);
 
-  return (
-    <ScrollView style={s.screen} contentContainerStyle={s.content}>
-      <View style={v.header}>
-        <IconButton icon="back" label="返回" onPress={back} />
-        <Text style={s.wordmark}>我的健康</Text>
-        <View style={v.spacer} />
-      </View>
-      <Text style={s.title}>把身体的日常，记下来</Text>
-      <Text style={s.subtitle}>
-        在你的授权下读取穿戴设备已记录的数据。连接方式和可读项目取决于手机、设备与厂商开放能力。
-      </Text>
-      <View style={s.topGap}>
-        <Notice>
-          只读记录，不修改厂商数据。本版没有自动上传、后台持续采集或向 AI
-          发送健康记录。系统健康读取留在本机；厂商账号读取会经过当前服务器。
-        </Notice>
-      </View>
-      {!durable && (
-        <Notice>
-          此设备未提供可用的本机加密保存能力。读取结果仅在当前页面内存保留，退出页面后不保证保留。
-        </Notice>
-      )}
+  const changePanel = (next: HealthPanel | null) => {
+    if (locked.current) return;
+    setPanel(next);
+    setPrivacyExpanded(false);
+  };
+  const chooseSource = (option: HealthSourceOption) => {
+    if (locked.current) return;
+    if (option.canView) {
+      if (option.id !== active?.id) setNotice('');
+      setSource(option.id);
+      changePanel(null);
+    } else changePanel(option.id);
+  };
+  const feedback = (
+    <>
       <ErrorNotice message={error} />
       {notice ? <Notice>{notice}</Notice> : null}
-      <Card>
+    </>
+  );
+  const refreshButton = (
+    <Button
+      accessibilityLabel="刷新健康连接"
+      variant="ghost"
+      loading={refreshing}
+      disabled={busy !== null}
+      onPress={() => {
+        setError('');
+        void refresh();
+      }}
+    >
+      刷新连接状态
+    </Button>
+  );
+  const metricsPicker = (provider: HealthProvider, values: HealthMetric[]) =>
+    values.length ? (
+      <View style={v.metricSection}>
         <Text style={s.cardTitle}>选择读取项目</Text>
-        <Text style={s.small}>
-          默认只选择步数。可分别授权，未提供的项目不会显示为零。
-        </Text>
         <MetricSelection
-          values={[
-            'steps',
-            'heart_rate',
-            'sleep',
-            'workout',
-            'weight',
-            'active_energy',
-          ]}
-          selected={selection}
+          values={values}
+          selected={selectedMetrics(provider)}
           disabled={busy !== null}
           onChange={metric =>
-            setSelection(value =>
-              value.includes(metric)
-                ? value.filter(item => item !== metric)
-                : [...value, metric],
-            )
+            setSelection(current => {
+              const selected = current[provider] ?? defaultSelection;
+              return {
+                ...current,
+                [provider]: selected.includes(metric)
+                  ? selected.filter(item => item !== metric)
+                  : [...selected, metric],
+              };
+            })
           }
         />
-      </Card>
-      <Text style={v.section}>系统健康 · 本机读取</Text>
-      <Card>
-        <View style={v.row}>
-          <Text style={[s.cardTitle, v.flex]}>
-            {availability
-              ? providerLabels[availability.provider]
-              : '系统健康能力'}
-          </Text>
-          <Pill
-            tone={availability?.status === 'available' ? 'green' : 'neutral'}
-          >
-            {availability?.status === 'available'
-              ? '可读取'
-              : availability?.status === 'requires_update'
-              ? '需要更新'
-              : '暂不可用'}
-          </Pill>
-        </View>
-        <Text style={[s.body, s.topGap]}>
-          {availability?.detail ?? '正在检查此设备的健康数据能力。'}
-        </Text>
-        <Text style={[s.small, s.topGap]}>
-          Apple Watch 需在支持 HealthKit 的 iPhone 上读取。华为手机不一定支持
-          Health Connect，可使用下方华为运动健康通道。
-        </Text>
-        <View style={s.topGap}>
-          <Button
-            accessibilityLabel="授权并读取本机健康记录"
-            loading={busy === 'native'}
-            disabled={
-              busy !== null ||
-              availability?.status !== 'available' ||
-              !selection.some(metric => nativeMetrics.includes(metric))
-            }
-            onPress={readNative}
-          >
-            授权并读取最近七天
-          </Button>
-        </View>
-        <Button
-          variant="ghost"
-          accessibilityLabel="管理系统健康权限"
-          disabled={busy !== null || !availability}
-          onPress={() => {
-            void run('settings', () => nativeHealth.settings());
-          }}
-        >
-          管理系统健康权限
-        </Button>
-      </Card>
-      <Text style={v.section}>厂商账号 · 经当前服务器读取</Text>
-      <Text selectable style={[s.small, v.server]}>
-        {api.baseUrl}
-      </Text>
-      <Card>
-        <Text style={s.cardTitle}>完成健康账号连接</Text>
-        <Text style={[s.small, s.topGap]}>
-          厂商授权完成后，返回妥啦确认连接。也可粘贴授权完成页面提供的一次性确认码，有效期五分钟。请仅确认你本人刚刚发起的授权。
-        </Text>
-        <View style={v.wrap}>
-          {(['huawei', 'xiaomi'] as const).map(provider => {
-            const configured = connections.some(
-              item => item.id === provider && item.status !== 'not_configured',
-            );
-            return (
-              <Pressable
-                key={provider}
-                accessibilityRole="radio"
-                accessibilityLabel={'确认码来源' + provider}
-                accessibilityState={{
-                  selected: receiptProvider === provider,
-                  disabled: busy !== null || !configured,
-                }}
-                disabled={busy !== null || !configured}
-                onPress={() => setReceiptProvider(provider)}
-                style={[
-                  v.chip,
-                  receiptProvider === provider && v.selected,
-                  !configured && { opacity: 0.45 },
-                ]}
-              >
-                <Text style={s.small}>
-                  {providerLabels[provider]}
-                  {!configured ? ' · 待配置' : ''}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
-        <Field
-          label="一次性连接确认码"
-          placeholder="粘贴43位确认码"
-          value={receipt}
-          onChangeText={setReceipt}
-          secureTextEntry
-          autoCapitalize="none"
-          autoCorrect={false}
-          maxLength={43}
-          editable={busy === null}
-        />
-        <View style={s.topGap}>
-          <Button
-            accessibilityLabel="完成健康账号连接"
-            loading={busy === 'finalize'}
-            disabled={
-              busy !== null ||
-              !/^[A-Za-z0-9_-]{43}$/.test(receipt.trim()) ||
-              !connections.some(
-                item =>
-                  item.id === receiptProvider &&
-                  item.status !== 'not_configured',
-              )
-            }
-            onPress={finalize}
-          >
-            确认连接当前账号
-          </Button>
-        </View>
-        <Text style={[s.small, s.topGap]}>
-          确认码仅在当前页面内存保留，不会自动提交、保存到本机记录或发送给 AI。
-        </Text>
-      </Card>
-      {connections.map(connection => (
-        <Card key={connection.id}>
-          <View style={v.row}>
-            <Text style={[s.cardTitle, v.flex]}>{connection.name}</Text>
-            <Pill
-              tone={connection.status === 'connected' ? 'green' : 'neutral'}
-            >
-              {statuses[connection.status]}
-            </Pill>
-          </View>
-          <Text style={[s.body, s.topGap]}>{connection.detail}</Text>
-          <Text style={[s.small, s.topGap]}>
-            支持项目：
-            {connection.metrics
-              .map(metric => metricLabels[metric])
-              .join('、') || '尚未开放'}
-          </Text>
-          {connection.status === 'connected' &&
-            connection.granted_metrics !== undefined && (
-              <Text style={[s.small, s.topGap]}>
-                当前授权：
-                {connection.granted_metrics
-                  .map(metric => metricLabels[metric])
-                  .join('、') || '暂无读取权限'}
-                。读取仅包含已授权的所选项目；增加项目请调整授权。
-              </Text>
-            )}
-          {connection.last_sync_at ? (
-            <Text style={s.small}>
-              最近读取：{dateLabel(connection.last_sync_at)}
-            </Text>
-          ) : null}
-          <View style={s.topGap}>
-            <Button
-              accessibilityLabel={'连接' + connection.id}
-              loading={busy === connection.id}
-              disabled={
-                busy !== null ||
-                connection.status === 'not_configured' ||
-                !(
-                  connection.status === 'connected'
-                    ? readable(connection)
-                    : requested(connection)
-                ).length
-              }
-              onPress={() =>
-                connection.status === 'connected'
-                  ? sync(connection)
-                  : authorize(connection)
-              }
-            >
-              {connection.status === 'not_configured'
-                ? '等待管理员配置'
-                : connection.status === 'connected'
-                ? '读取最近七天'
-                : connection.status === 'reconnect_required'
-                ? '重新授权'
-                : '连接并授权'}
-            </Button>
-          </View>
-          {connection.status === 'connected' && (
-            <Button
-              accessibilityLabel={'调整' + connection.id + '授权'}
-              variant="ghost"
-              disabled={busy !== null || !requested(connection).length}
-              onPress={() => authorize(connection)}
-            >
-              调整授权项目
-            </Button>
-          )}
-          {connection.has_credentials && (
-            <Button
-              accessibilityLabel={'断开' + connection.id}
-              variant="ghost"
-              disabled={busy !== null}
-              onPress={() => disconnect(connection)}
-            >
-              断开连接并清除本机记录
-            </Button>
-          )}
-        </Card>
-      ))}
-      <Button
-        accessibilityLabel="刷新健康连接"
-        variant="secondary"
-        loading={refreshing}
-        disabled={busy !== null}
-        onPress={() => {
-          setError('');
-          void refresh();
-        }}
-      >
-        刷新连接状态
-      </Button>
-      <Text style={v.section}>本机健康记录</Text>
-      <View style={v.wrap}>
-        {buckets.map(item => (
-          <Pressable
-            key={item.provider}
-            accessibilityRole="button"
-            accessibilityLabel={'查看' + providerLabels[item.provider] + '记录'}
-            onPress={() => setSource(item.provider)}
-            style={[v.chip, source === item.provider && v.selected]}
-          >
-            <Text style={s.small}>{providerLabels[item.provider]}</Text>
-          </Pressable>
-        ))}
       </View>
-      <Card>
-        {!bucket || !bucket.records.length ? (
-          <Text style={s.body}>
-            暂无健康记录。选择来源并授权读取后，真实记录会显示在这里。
-          </Text>
-        ) : (
+    ) : null;
+
+  const receiptForm = (
+    <Card style={v.receipt}>
+      <Text style={s.cardTitle}>完成健康账号连接</Text>
+      <Text style={s.small}>
+        粘贴厂商授权页面提供的一次性确认码，有效期五分钟。请仅确认你本人刚刚发起的授权。
+      </Text>
+      <Field
+        label="一次性连接确认码"
+        placeholder="粘贴43位确认码"
+        value={receipt}
+        onChangeText={setReceipt}
+        secureTextEntry
+        autoCapitalize="none"
+        autoCorrect={false}
+        maxLength={43}
+        editable={busy === null}
+      />
+      <View style={s.topGap}>
+        <Button
+          accessibilityLabel="完成健康账号连接"
+          loading={busy === 'finalize'}
+          disabled={
+            busy !== null ||
+            !/^[A-Za-z0-9_-]{43}$/.test(receipt.trim()) ||
+            !connections.some(
+              item =>
+                item.id === receiptProvider && item.status !== 'not_configured',
+            )
+          }
+          onPress={finalize}
+        >
+          确认连接当前账号
+        </Button>
+      </View>
+      <Text style={[s.small, s.topGap]}>确认码仅在当前页面内存保留。</Text>
+    </Card>
+  );
+  const vendorDetails = (id: HealthConnection['id'], embedded = false) => {
+    const connection = connections.find(item => item.id === id);
+    const configured = connection && connection.status !== 'not_configured';
+    const receiptOpen = receiptExpanded && receiptProvider === id;
+    return (
+      <View style={v.details}>
+        {connection ? (
           <>
-            <Text style={s.cardTitle}>{providerLabels[bucket.provider]}</Text>
-            <Text style={s.small}>
-              读取于 {dateLabel(bucket.synced_at)} · {bucket.records.length}{' '}
-              条记录
-            </Text>
-            {bucket.truncated && (
-              <Notice>
-                记录数量达到读取上限，本次仅包含部分数据。请在厂商健康 App
-                查看完整记录。
-              </Notice>
-            )}
-            {bucket.unavailable_metrics?.length ? (
-              <Notice>
-                本次未能读取：
-                {bucket.unavailable_metrics
-                  .map(metric => metricLabels[metric])
-                  .join('、')}
-                。可能尚未授权或此设备不提供这些项目。
-              </Notice>
-            ) : null}
-            <Text style={[s.small, s.topGap]}>
-              以下为最近的原始记录，最多显示二十条。不同来源不相加，单条步数／睡眠记录不代表全天总量。
-            </Text>
-            {bucket.records.slice(0, 20).map(record => (
-              <View
-                key={JSON.stringify([
-                  record.source,
-                  record.source_app,
-                  record.source_id,
-                  record.metric,
-                  record.id,
-                ])}
-                style={v.record}
+            <View style={v.row}>
+              <Pill
+                tone={connection.status === 'connected' ? 'green' : 'neutral'}
               >
-                <View style={v.row}>
-                  <Text style={[s.body, v.flex]}>
-                    {metricLabels[record.metric]}
-                  </Text>
-                  <Text style={s.cardTitle}>
-                    {Math.round(record.value * 100) / 100} {record.unit}
-                  </Text>
-                </View>
-                <Text style={s.small}>
-                  {dateLabel(record.start_at)} — {dateLabel(record.end_at)}
-                </Text>
-                <Text style={s.small}>
-                  来源：{record.source_app || record.source}
-                  {record.source_device ? ' · ' + record.source_device : ''}
-                  {record.source_id ? ' · 设备来源 ' + record.source_id : ''}
-                </Text>
-                {record.sleep_basis === 'session_duration' && (
+                {statuses[connection.status]}
+              </Pill>
+              <Text style={s.small}>经当前服务器读取</Text>
+            </View>
+            {configured ? (
+              <>
+                {connection.status === 'connected' &&
+                  connection.granted_metrics !== undefined && (
+                    <Text style={s.small}>
+                      当前授权：
+                      {connection.granted_metrics
+                        .map(metric => metricLabels[metric])
+                        .join('、') || '暂无读取权限'}
+                      。读取仅包含已授权的所选项目。
+                    </Text>
+                  )}
+                {connection.last_sync_at && (
                   <Text style={s.small}>
-                    此项为睡眠记录起止跨度，包含清醒时间，不代表精确入睡时长。
+                    最近读取：{healthDate(connection.last_sync_at)}
                   </Text>
                 )}
-              </View>
-            ))}
+                {(!embedded || connection.status !== 'connected') && (
+                  <>
+                    {metricsPicker(id, connection.metrics)}
+                    <Button
+                      accessibilityLabel={'连接' + id}
+                      loading={busy === id}
+                      disabled={
+                        busy !== null ||
+                        !(
+                          connection.status === 'connected'
+                            ? readable(connection)
+                            : requested(connection)
+                        ).length
+                      }
+                      onPress={() =>
+                        connection.status === 'connected'
+                          ? sync(connection)
+                          : authorize(connection)
+                      }
+                    >
+                      {connection.status === 'connected'
+                        ? '读取最近七天'
+                        : connection.status === 'reconnect_required'
+                        ? '重新授权'
+                        : '连接并授权'}
+                    </Button>
+                  </>
+                )}
+                {!embedded && connection.status === 'connected' && (
+                  <Button
+                    accessibilityLabel={'调整' + id + '授权'}
+                    variant="ghost"
+                    disabled={busy !== null || !requested(connection).length}
+                    onPress={() => authorize(connection)}
+                  >
+                    调整授权项目
+                  </Button>
+                )}
+              </>
+            ) : (
+              <Text style={s.body}>
+                当前服务器配置好此来源后，即可授权连接。
+              </Text>
+            )}
+          </>
+        ) : !refreshing && !error ? (
+          <Notice>当前服务器尚未提供这个健康账号连接。</Notice>
+        ) : null}
+        {!embedded && (configured || receiptOpen) && (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="使用一次性连接确认码"
+            accessibilityState={{ expanded: receiptOpen }}
+            disabled={busy !== null}
+            style={v.quickLink}
+            onPress={() => {
+              if (receiptProvider !== id) setReceipt('');
+              setReceiptProvider(id);
+              setReceiptExpanded(!receiptOpen);
+            }}
+          >
+            <Text style={v.selectedText}>
+              {receiptOpen ? '收起确认码' : '使用一次性连接确认码'}
+            </Text>
+          </Pressable>
+        )}
+        {(
+          embedded
+            ? configured && connection.status !== 'connected'
+            : receiptOpen
+        )
+          ? receiptForm
+          : null}
+        {!embedded && connection?.has_credentials && (
+          <Button
+            accessibilityLabel={'断开' + id}
+            variant="ghost"
+            disabled={busy !== null}
+            onPress={() => disconnect(connection)}
+          >
+            断开连接并清除该来源记录
+          </Button>
+        )}
+      </View>
+    );
+  };
+  const nativeDetails = (id: 'health_connect' | 'apple_health') => {
+    const native = availability?.provider === id ? availability : null;
+    const canRead = native?.status === 'available';
+    return (
+      <View style={v.details}>
+        <View style={v.row}>
+          <Pill tone={canRead ? 'green' : 'neutral'}>
+            {sources.find(item => item.id === id)?.status}
+          </Pill>
+          <Text style={s.small}>本机读取</Text>
+        </View>
+        <Text style={s.small}>
+          {native?.detail ?? '当前设备暂未提供此来源的读取能力。'}
+        </Text>
+        {canRead && (
+          <>
+            {metricsPicker(id, nativeMetrics)}
+            <Button
+              accessibilityLabel="授权并读取本机健康记录"
+              loading={busy === 'native'}
+              disabled={
+                busy !== null ||
+                !selectedMetrics(id).some(metric =>
+                  nativeMetrics.includes(metric),
+                )
+              }
+              onPress={readNative}
+            >
+              授权并读取最近七天
+            </Button>
           </>
         )}
-        <Button
-          accessibilityLabel="清除本机健康记录"
-          variant="ghost"
-          disabled={busy !== null}
-          onPress={removeLocal}
+        {native && native.status !== 'unavailable' && (
+          <Button
+            variant="ghost"
+            accessibilityLabel="管理系统健康权限"
+            disabled={busy !== null}
+            onPress={() => {
+              void run('settings', () => nativeHealth.settings());
+            }}
+          >
+            管理系统健康权限
+          </Button>
+        )}
+      </View>
+    );
+  };
+  if (connectionOnlyProvider) {
+    return (
+      <View style={v.details}>
+        <Text style={s.cardTitle}>
+          {providerLabels[connectionOnlyProvider]}
+        </Text>
+        {feedback}
+        {vendorDetails(connectionOnlyProvider, true)}
+        {refreshButton}
+      </View>
+    );
+  }
+
+  const panelSource =
+    panel && panel !== 'sources' && panel !== 'records'
+      ? sources.find(item => item.id === panel)
+      : undefined;
+  const vendor =
+    panelSource && connections.find(item => item.id === panelSource.id);
+  return (
+    <>
+      <ScrollView style={s.screen} contentContainerStyle={s.content}>
+        <View style={v.header}>
+          <IconButton icon="back" label="返回" onPress={back} />
+          <Text accessibilityRole="header" style={v.title}>
+            我的健康
+          </Text>
+        </View>
+        {!panel && feedback}
+        <HealthOverview
+          source={active}
+          bucket={bucket}
+          loading={busy === 'loading'}
+          onPick={() => changePanel('sources')}
+          onManage={() => changePanel(active?.id ?? 'sources')}
+          onRecords={() => changePanel('records')}
+        />
+      </ScrollView>
+      {panel && (
+        <HealthSheet
+          title={
+            panel === 'sources'
+              ? '切换数据来源'
+              : panel === 'records'
+              ? '记录明细'
+              : providerLabels[panel]
+          }
+          onClose={() => changePanel(null)}
         >
-          清除本机健康记录
-        </Button>
-      </Card>
-      <Text style={[s.small, v.footer]}>
-        数据可能延迟或不完整，用于个人生活记录与趋势参考，不用于诊断或紧急监护。
-      </Text>
-    </ScrollView>
+          {feedback}
+          {panel === 'sources' && (
+            <>
+              <HealthSourceList
+                sources={sources}
+                selected={active?.id}
+                onSelect={chooseSource}
+                onManage={item => changePanel(item.id)}
+              />
+              {refreshButton}
+            </>
+          )}
+          {panel === 'records' && bucket && (
+            <HealthRecordDetails bucket={bucket} />
+          )}
+          {panelSource && (
+            <>
+              {panelSource.id === 'huawei' || panelSource.id === 'xiaomi'
+                ? vendorDetails(panelSource.id)
+                : nativeDetails(panelSource.id)}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="数据与权限说明"
+                accessibilityState={{ expanded: privacyExpanded }}
+                style={v.quickLink}
+                onPress={() => setPrivacyExpanded(value => !value)}
+              >
+                <Text style={v.selectedText}>
+                  {privacyExpanded ? '收起数据说明' : '数据与权限说明'}
+                </Text>
+              </Pressable>
+              {privacyExpanded && (
+                <View style={v.privacyCopy}>
+                  <Text style={s.small}>
+                    {vendor ? vendor.detail : '系统健康记录在本机读取。'}{' '}
+                    已读取的记录留在本机，不会自动发送给 AI。
+                  </Text>
+                  {vendor && (
+                    <Text style={s.small} selectable>
+                      当前服务器：{api.baseUrl}
+                    </Text>
+                  )}
+                  {!durable && (
+                    <Text style={s.small}>
+                      此设备暂无法加密保存，读取结果仅在当前页面内存保留。
+                    </Text>
+                  )}
+                  <Button
+                    accessibilityLabel="清除本机健康记录"
+                    variant="ghost"
+                    disabled={busy !== null}
+                    onPress={removeLocal}
+                  >
+                    清除本机健康记录
+                  </Button>
+                  <Text style={s.small}>健康记录用于个人生活参考。</Text>
+                </View>
+              )}
+              <Button
+                accessibilityLabel="返回来源列表"
+                variant="ghost"
+                disabled={busy !== null}
+                onPress={() => changePanel('sources')}
+              >
+                查看其他来源
+              </Button>
+            </>
+          )}
+        </HealthSheet>
+      )}
+    </>
   );
 }
 
@@ -849,35 +979,47 @@ const v = StyleSheet.create({
     minHeight: 60,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 20,
+    gap: 12,
+    marginBottom: 14,
   },
-  spacer: { width: 44 },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  flex: { flex: 1 },
-  wrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginVertical: 14 },
+  title: {
+    fontSize: 27,
+    color: colors.ink,
+    fontWeight: '700',
+    letterSpacing: -0.5,
+  },
+  row: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8 },
+  details: { gap: 9 },
+  quickLink: {
+    minHeight: 44,
+    justifyContent: 'center',
+    alignSelf: 'flex-start',
+  },
+  privacyCopy: {
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: colors.blueLight,
+    gap: 5,
+  },
+  metricSection: { paddingTop: 3 },
+  receipt: { marginBottom: 0 },
+  wrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+    marginBottom: 4,
+  },
   chip: {
+    minHeight: 44,
+    justifyContent: 'center',
     borderRadius: 20,
     borderWidth: 1,
     borderColor: colors.line,
     backgroundColor: colors.surface,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
   },
   selected: { borderColor: colors.accent, backgroundColor: colors.blueLight },
   selectedText: { color: colors.action },
-  section: {
-    fontSize: 17,
-    fontWeight: '500',
-    color: colors.ink,
-    marginTop: 24,
-    marginBottom: 14,
-  },
-  server: { marginBottom: 14 },
-  record: {
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.line,
-  },
-  footer: { textAlign: 'center', marginTop: 12, marginBottom: 20 },
 });

@@ -6,7 +6,7 @@ import type { ClientTransport, TransportRequest, TransportResponse } from './tra
 import type {
   AuthSession, ChatIntent, ChatStreamEvent, Conversation, CreateTodo, InstanceManifest,
   Memory, MemoryKind, MessagePage, PageOptions, PagedItems, SaveMemory, Task, Today,
-  Todo, TodoFilter, UpdateTodo, User,
+  Todo, TodoFilter, UpdateTodo, Upload, User,
 } from './types';
 
 export interface ApiClientOptions {
@@ -91,7 +91,7 @@ export class ApiClient {
     this.assertActive(signal);
     return result;
   }
-  private async raw(path: string, method: string, body?: string, signal?: AbortSignal,
+  private async raw(path: string, method: string, body?: string | FormData, signal?: AbortSignal,
     onChunk?: (chunk: string) => void, timeoutMs = 30000, extraHeaders?: Record<string, string>): Promise<TransportResponse> {
     this.assertActive(signal); assertPath(path);
     const controller = new AbortController();
@@ -107,7 +107,7 @@ export class ApiClient {
         allowInsecureLan: this.options.allowInsecureLan,
         headers: {
           Accept: onChunk ? 'text/event-stream' : 'application/json',
-          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          ...(typeof body === 'string' ? { 'Content-Type': 'application/json' } : {}),
           ...(authenticated && this.options.token ? { Authorization: `Bearer ${this.options.token}` } : {}),
           ...extraHeaders,
         },
@@ -132,11 +132,12 @@ export class ApiClient {
       clearTimeout(timeout); signal?.removeEventListener('abort', abort); this.requests.delete(controller);
     }
   }
-  async request<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
+  async request<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal, timeoutMs?: number): Promise<T> {
     this.assertActive(signal);
     if (path !== '/health' && path !== '/instance') await this.inspectInstance(signal);
     this.assertActive(signal);
-    const response = await this.raw(path, method, body === undefined ? undefined : JSON.stringify(body), signal);
+    const payload = body === undefined || body instanceof FormData ? body : JSON.stringify(body);
+    const response = await this.raw(path, method, payload, signal, undefined, timeoutMs);
     if (!response.body && response.status === 204) return undefined as T;
     try { return JSON.parse(response.body) as T; }
     catch { throw new ApiError('invalid_response', '服务返回的内容无法识别，请检查服务地址和版本。', response.status); }
@@ -159,6 +160,13 @@ export class ApiClient {
   task = (id: string, signal?: AbortSignal) => this.request<Task>(`/tasks/${encodeURIComponent(id)}`, 'GET', undefined, signal);
   conversations = (page?: PageOptions, signal?: AbortSignal) => this.request<PagedItems<Conversation>>(`/conversations${query(page)}`, 'GET', undefined, signal);
   messages = (id: string, page?: PageOptions & { before?: string }, signal?: AbortSignal) => this.request<MessagePage>(`/conversations/${encodeURIComponent(id)}/messages${query(page)}`, 'GET', undefined, signal);
+  uploadImage = (file: File, signal: AbortSignal) => {
+    const form = new FormData();
+    form.append('file', file);
+    return this.request<Upload>('/uploads', 'POST', form, signal, 45_000);
+  };
+  analyzeImage = (id: string, signal: AbortSignal) => this.request<{text: string}>(`/uploads/${encodeURIComponent(id)}/analyze`, 'POST', undefined, signal, 120_000);
+  deleteUpload = (id: string) => this.request<{ok: boolean}>(`/uploads/${encodeURIComponent(id)}`, 'DELETE');
   deleteMessage = (conversationId: string, messageId: string) => this.request<{ removed_message_ids: string[] }>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`, 'DELETE');
   todos = (filter?: PageOptions & { filter?: TodoFilter; scope?: 'today' | 'all' }, signal?: AbortSignal) => this.request<PagedItems<Todo>>(`/todos${query(filter)}`, 'GET', undefined, signal);
   createTodo = (input: CreateTodo) => this.request<Todo>('/todos', 'POST', input);

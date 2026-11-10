@@ -285,7 +285,7 @@ impl LlmProvider {
 
     pub fn from_env() -> Self {
         // Pi owns provider credentials and the model loop in the split backend.
-        if env::var("AGENT_MODE").as_deref() == Ok("pi") {
+        if matches!(env::var("AGENT_MODE").as_deref(), Ok("pi" | "dsh")) {
             return Self::local();
         }
         Self::from_lookup(|name| env::var(name).ok())

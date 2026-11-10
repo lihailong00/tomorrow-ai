@@ -5,6 +5,20 @@ use axum::{
 };
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn managed_encryption_key_does_not_provision_a_wallet_runtime() {
+    let repository = Repository::connect("sqlite::memory:").await.unwrap();
+    let values = HashMap::from([
+        ("CONNECTOR_ENCRYPTION_KEY".into(), "42".repeat(32)),
+        ("ALIPAY_WALLET_RUNTIME".into(), "official_cli_single_user".into()),
+        ("ALIPAY_WALLET_OWNER_ID".into(), "ordinary-setting".into()),
+    ]);
+    let state = PersonalWalletState::with_configuration(repository, &values).await.unwrap();
+    assert!(state.inner.crypto.is_some());
+    assert!(state.inner.runtime.is_none());
+    assert_eq!(state.status("ordinary-setting").await.unwrap()["binding_available"], false);
+}
+
 async fn fixture() -> (Router, Repository, String, String) {
     let repository = Repository::connect("sqlite::memory:").await.unwrap();
     let a = repository
@@ -86,7 +100,8 @@ async fn availability_is_honest_and_does_not_fabricate_a_binding() {
         assert_eq!(value["payment_available"], false);
         assert!(value.get("authorization").is_none());
         assert!(value.get("account").is_none());
-        assert!(value["reason"].as_str().unwrap().contains("获邀"));
+        assert!(value["reason"].as_str().unwrap().contains("个人钱包"));
+        assert_eq!(value["requires_merchant_keys"], false);
     }
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'personal_wallet%'")

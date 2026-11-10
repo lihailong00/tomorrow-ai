@@ -136,22 +136,17 @@ impl IntegrationState {
         let mut items = Vec::new();
         for item in catalog::CATALOG {
             let configured = self.configured(item);
-            let connected = if configured && item.mode != "import" {
-                self.account(user, item.id)
-                    .await?
-                    .is_some_and(|(_, encrypted)| {
-                        !encrypted.is_empty()
-                            && self
-                                .decode(user, item.id, &encrypted)
-                                .ok()
-                                .is_some_and(|value| usable_credentials(item.mode, item.id, &value))
-                    })
+            let credentials = if configured && item.mode != "import" {
+                self.account(user, item.id).await?
+                    .filter(|(_, encrypted)| !encrypted.is_empty())
+                    .and_then(|(_, encrypted)| self.decode(user, item.id, &encrypted).ok())
+                    .filter(|value| usable_credentials(item.mode, item.id, value))
             } else {
-                false
+                None
             };
             let status = if !configured {
                 "not_configured"
-            } else if connected {
+            } else if credentials.is_some() {
                 "connected"
             } else if item.mode == "import" {
                 "available"
@@ -167,6 +162,11 @@ impl IntegrationState {
             });
             if item.mode == "map" {
                 value["credential_scope"] = json!("user");
+            }
+            if item.id == "slack" {
+                if let Some(name) = credentials.as_ref().and_then(|saved| saved["team_name"].as_str()) {
+                    value["workspace_name"] = json!(name);
+                }
             }
             items.push(value);
         }
@@ -453,7 +453,21 @@ impl IntegrationState {
         )
     }
     pub async fn read(&self, user: &str, id: &str, query: Value) -> Result<Value> {
+        if id == "slack" {
+            return Err(ConnectorError::new(
+                StatusCode::FORBIDDEN,
+                "slack_live_search_only",
+                "请在 Slack 临时搜索卡片中查看消息",
+            ));
+        }
+        self.read_connection(user, id, query).await
+    }
+
+    async fn read_connection(&self, user: &str, id: &str, query: Value) -> Result<Value> {
         let item = catalog::find(id)?;
+        if id == "slack" && !self.configured(item) {
+            return Err(not_configured());
+        }
         if !query.is_object() || serde_json::to_vec(&query).map_or(true, |bytes| bytes.len() > 6000)
         {
             return Err(ConnectorError::invalid());
@@ -479,6 +493,16 @@ impl IntegrationState {
             |generation, credentials, lease| async move {
                 let result = match item.mode {
                     "mail" => mail::read(id, &credentials, &query).await?,
+                    "oauth" if id == "slack" => {
+                        let provider = self.oauth_provider(id).ok_or_else(not_configured)?;
+                        let rotated = provider.prepare_slack_read(&credentials, &query).await?;
+                        // Save one-use rotated credentials before the external search; a
+                        // timeout or search error must not invalidate an otherwise good grant.
+                        if let Some(updated) = &rotated {
+                            self.save_under_read_lease(user, id, generation, &lease, updated).await?;
+                        }
+                        provider.read_slack(rotated.as_ref().unwrap_or(&credentials), &query).await?
+                    }
                     "oauth" => {
                         let provider =
                             self.oauth_provider(id).ok_or_else(not_configured)?;
@@ -532,6 +556,13 @@ impl IntegrationState {
         )
     }
     async fn import(&self, user: &str, input: ImportInput) -> Result<Value> {
+        if input.source_app == "slack" {
+            return Err(ConnectorError::new(
+                StatusCode::FORBIDDEN,
+                "slack_live_search_only",
+                "Slack 搜索结果仅供临时查看",
+            ));
+        }
         if !matches!(input.source_app.as_str(), "shared" | "manual") {
             catalog::find(&input.source_app)?;
         }
@@ -709,6 +740,7 @@ pub fn router(state: IntegrationState) -> Router {
         .route("/v1/integrations/{id}/authorize", post(authorize))
         .route("/v1/integrations/{id}/callback", get(callback))
         .route("/v1/integrations/{id}/read", post(read))
+        .route("/v1/integrations/slack/search", post(slack_search))
         .route("/v1/integrations/{id}/send", post(send_mail))
         .with_state(state)
         .layer(axum::extract::DefaultBodyLimit::max(128 * 1024))
@@ -778,6 +810,13 @@ async fn read(
 ) -> Result<Json<Value>> {
     Ok(Json(state.read(&user, &id, value).await?))
 }
+async fn slack_search(
+    State(state): State<IntegrationState>,
+    User(user): User,
+    Json(value): Json<Value>,
+) -> Result<Json<Value>> {
+    Ok(Json(state.read_connection(&user, "slack", value).await?))
+}
 async fn send_mail(
     State(state): State<IntegrationState>,
     User(user): User,
@@ -807,3 +846,6 @@ mod reconnect_tests;
 
 #[cfg(test)]
 mod amap_tests;
+
+#[cfg(test)]
+mod slack_tests;

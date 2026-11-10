@@ -1,84 +1,16 @@
 import type { Memory, MemoryKind } from '../../domain/types';
-import type { IconName } from '../../ui/visuals';
-import { getMemoryConfirmation } from './memoryPresentation';
 
-/** Presentation labels describe saved text; they never generate new personal facts. */
-export function describeMemory(memory: Memory): {
-  label: string;
-  icon: IconName;
-  effect: string;
-} {
+/** Describe how the saved memory can be used without adding any personal facts. */
+export function memoryEffect(memory: Memory): string {
   const text = `${memory.title} ${memory.content}`;
-  if (memory.kind === 'project') {
-    return {
-      label: '最近在忙',
-      icon: 'file',
-      effect: '聊到相关项目时，可以少解释一遍背景。',
-    };
+  if (memory.kind === 'project') return '聊到相关项目时，可以少解释一遍背景。';
+  if (/回答|回复|结论|要点|沟通|语气/.test(text)) return '相关回答可以参考你希望的表达方式。';
+  if (/上午|下午|晚上|早晨|作息|专注|工作节奏|每周|周[一二三四五六日天]/.test(text)) {
+    return '讨论时间安排时，可以参考你的习惯和固定安排。';
   }
-  if (/回答|回复|结论|要点|沟通|语气/.test(text)) {
-    return {
-      label: '喜欢的沟通方式',
-      icon: 'compose',
-      effect: '相关回答可以参考你希望的表达方式。',
-    };
-  }
-  if (
-    /上午|下午|晚上|早晨|作息|专注|工作节奏|每周|周[一二三四五六日天]/.test(
-      text,
-    )
-  ) {
-    return {
-      label: '适合你的节奏',
-      icon: 'today',
-      effect: '讨论时间安排时，可以参考你的习惯和固定安排。',
-    };
-  }
-  if (memory.kind === 'person') {
-    return {
-      label: '重要的人',
-      icon: 'memory',
-      effect: '聊到这个人时，可以参考你已经说明的背景。',
-    };
-  }
-  if (memory.kind === 'goal') {
-    return {
-      label: '想做到的事',
-      icon: 'sparkles',
-      effect: '讨论下一步时，可以参考你想达到的目标。',
-    };
-  }
-  return {
-    label: memory.kind === 'preference' ? '你的偏好' : '你告诉我的事',
-    icon: 'memory',
-    effect: '在相关回答和建议中，供助手参考。',
-  };
-}
-
-export function selectMemoryHighlights(items: readonly Memory[]): Memory[] {
-  const selected: Memory[] = [];
-  const labels = new Set<string>();
-  // Prefer different aspects of the user, while preserving recency within each.
-  const ordered = items
-    .filter(item => !getMemoryConfirmation(item))
-    .sort((a, b) => {
-      const left = Date.parse(a.updated_at);
-      const right = Date.parse(b.updated_at);
-      return Number.isFinite(left) && Number.isFinite(right) ? right - left : 0;
-    });
-  for (const memory of ordered) {
-    const label = describeMemory(memory).label;
-    if (!labels.has(label)) {
-      selected.push(memory);
-      labels.add(label);
-    }
-    if (selected.length === 3) return selected;
-  }
-  for (const memory of ordered) {
-    if (!selected.some(item => item.id === memory.id)) selected.push(memory);
-    if (selected.length === 3) break;
-  }
-  return selected;
+  if (memory.kind === 'person') return '聊到这个人时，可以参考你已经说明的背景。';
+  if (memory.kind === 'goal') return '讨论下一步时，可以参考你想达到的目标。';
+  return '在相关回答和建议中，供助手参考。';
 }
 
 export function suggestedMemoryKind(text: string): MemoryKind {

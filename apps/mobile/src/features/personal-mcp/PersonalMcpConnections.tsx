@@ -21,8 +21,10 @@ import {
 import { Text } from '../../ui/Text';
 import { colors, styles as s } from '../../ui/theme';
 import { connectionGuide } from '../integrations/connectionGuides';
+import { isConnectionVisible } from '../integrations/connectionVisibility';
 import { personalMcpApi } from './api';
 import { AlipayWalletConnection } from './AlipayWalletConnection';
+import { McpConnectionCard, McpConnectionRow } from './McpConnectionCard';
 import type {
   McpEnvironment,
   PersonalMcpAction,
@@ -35,12 +37,16 @@ let nextSession = 0;
 /** Remount the credential form synchronously when the authenticated API changes. */
 export function PersonalMcpConnections({
   providerId,
+  initialConnection,
   onConnectionChange,
+  hideTitle = false,
 }: {
   providerId?: string;
+  initialConnection?: PersonalMcpConnection;
   onConnectionChange?: (item: PersonalMcpConnection) => void;
+  hideTitle?: boolean;
 } = {}) {
-  const { api, user } = useApp();
+  const { api, user, invalidate } = useApp();
   const session = useMemo(
     () => ({ id: ++nextSession, api, userId: user?.id, providerId }),
     [api, user?.id, providerId],
@@ -50,7 +56,10 @@ export function PersonalMcpConnections({
       key={session.id}
       api={api}
       providerId={providerId}
+      initialConnection={initialConnection}
       onConnectionChange={onConnectionChange}
+      hideTitle={hideTitle}
+      onRideChanged={invalidate}
     />
   ) : null;
 }
@@ -65,30 +74,38 @@ const statusLabels: Record<PersonalMcpConnection['status'], string> = {
 function ConnectionsSession({
   api,
   providerId,
+  initialConnection,
   onConnectionChange,
+  onRideChanged,
+  hideTitle,
 }: {
   api: ApiClient;
   providerId?: string;
+  initialConnection?: PersonalMcpConnection;
   onConnectionChange?: (item: PersonalMcpConnection) => void;
+  onRideChanged: () => void;
+  hideTitle: boolean;
 }) {
+  const connectOnly = initialConnection !== undefined;
+  const compact = providerId !== undefined;
   const scope = useMemo(
     () => ({
       active: false,
       controller: new AbortController(),
       refreshSequence: 0,
       refreshing: false,
-      catalog: [] as PersonalMcpConnection[],
+      catalog: initialConnection ? [initialConnection] : [] as PersonalMcpConnection[],
       selectedId: null as string | null,
     }),
-    [],
+    [initialConnection],
   );
   const client = useMemo(
     () => personalMcpApi(api, () => scope.controller.signal),
     [api, scope],
   );
-  const [items, setItems] = useState<PersonalMcpConnection[]>([]);
+  const [items, setItems] = useState<PersonalMcpConnection[]>(scope.catalog);
   const [actions, setActions] = useState<PersonalMcpAction[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!connectOnly);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
@@ -100,6 +117,8 @@ function ConnectionsSession({
   const [toolOwner, setToolOwner] = useState<string | null>(null);
   const [tools, setTools] = useState<PersonalMcpTool[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
+  const [showActions, setShowActions] = useState(false);
   const mutation = useRef(false);
   const [, tick] = useState(0);
 
@@ -161,6 +180,12 @@ function ConnectionsSession({
     if (scope.controller.signal.aborted)
       scope.controller = new AbortController();
     scope.active = true;
+    if (connectOnly) {
+      return () => {
+        scope.active = false;
+        scope.controller.abort();
+      };
+    }
     void refresh();
     const unsubscribe = platform.onForeground(() => {
       void refresh();
@@ -179,7 +204,7 @@ function ConnectionsSession({
       unsubscribe();
       clearInterval(timer);
     };
-  }, [scope, refresh]);
+  }, [scope, refresh, connectOnly]);
 
   const run = async (id: string, operation: () => Promise<void>) => {
     if (!scope.active || mutation.current) return;
@@ -322,6 +347,7 @@ function ConnectionsSession({
             void run(item.id, async () => {
               await client.disconnect(item.id);
               if (!scope.active) return;
+              if (item.id === 'didi') onRideChanged();
               const current =
                 scope.catalog.find(value => value.id === item.id) || item;
               updateConnection({
@@ -381,6 +407,9 @@ function ConnectionsSession({
                 const result = await client.confirm(action.id);
                 if (!scope.active) return;
                 updateAction(result);
+                if (result.status === 'completed' && result.provider === 'didi' && result.tool === 'taxi_create_order') {
+                  onRideChanged();
+                }
                 setNotice(
                   result.status === 'completed'
                     ? '操作已完成，请查看下方执行结果。'
@@ -422,7 +451,10 @@ function ConnectionsSession({
           : '操作状态已更新，请查看下方详情。',
       );
     });
-  const openHelp = (item: PersonalMcpConnection, url = item.help_url) =>
+  const openHelp = (
+    item: PersonalMcpConnection,
+    url = (item.id === 'liepin' ? connectionGuide(item.id)?.url : undefined) ?? item.help_url,
+  ) =>
     run(item.id, async () => {
       if (!/^https:\/\/[^\s/@]+(?:\/|$)/i.test(url))
         throw new Error('官方说明链接暂不可用。');
@@ -453,8 +485,9 @@ function ConnectionsSession({
 
   return (
     <View testID="personal-mcp-connections">
+      {!compact && <>
       <Section
-        title={providerId ? '账号授权与管理' : '我的账号'}
+        title="我的账号"
         action={loading ? '正在刷新' : '刷新连接'}
         onAction={() => {
           void refresh();
@@ -463,54 +496,62 @@ function ConnectionsSession({
       <Text style={[s.small, v.intro]}>
         连接你自己的账号，让妥啦使用授权范围内的资料与服务。每个连接使用你本人的凭证，加密保存在当前登录的服务器。
       </Text>
+      </>}
       <ErrorNotice
         message={error}
-        retry={() => {
-          void refresh();
-        }}
+        retry={connectOnly ? undefined : () => { void refresh(); }}
       />
       {notice ? <Notice>{notice}</Notice> : null}
       {!providerId || providerId === 'alipay' ? (
-        <AlipayWalletConnection api={api} />
+        <AlipayWalletConnection api={api} hideTitle={hideTitle} showUnavailable={compact} />
+      ) : null}
+      {compact && providerId !== 'alipay' && loading && !items.length ? (
+        <McpConnectionCard status="检查中" description="正在检查连接状态。" />
       ) : null}
       {providerId &&
       providerId !== 'alipay' &&
       !loading &&
-      !items.length &&
+      !items.some(isConnectionVisible) &&
       !error ? (
-        <Notice>
-          当前服务器尚未提供这项账号连接，请联系服务管理员确认开通情况。
-        </Notice>
+        <McpConnectionCard status="暂不可用" description="当前服务器尚未开通这项连接。" />
       ) : null}
-      {items.map(item => (
-        <Card key={item.id}>
+      {items.filter(isConnectionVisible).map(item => {
+        const tone = item.status === 'connected' ? 'green' : item.status === 'needs_reconnect' ? 'amber' : 'neutral';
+        const connected = item.status === 'connected';
+        const unavailable = item.status === 'not_configured';
+        const formOpen = selected === item.id && !unavailable;
+        const showManagement = !compact || (showDetails && !formOpen);
+        const primary = !formOpen && (item.status === 'not_connected' ? (
+          <Button disabled={busy !== null} onPress={() => openForm(item)} accessibilityLabel={'连接' + item.name + '账号'}>
+            连接账号
+          </Button>
+        ) : item.status === 'needs_reconnect' ? (
+          <Button disabled={busy !== null} loading={busy === item.id} onPress={() => { void test(item); }}
+            accessibilityLabel={'校验' + item.name + '连接'}>
+            核实连接
+          </Button>
+        ) : null);
+        const content = <>
+          {!compact ? <>
           <View style={s.between}>
             <Text style={[s.cardTitle, s.fill]}>{item.name}</Text>
-            <Pill
-              tone={
-                item.status === 'connected'
-                  ? 'green'
-                  : item.status === 'needs_reconnect'
-                  ? 'amber'
-                  : 'neutral'
-              }
-            >
-              {statusLabels[item.status]}
-            </Pill>
+            <Pill tone={tone}>{statusLabels[item.status]}</Pill>
           </View>
           <Text style={[s.body, v.description]}>{item.description}</Text>
-          {item.environment === 'experience' ? (
+          </> : null}
+          {compact && showManagement ? <Text style={s.small}>{item.description}</Text> : null}
+          {(!compact || showManagement || formOpen) && item.environment === 'experience' ? (
             <Text style={[s.small, v.description]}>
               个人体验 · 限时开放，非正式环境；请阅读官方使用说明后连接。
             </Text>
           ) : null}
-          {item.status === 'not_configured' ? (
+          {!compact && unavailable ? (
             <Text style={[s.small, v.description]}>
               {item.unavailable_reason ||
                 '这个服务尚未在当前服务器开通，请联系服务器管理员。'}
             </Text>
           ) : null}
-          {item.status === 'connected' ? (
+          {showManagement && connected ? (
             <Text style={[s.small, v.description]}>
               {item.tool_count} 个可用工具
               {item.environment === 'experience' ? ' · 个人体验环境' : ''}
@@ -524,21 +565,20 @@ function ConnectionsSession({
                 : ''}
             </Text>
           ) : null}
-          <View style={v.actions}>
-            {item.status !== 'not_configured' && selected !== item.id && (
+          {showManagement ? <View style={v.actions}>
+            {!unavailable && (!connectOnly || !connected) && !formOpen && (!compact || item.status !== 'not_connected') && (
               <Button
                 variant={item.status === 'connected' ? 'ghost' : 'secondary'}
                 disabled={busy !== null}
                 onPress={() => openForm(item)}
                 accessibilityLabel={'连接' + item.name + '账号'}
               >
-                {item.status === 'connected' ? '更换凭证' : '连接账号'}
+                {connected ? '更换凭证' : item.status === 'needs_reconnect' ? '重新连接' : '连接账号'}
               </Button>
             )}
-            {item.status === 'connected' ||
-            item.status === 'needs_reconnect' ? (
+            {!connectOnly && (item.status === 'connected' || item.status === 'needs_reconnect') ? (
               <>
-                <Button
+                {(!compact || connected) ? <Button
                   variant="ghost"
                   disabled={busy !== null}
                   loading={busy === item.id}
@@ -548,7 +588,7 @@ function ConnectionsSession({
                   accessibilityLabel={'校验' + item.name + '连接'}
                 >
                   测试连接
-                </Button>
+                </Button> : null}
                 <Button
                   variant="ghost"
                   disabled={busy !== null}
@@ -561,9 +601,7 @@ function ConnectionsSession({
                 </Button>
               </>
             ) : null}
-            {item.has_credentials ||
-            item.status === 'connected' ||
-            item.status === 'needs_reconnect' ? (
+            {!connectOnly && (item.has_credentials || item.status === 'connected' || item.status === 'needs_reconnect') ? (
               <Button
                 variant="ghost"
                 disabled={busy !== null}
@@ -583,8 +621,8 @@ function ConnectionsSession({
             >
               官方说明 ↗
             </Button>
-          </View>
-          {selected === item.id && item.status !== 'not_configured' && (
+          </View> : null}
+          {formOpen && (
             <View style={v.form}>
               {renderGuide(item)}
               <Text style={s.small}>
@@ -730,15 +768,35 @@ function ConnectionsSession({
               </Text>
             </View>
           )}
-        </Card>
-      ))}
+        </>;
+        return compact ? (
+          <McpConnectionCard key={item.id} title={hideTitle ? undefined : item.name}
+            status={statusLabels[item.status]} tone={tone}
+            description={unavailable ? item.unavailable_reason || '当前服务器尚未开通这项连接。' : item.description}
+            descriptionLines={unavailable ? undefined : 2} action={primary}>
+            {!formOpen ? <McpConnectionRow label={connected || item.status === 'needs_reconnect' || item.has_credentials ? '管理连接' : '授权范围与帮助'}
+              expanded={showDetails} disabled={busy !== null} onPress={() => {
+                setShowDetails(!showDetails);
+                if (showDetails) {
+                  setToolOwner(null);
+                  setTools([]);
+                }
+              }} /> : null}
+            {content}
+          </McpConnectionCard>
+        ) : <Card key={item.id}>{content}</Card>;
+      })}
       {!providerId && !loading && !error && !items.length && (
         <Card>
           <Text style={s.body}>当前服务器尚未提供个人账号连接。</Text>
         </Card>
       )}
-      {actions.length > 0 && <Section title="账号操作" />}
-      {actions.map(action => {
+      {compact && actions.length > 0 ? <McpConnectionRow
+        label={actions.some(item => item.status === 'pending' && Date.parse(item.expires_at) > Date.now())
+          ? '待确认操作' : '账号操作记录'} expanded={showActions}
+        disabled={busy !== null} onPress={() => setShowActions(!showActions)} /> : null}
+      {!compact && actions.length > 0 && <Section title="账号操作" />}
+      {(!compact || showActions) && actions.map(action => {
         const expiry = Date.parse(action.expires_at);
         const expired = !Number.isFinite(expiry) || expiry <= Date.now();
         const argumentsText = JSON.stringify(action.arguments, null, 2);

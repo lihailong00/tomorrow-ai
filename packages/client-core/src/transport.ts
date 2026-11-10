@@ -1,7 +1,7 @@
 import { ApiError, cancelled } from './errors';
 
 export interface TransportRequest {
-  url: string; method: string; headers: Record<string, string>; body?: string;
+  url: string; method: string; headers: Record<string, string>; body?: string | FormData;
   signal?: AbortSignal; onChunk?: (chunk: string) => void; allowInsecureLan?: boolean;
 }
 export interface TransportResponse { status: number; headers: Record<string, string>; body: string; url?: string }
@@ -15,6 +15,8 @@ export function isEventStream(headers: Record<string, string>): boolean {
 export function normalizeHeaders(headers: Record<string, string>): Record<string, string> {
   return Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
 }
+
+export const MAX_CHAT_IMAGE_BYTES = 4 * 1024 * 1024;
 
 /** No cookies, redirects or implicit retries. The server is always user-selected. */
 export function createFetchTransport(fetcher: typeof fetch = globalThis.fetch): ClientTransport {
@@ -75,9 +77,28 @@ export function createDesktopTransport(bridge: DesktopBridge): ClientTransport {
       if (input.signal?.aborted) throw cancelled();
       const url = new URL(input.url);
       const requestId = globalThis.crypto.randomUUID();
+      let body: string | {base64: string} | undefined;
+      const headers = normalizeHeaders(input.headers);
+      if (input.body instanceof FormData) {
+        if (url.pathname !== '/v1/uploads' || input.method !== 'POST' || input.onChunk) {
+          throw new ApiError('invalid_upload', '附件只能通过上传接口发送。');
+        }
+        const multipart = new Response(input.body);
+        const bytes = new Uint8Array(await multipart.arrayBuffer());
+        if (input.signal?.aborted) throw cancelled();
+        if (bytes.length > MAX_CHAT_IMAGE_BYTES + 4096) throw new ApiError('image_too_large', '图片超过 4 MiB，请缩小后重试。');
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 32768) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+        }
+        body = {base64: btoa(binary)};
+        headers['content-type'] = multipart.headers.get('content-type')!;
+      } else {
+        body = input.body;
+      }
       const request = {
         serverUrl: url.origin, path: url.pathname + url.search, method: input.method,
-        headers: input.headers, body: input.body, allowInsecureLan: input.allowInsecureLan ?? false,
+        headers, body, allowInsecureLan: input.allowInsecureLan ?? false,
       };
       let rejectAbort: (error: unknown) => void = () => {};
       const abortPromise = new Promise<never>((_, reject) => { rejectAbort = reject; });

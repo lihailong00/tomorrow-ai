@@ -5,6 +5,7 @@ import { AppProvider, type AppContextValue } from '../src/app/context';
 import { PersonalMcpConnections } from '../src/features/personal-mcp/PersonalMcpConnections';
 import type { PersonalMcpConnection } from '../src/features/personal-mcp/types';
 import { Button } from '../src/ui/components';
+import { McpConnectionRow } from '../src/features/personal-mcp/McpConnectionCard';
 
 jest.mock('../src/platform/ports', () => ({
   platform: { onForeground: () => () => {}, openUrl: jest.fn() },
@@ -80,7 +81,7 @@ async function setup(provider = 'didi') {
         value =>
           value.props.accessibilityLabel === label ||
           value.props.children === label,
-      );
+      ) ?? tree.root.findAllByType(McpConnectionRow).find(value => value.props.label === label);
     if (!node) throw new Error(label);
     await act(async () => {
       node.props.onPress();
@@ -144,6 +145,8 @@ it('switching provider destroys a secret draft and aborts the previous provider 
 it('a write confirmation kept open while switching providers cannot execute', async () => {
   const alert = jest.spyOn(Alert, 'alert');
   const view = await setup();
+  expect(view.text()).not.toContain('等待你确认；可能修改资料或产生订单与费用。');
+  await view.click('待确认操作');
   await view.click('确认执行滴滴出行write');
   const confirm = alert.mock.calls[0][2]![1].onPress!;
   await view.update('yinxiang');

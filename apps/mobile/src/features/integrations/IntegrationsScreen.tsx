@@ -43,8 +43,10 @@ import { importDraft, integrationsApi } from './api';
 import type { ImportedContent, Integration, IntegrationResult } from './types';
 import { extractTodos } from '../todos/api';
 import { PersonalMcpConnections } from '../personal-mcp/PersonalMcpConnections';
+import { isConnectionVisible } from './connectionVisibility';
 import { MailConnectionForm, MailComposer } from './MailConnection';
 import { connectionGuide } from './connectionGuides';
+import { SlackConnection } from './SlackConnection';
 import {
   ConnectionsHub,
   type ConnectionBrowseState,
@@ -757,6 +759,8 @@ export function IntegrationTools({
                 .filter(
                   item =>
                     item.mode !== 'import' &&
+                    isConnectionVisible(item) &&
+                    (item.mode !== 'map' || item.credential_scope === 'user') &&
                     (!options.cloudId ||
                       options.cloudId === '*' ||
                       item.id === options.cloudId),
@@ -1094,17 +1098,22 @@ export function IntegrationTools({
   );
 }
 
-export function CloudConnection({
-  item,
-  onChanged,
-  onNotice,
-  onImport,
-}: {
+export function CloudConnection(props: CloudConnectionProps) {
+  if (props.item.id === 'slack') {
+    return <SlackConnection item={props.item} onChanged={props.onChanged} connectOnly={props.connectOnly} />;
+  }
+  return <StandardCloudConnection {...props} />;
+}
+
+type CloudConnectionProps = {
   item: Integration;
   onChanged: () => Promise<void>;
   onNotice: (value: string) => void;
-  onImport: (value: IntegrationResult) => void;
-}) {
+  onImport?: (value: IntegrationResult) => void;
+  connectOnly?: boolean;
+};
+
+function StandardCloudConnection({ item, onChanged, onNotice, onImport, connectOnly }: CloudConnectionProps) {
   const { api, user } = useApp();
   const scope = useRequestScope(api, user?.id);
   const client = useMemo(
@@ -1257,13 +1266,14 @@ export function CloudConnection({
                 return;
               }
               await platform.openUrl(result.authorization_url);
+              if (connectOnly && scope.active) onNotice('完成授权后返回妥啦，连接状态会自动刷新。');
             });
           }}
         >
           前往账号授权
         </Button>
       )}
-      {configured && connected && (
+      {configured && connected && !connectOnly && (
         <>
           {item.mode === 'map' && !replacingMapKey && (
             <>
@@ -1364,9 +1374,9 @@ export function CloudConnection({
               <Text selectable style={s.body}>
                 {result.text}
               </Text>
-              <Button variant="ghost" onPress={() => onImport(result)}>
+              {onImport && <Button variant="ghost" onPress={() => onImport(result)}>
                 导入这条资料
-              </Button>
+              </Button>}
               {result.url && /^https?:\/\//i.test(result.url) && (
                 <Button
                   variant="ghost"

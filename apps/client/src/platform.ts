@@ -1,7 +1,9 @@
 import {createDesktopTransport, createFetchTransport, normalizeServerUrl, type ClientTransport, type DesktopStreamEvent, type InstanceManifest} from '@tada/client-core';
+import {browserLocationBridge, desktopLocationBridge, type LocationBridge} from './location/bridge';
 
 export type Platform = {
   desktop: boolean;
+  location?: LocationBridge;
   transport: ClientTransport;
   readSession(serverUrl: string, instanceId: string): Promise<string | null>;
   writeSession(serverUrl: string, instanceId: string, token: string | null): Promise<void>;
@@ -13,6 +15,7 @@ export async function createPlatform(): Promise<Platform> {
     const writes = new Map<string, Promise<void>>();
     return {
       desktop: true,
+      location: navigator.userAgent.includes('Windows') ? desktopLocationBridge(invoke) : browserLocationBridge(),
       transport: createDesktopTransport({invoke, createChannel(handler: (event: DesktopStreamEvent) => void) {
         return new Channel<DesktopStreamEvent>(handler);
       }}),
@@ -27,7 +30,7 @@ export async function createPlatform(): Promise<Platform> {
       },
     };
   }
-  return {desktop: false, transport: createFetchTransport(), readSession: async () => null, writeSession: async () => {}};
+  return {desktop: false, location: browserLocationBridge(), transport: createFetchTransport(), readSession: async () => null, writeSession: async () => {}};
 }
 
 export async function openExternal(input: string) {

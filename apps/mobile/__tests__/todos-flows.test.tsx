@@ -74,7 +74,10 @@ it('shows real compact rows, folds suggestions and queries Today/All with bounde
         : { items: [todo()], next_offset: 50 };
     return {
       items: path.includes('filter=suggested')
-        ? [todo({ id: 'candidate', title: '真实候选', status: 'suggested' })]
+        ? [
+            todo({ id: 'candidate', title: '真实候选', status: 'suggested' }),
+            todo({ id: 'another', title: '另一条候选', status: 'suggested' }),
+          ]
         : [],
       next_offset: null,
     };
@@ -86,7 +89,7 @@ it('shows real compact rows, folds suggestions and queries Today/All with bounde
   expect(texts(tree)).not.toContain('真实候选');
   await act(async () => button(tree, '加载更多事项').props.onPress());
   expect(texts(tree)).toContain('第二页');
-  await act(async () => byLabel(tree, '新发现').props.onPress());
+  await act(async () => byLabel(tree, '发现 2 条待办建议').props.onPress());
   expect(texts(tree)).toContain('真实候选');
   await act(async () => byLabel(tree, '全部事项').props.onPress());
   expect(request).toHaveBeenCalledWith(
@@ -94,6 +97,40 @@ it('shows real compact rows, folds suggestions and queries Today/All with bounde
     'GET',
     undefined,
   );
+  await act(async () => tree.unmount());
+});
+
+it('keeps empty groups out of the list and persists completion and restoration from the row', async () => {
+  let saved = todo();
+  const request = jest.fn(async (path: string, method: string, patch?: Partial<Todo>) => {
+    if (method === 'PATCH') {
+      expect(patch?.version).toBe(saved.version);
+      saved = { ...saved, ...patch, version: saved.version + 1 };
+      return saved;
+    }
+    return {
+      items: path.includes(saved.status === 'completed' ? 'filter=completed' : 'filter=active')
+        ? [saved]
+        : [],
+      next_offset: null,
+    };
+  });
+  const value = context({ request });
+  const tree = await mount(<TodosScreen />, value);
+  const refresh = (revision: number) => act(async () => tree.update(
+    <AppProvider value={{ ...value, revision }}><TodosScreen /></AppProvider>,
+  ));
+  expect(texts(tree)).not.toMatch(/发现 .*条待办建议|等待后续|已完成/);
+  await act(async () => byLabel(tree, '完成事项：真实事项').props.onPress());
+  expect(request).toHaveBeenCalledWith('/todos/one', 'PATCH', { status: 'completed', version: 1 });
+  await refresh(1);
+  expect(texts(tree)).toContain('今天的待办做完了');
+  await act(async () => byLabel(tree, '已完成 1 件').props.onPress());
+  await act(async () => byLabel(tree, '恢复事项：真实事项').props.onPress());
+  expect(request).toHaveBeenCalledWith('/todos/one', 'PATCH', { status: 'pending', version: 2 });
+  await refresh(2);
+  expect(byLabel(tree, '完成事项：真实事项')).toBeDefined();
+  expect(byLabel(tree, '已完成 1 件')).toBeUndefined();
   await act(async () => tree.unmount());
 });
 it('keeps progress beside a short source on long imported labels while the full source remains available in detail', async () => {
@@ -264,6 +301,7 @@ it('preserves expanded form edits after a late successful creation and uses a ne
       : todo({ title: body.title, description: body.description });
   });
   const tree = await mount(<TodosScreen />, context({ request }));
+  await act(async () => byLabel(tree, '更多事项功能').props.onPress());
   await act(async () => byLabel(tree, '展开事项编辑').props.onPress());
   await act(async () =>
     byLabel(tree, '事项名称').props.onChangeText('原表单事项'),

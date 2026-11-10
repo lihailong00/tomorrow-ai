@@ -37,7 +37,7 @@ async function setup(initialActions: PersonalMcpAction[] = [pending]) {
     if (path.endsWith('/confirm')) { actions = actions.map(item => ({ ...item, status: 'completed' })); return actions[0]; }
     throw new Error('Unexpected request: ' + path);
   });
-  let context = { api: { request }, user: { id: 'independent-user-a' } } as unknown as AppContextValue;
+  let context = { api: { request }, user: { id: 'independent-user-a' }, invalidate: jest.fn() } as unknown as AppContextValue;
   const render = () => <AppProvider value={context}><PersonalMcpConnections /></AppProvider>;
   let tree!: ReactTestRenderer;
   await act(async () => { tree = create(render()); });

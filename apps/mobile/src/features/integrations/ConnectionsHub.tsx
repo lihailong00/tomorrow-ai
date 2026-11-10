@@ -496,8 +496,8 @@ export function ConnectionsHub({
     const target = row.target;
     return (
       <>
-        {header('连接详情')}
-        <View style={v.detailHero}>
+        {header(target.kind === 'mcp' ? row.name : '连接详情')}
+        {target.kind !== 'mcp' ? <View style={v.detailHero}>
           <View style={v.detailIcon}>
             <Icon name={rowIcon(row)} size={25} color={colors.action} />
           </View>
@@ -505,7 +505,7 @@ export function ConnectionsHub({
             <Text style={v.detailTitle}>{row.name}</Text>
             <Text style={v.caption}>{row.method}</Text>
           </View>
-        </View>
+        </View> : null}
         {target.kind !== 'mcp' && target.kind !== 'photos' ? (
           <Text style={[v.state, row.attention && v.warning]}>
             {row.status}
@@ -516,6 +516,7 @@ export function ConnectionsHub({
           <PersonalMcpConnections
             providerId={target.id}
             onConnectionChange={receiveConnection}
+            hideTitle
           />
         ) : null}
         {target.kind === 'photos' ? (

@@ -132,7 +132,7 @@ it('does not offer personal experience while the administrator has not enabled t
     status: 'not_configured',
     unavailable_reason: '管理员尚未开启限时个人体验',
   });
-  expect(view.text()).toContain('管理员尚未开启限时个人体验');
+  expect(view.text()).not.toContain('百度网盘');
   expect(
     view.tree.root
       .findAllByType(Button)
@@ -213,6 +213,6 @@ it('allows deleting a stored personal token after the administrator disables the
   );
   expect(labels()).not.toContain('断开百度网盘连接');
   expect(labels()).not.toContain('连接百度网盘账号');
-  expect(view.text()).toContain('管理员已关闭个人体验');
+  expect(view.text()).not.toContain('管理员已关闭个人体验');
   await view.close();
 });

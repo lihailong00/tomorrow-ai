@@ -1,207 +1,164 @@
-# 妥啦（Tada）
+<p align="center">
+  <img src="docs/assets/readme/cover.svg" alt="妥啦 Tada：记住你在意的，推进你想做的。" width="100%" />
+</p>
 
-支持导入 ChatGPT、Claude、DeepSeek 的官方对话 ZIP / JSON：手机「能力 → 导入 AI 对话」，电脑打开服务地址下的 `/ai-import`。先预览再确认，支持检索、去重更新与删除；导入不会自动写入长期记忆。范围与限制见 [对话导入说明](docs/ai-history-import.md)。
+<h1 align="center">妥啦 · Tada</h1>
 
-App 显示名称为“妥啦”。
+<p align="center">
+  一个有记忆、能用工具、陪你把事情往前推进的个人 AI 助手。<br />
+  Android 优先，支持连接官方服务，也支持把后端部署在自己的机器上。
+</p>
 
-### 管理后台与自建服务
+<p align="center">
+  <img alt="阶段：开发预览" src="docs/assets/readme/preview-badge.svg" width="126" height="28" />
+  <img alt="客户端：Android" src="docs/assets/readme/android-badge.svg" width="126" height="28" />
+  <img alt="后端：Rust" src="docs/assets/readme/rust-badge.svg" width="126" height="28" />
+  <img alt="支持自托管" src="docs/assets/readme/selfhost-badge.svg" width="126" height="28" />
+</p>
 
-后台入口为 `/admin/`，提供一次性初始化、独立管理员登录、模型/语音/应用配置、用户与邀请管理、加密备份和连接手机二维码。客户端默认使用官方服务，也可连接独立自建实例；自建账号、凭据、数据及敏感导入授权按实例隔离，故障时不会回退官方。部署和恢复步骤见 [自建说明](docs/selfhost.md)。首次启动无需模型 Key；自建默认关闭公开注册并支持邮箱密码账号。供应商密钥只保存在所选服务器，使用第三方模型时相应内容仍会发给该供应商。
+<p align="center">
+  <a href="#先看一眼妥啦">界面预览</a> ·
+  <a href="#开始使用">开始使用</a> ·
+  <a href="docs/selfhost.md">自建部署</a> ·
+  <a href="#参与一起做">参与贡献</a> ·
+  <a href="README.en.md">English</a>
+</p>
 
-### 手机应用接入
+---
 
-在「能力 → 连接手机应用」选择手机上已安装的应用。支持微信、QQ、小红书、哔哩哔哩、抖音、知乎、淘宝、京东、美团、支付宝、滴滴、飞书、钉钉、企业微信、WPS、腾讯文档、高德地图的本机入口。通知读取默认关闭，由用户逐个选择，并在系统设置授予通知访问权限；只接收之后的新通知摘要，不读取其他应用的历史数据库。验证码、登录安全和付款确认类消息采用保守过滤，无法保证识别全部敏感内容，导入前仍应检查。
+工作消息、临时想法、学习计划，常常散在不同的地方。妥啦希望帮你把它们接起来：**记住你明确说过的重要信息，从已授权的资料中发现待办，准备好下一步，让你来做决定。**
 
-系统分享目标「妥啦」接收文字、链接和文件，内容先进入本机待接收列表；只有用户确认才上传。通知与分享不要求读取短信、通讯录或全部应用列表。可查看、删除导入资料，并让助手按资料 ID 检索整理；资料中的文字不会提升为新的用户指令。选定资料最多保存 500 条，凭用户操作删除；本机队列最多 100 条，超过 24 小时在下次访问时清理，退出或切换账号时清空。相册索引有独立的选择加入开关，与通知/分享分开授权。
+> “把客户的新要求整理一下，帮我准备一份回复。”<br />
+> “根据我已有的待办，安排今天能做完的三件事。”<br />
+> “我每天只有十五分钟，帮我一点点学会 Rust。”
 
-文件支持 UTF-8 文本、DOCX 正文/表格、XLSX 单元格文字与公式缓存值，不执行公式。分享来的图片可点击「识别图片文字」，在手机本机识别、预览和编辑，再确认导入；图片不会因识别而自动上传。PDF、PPT、旧版 Office、扫描件不由云端文档解析器读取；仅保存链接也不代表已读取链接正文。
+## 先看一眼妥啦
 
-「更多连接方式」提供可选的云端只读适配器，普通用户无需申请开发者 Key 才能使用手机入口：
+<p align="center">
+  <a href="docs/assets/readme/product-preview.svg"><img src="docs/assets/readme/product-preview.svg" alt="妥啦产品场景示意：今日简报与紧凑待办、整理客户要求与回复草稿、个人记忆与服务选择。" width="100%" /></a>
+</p>
 
-| 连接 | 首版可读取的范围 | 连接条件 |
-| --- | --- | --- |
-| QQ / 163 / 126 邮箱 | 最近 20 封有限摘要、该窗口内关键词匹配 | 用户开启 IMAP 并提供邮箱客户端授权码 |
-| 腾讯文档 | 已授权目录与文件元数据 | 运营方配置应用，用户 OAuth 授权 |
-| WPS / 金山文档 | 指定文件信息、目录和支持的正文 | 应用权限与用户授权，部分读取需要盘/文件 ID |
-| 飞书 | 云盘目录，额外权限允许的 DOCX 正文 | 应用审批、用户和组织可见范围 |
-| 钉钉 | 本人日历本与日程 | 应用批准的日历查询权限及用户授权 |
-| 语雀 | 本人可访问知识库、文档列表和正文 | 个人访问令牌及平台 API 资格 |
-| 企业微信 | 企业应用授权的部门 ID | 企业应用配置；不包含个人微信聊天 |
-| 知乎 | 官方检索及本人的公开收藏夹 | 平台个人 Access Secret 与可用额度；不包含私密收藏 |
-| 高德 | 地点检索、驾车/步行路线 | 运营方配置 Web 服务 Key |
+<p align="center"><sub>点击配图可放大。以上为产品场景示意，使用虚构内容；不是运行截图。各平台和连接的实际能力以对应文档为准。</sub></p>
 
-云端适配器有模拟协议测试，缺少真实平台授权时显示未配置或未连接，不能据此宣称已经同步账号。连接凭据只在后端按用户和平台加密保存，断开连接会清除本地凭据；用户可同时去原平台撤销授权。短信、支付、下单、对外发送消息均不由这些读取接口执行。iOS / 鸿蒙可复用资料、账号和 API 层；通知和系统分享需各自实现系统适配器，目前不宣称与 Android 具有相同权限。
+## 可以一起做些什么
 
-Android 首发的个人 AI 助手首版。客户端使用 React Native / TypeScript，Android 系统能力使用 Kotlin；业务 API、持久任务执行器、文件服务和 Google 连接器使用 Rust，Agent 执行循环使用独立的 TypeScript + Pi 服务。此版本提供可安装、可连接后端的实际工作流程，功能范围与后续产品规划分别记录。
-
-## 开始体验
-
-在 Android 10 或更新手机安装自己构建的 APK。安装包已包含界面资源，无需 Metro。首次启动后，在「连接服务器」输入自己的服务地址。代码里的 `https://api.example.invalid` 是示例地址。
-
-首次使用手机号和短信验证码注册，并设置登录密码。之后使用手机号和密码登录，不发送短信。密码为 8–128 个字符，首尾空格会保留，不会自动去除。忘记密码时可通过短信验证码重置；重置成功会使该账号的全部旧会话失效，需要用新密码重新登录。旧版没有设置密码的手机号账号，也通过“忘记密码”设置首个密码。
-
-服务端可以按部署策略开放手机号注册和短信验证。短信密钥仅保存在后端。
-
-本地开发时先启动后端：
-
-```powershell
-./scripts/Start-Local.ps1
-```
-
-在 App 设置中将服务地址改为 `http://10.0.2.2:8080` 可连接本机模拟器后端。USB 真机可运行 `adb reverse tcp:8080 tcp:8080`，再填入 `http://127.0.0.1:8080`，保持 USB 连接和本机服务运行。本地与云端的账号、数据分别保存，安装包不内置账号。
-
-首次进入后自行注册账号。默认不会导入样例邮件、日程或个人资料。启动脚本默认启动 Rust API、Worker 与 Pi 三个进程，需要 Node.js 22.19+、pnpm 10 和后端模型环境变量。没有模型配置时 Pi 明确启动失败；如需体验原先的本地资料整理，可显式运行 `./scripts/Start-Local.ps1 -AgentMode direct`，未配置模型时显示本地模式。
-
-关闭与再次启动：
-
-```powershell
-./scripts/Stop-Local.ps1
-./scripts/Start-Local.ps1 -NoBuild
-```
-
-账号、记忆、对话、计划、任务和上传文件保存在 `data/`，停止服务不会清除。日志位于 `artifacts/logs/`。启动脚本在后台运行 API 与 Worker，核查两者就绪后才报告成功。
-
-本地开发进程没有系统服务守护；运行中退出后需重新启动。云端三个服务由 systemd 守护。Pi 模式的 Worker 需要 API 工具网关与 Pi 服务在线，服务故障会进入持久重试，不能在 API 停机时独立完成模型任务。请一起备份数据库、上传文件和私有 `.env`。模型或转写在超时、崩溃后重试可能再次计费，事务防重保护业务操作与成果，不能保证供应商只扣费一次。正式构建需要自己的签名密钥。部署配置和防刷边界见 [部署说明](infra/deploy/README.md)。
-
-## 本版可用范围
-
-| 功能 | 当前行为 |
+| | 在妥啦里 |
 | --- | --- |
-| 登录与账号 | 注册、登录、编辑名称/时区、注销会话；手机令牌通过 Android Keystore 加密存储 |
-| 今日 | 根据当前账号的真实任务、计划、记忆与结果展示信息；可主动生成简报 |
-| 对话 | Pi 多轮工具执行、真实模型、持久对话；可查询/保存/更新/删除记忆、创建待审批任务、创建计划草稿、暂停计划、读取文本附件；请求编号防重 |
-| 任务 | 新建、进度、审批、取消、重试与恢复；生成独立成果和通知 |
-| 自动计划 | 每天、工作日、每周或一次；按 IANA 时区调度，可暂停、恢复、编辑和删除 |
-| 记忆 | 偏好、人物、项目、目标、事实的增删改查；版本冲突提示，删除后不再用于新任务 |
-| 文件与语音 | 系统文件选择、短录音、真实上传、资料列表与删除；配置 ASR 后真实转写 |
-| 文件上下文 | 文本、DOCX、XLSX 及已转写音频可用于对话；图片理解使用后台配置的模型，客户端不内置 OCR。PDF、PPT 暂仅保存 |
-| Google 连接 | Calendar、Gmail、Drive 三个只读连接器，需服务端 OAuth 配置与用户本人授权 |
-| 成果与通知 | 成果正文、系统分享、站内通知已读；App 在前台可提示新完成任务 |
+| 💬 **自然地聊，实时看到进展** | 真实流式回复，展示正在使用的工具；支持语音输入、图片理解、Markdown 表格和代码卡片。 |
+| 🧠 **带着记忆继续聊** | 自动整理你明确说过的偏好、目标和事实。记忆有来源，可查看、修改、撤销、忘记，也可关闭自动新增。 |
+| ✅ **从消息，到下一步** | 从已授权并保存的对话、邮件或通知资料中发现事项候选。收下待办、准备回复、记录进展和后续跟进。 |
+| 🌱 **每天前进一点点** | 开启每日成长，按你的目标和时间生成建议。自己选择要做的事，完成后获得成长反馈，也可以休息或跳过。 |
+| 🔌 **连接常用应用** | 在平台授权范围内查询地图、出行、文档、邮箱等资料。工具可动态发现，涉及外部写入的操作走明确确认流程。 |
+| 🖼️ **把有用的对话带走** | 多选提问和回答，复制文字或生成本地分享长图，预览后再交给系统分享。 |
+| 🎛️ **模型与费用看得见** | 后台选择供应商、填写服务端 Key 并实际测试连接。手机可按模型、功能和时间段查看用量与费用估算。 |
 
-本版没有自动发送邮件、修改日历、购买或操作网站。任务审批是执行已展示指令的确认流程，不代表已经实现这些外部写入能力。Google 只读资料可在能力页查看，尚未进入自动工具调用和跨服务推理。手机后台/被杀时尚无远程推送；服务端任务仍继续执行，重新打开后回查结果。
+事项、每日成长和对话分享的细节分别见 [个人事项](docs/personal-todos.md)、[每日成长](docs/daily-growth.md) 和 [多选分享](docs/conversation-sharing.md)。
 
-## 接入真实模型与语音
+### 连接你已经在用的服务
 
-默认 `AGENT_MODE=pi`：手机 → Rust API → TypeScript Pi 服务 → Rust 工具网关。Pi 锁定 `@earendil-works/pi-agent-core` / `pi-ai` 1.4.0，只加载本产品声明的业务工具，不加载终端、文件系统或完整 coding-agent。详情和已实现边界见 [Pi 服务说明](services/agent/README.md)。Agent 创建的任务必须在任务详情批准，计划草稿必须由用户启用；模型不能自批。已有 APK 可直接连接新版后端。
+| 场景 | 已提供适配的服务举例 |
+| --- | --- |
+| 地图与出行 | 高德地图、百度地图、滴滴出行、飞猪 |
+| 文档与协作 | 腾讯文档、腾讯会议、语雀、Notion、Memos |
+| 邮箱与清单 | QQ 邮箱、163 / 126 邮箱、滴答清单 |
+| 生活与内容 | 麦当劳、瑞幸咖啡、微信读书、QQ 音乐 |
 
-执行记录接口为 `GET /v1/agent-runs`、`GET /v1/agent-runs/{id}` 和 `POST /v1/agent-runs/{id}/cancel`，仅当前用户可访问；聊天响应增加可选 `agent_run_id`。Pi 内部使用流式模型接口，当前手机仍按整轮回复展示，尚无逐字输出或执行记录专页。
+入口以所连服务器实际支持、启用的服务为准；不同平台需要个人凭据、应用授权或相应额度，能力范围也不同。查看 [个人连接与授权说明](docs/personal-mcp.md)。微信等手机应用可通过用户授权的通知与系统分享导入资料，不代表读取其完整聊天记录。
 
-DeepSeek 读取后端进程的 `DEEPSEEK_API_KEY` 环境变量，默认地址为 `https://api.deepseek.com`、模型为 `deepseek-flash`。可选使用 `DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 覆盖。Windows 启动脚本按当前进程、用户级、系统级的顺序读取模型环境变量；Pi 模式仅由服务端 Pi 使用模型密钥，Rust 不再执行模型循环。脚本不会把密钥复制到 `.env`、启动参数、运行记录或 Android 安装包。修改环境变量后停止并重新启动后端服务。
+还可以 [导入 ChatGPT、Claude、DeepSeek 的历史对话](docs/ai-history-import.md)，先预览，再确认导入，继续检索和使用过去的想法。
 
-首次启动会从 `.env.example` 创建私有 `.env` 并生成本地凭据，后续启动不会覆盖已有配置。若需要显式指定其他兼容服务，可在后端环境变量或私有 `.env` 填入：
+## 默认简单，也可以自己掌控
 
-```dotenv
-MODEL_BASE_URL=https://your-provider.example/v1
-MODEL_API_KEY=your-server-side-key
-MODEL_NAME=your-provider-model-name
-```
+| | 官方服务 | 自建服务 |
+| --- | --- | --- |
+| 开始方式 | 客户端默认连接，按提示注册使用 | 部署后端，在管理后台完成初始化 |
+| 模型配置 | 由服务运营方管理 | 选择供应商，填写自己的 API Key |
+| 手机连接 | 使用默认服务地址 | 输入自己的地址或扫描后台连接二维码 |
+| 数据保存 | 在官方实例中保存 | 在自己选择的实例中保存 |
 
-显式非空的 `MODEL_*` 设置优先于 `DEEPSEEK_*`，避免混用不同供应商的地址与密钥。接口采用兼容的 `chat/completions` 协议，供应商必须支持对应模型和请求格式。停止再启动服务以载入配置。配置不完整或供应商请求失败会明确报错，不会偷偷返回本地内容。模型密钥不会写入 APK。
+**自建实例的业务数据不经过官方业务服务器。** 使用第三方模型、语音或应用服务时，相应内容仍会发送给你配置和授权的供应商；自托管不等于全离线。客户端会绑定所选实例，连接失败时不会擅自把请求转到其他服务器。
 
-当前本机已从系统级 `DEEPSEEK_API_KEY` 接入 `deepseek-flash`，聊天、后台任务生成与成果落库均通过真实调用验证。默认 Pi 模式的十项真实场景报告为 `artifacts/pi-live-verification.json`；原直接模型验证保留在 `artifacts/deepseek-verification.json`。本轮更新并重启 Rust API、Worker 与 TypeScript Pi 服务，已有安卓安装包可直接使用。
+模型 API Key 留在服务端，不写进 APK。应用授权与模型供应商配置分开，资料导入和设备权限由用户选择。备份、恢复及各类配置的保存范围见 [自建部署](docs/selfhost.md)。
 
-语音使用后端 ASR：阿里云百炼配置 `ASR_PROTOCOL=qwen_asr`、`ASR_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`、`ASR_MODEL=qwen3-asr-flash`，`ASR_API_KEY` 只放后端私有环境。也保留 `openai_transcriptions` multipart 协议。手机录音结束后自动转为可编辑文字，用户确认后发送；失败可重试或取消。未配置时明确提示不可转写。文件大小、配额与转写边界见 [文件服务说明](crates/attachments/README.md)。
+## 开始使用
 
-2026-10-27 语音更新：云端已接入 Qwen3-ASR-Flash，用合成中文 M4A/AAC 录音完成真实转写、缓存复用、跨用户拒绝和临时音频删除验证；只发起一次识别请求，没有发送短信或调用聊天模型。手机端 45 项测试（含 5 项录音转文字流程）通过，APK 0.1.2 / versionCode 3 已同步到 `artifacts/apk/tada-latest.apk`。本次未做真机麦克风到云端的整链路验收。
+### Android 客户端
 
-Google OAuth 的回调、只读权限、加密密钥及断开连接语义见 [连接器说明](crates/connectors/README.md)。本机代码测试不能代替 Google 项目审核或真实账号授权验证。
+目前为开发预览，尚未发布 GitHub Release。可以按 [Android 构建说明](apps/mobile/README.md) 从源码生成安装包。请在客户端的「连接服务器」中填写你自己的服务地址。
 
-## Rust 后端与基础设施
-
-需要 Rust 1.92+；仓库锁定依赖版本，包含可选 AWS SDK 的兼容版本。API 与 Worker 是独立进程，通过同一持久数据库协作。
-
-默认使用 SQLite 与持久轮询队列，适合快速体验。完整开发基础设施使用 Docker Compose 启动 PostgreSQL / pgvector 和 Temporal：
-
-```powershell
-./scripts/Start-Local.ps1 -Mode temporal -Postgres
-```
-
-Temporal 模式使用官方 Rust SDK 1.1.0，执行真实 Workflow / Activity、持久计时器和恢复回放。开发 UI 为 `http://127.0.0.1:8233`。Compose 中的 Temporal 是开发服务，不能直接作为公网生产部署。当前调度工作流串行执行，适合小规模测试；未来可拆为每任务工作流。
-
-PostgreSQL 使用 SQLx、参数化查询和用户作用域；pgvector 扩展已初始化，本版尚未生成向量或提供语义检索。SQLite 和 PostgreSQL 自动应用通用业务结构；`migrations/postgres/` 的增强策略仅作为后续生产模板，当前不宣称已启用数据库级 RLS。文件默认实际保存在私有本地目录，S3 是可选构建能力，配置见文件服务说明。
-
-需要 S3 时在 `.env` 设置 `UPLOAD_STORAGE=s3` 和对应 `S3_*` 配置，再以 `Start-Local.ps1 -S3` 构建启动。可选本机对象存储命令为 `docker compose --profile s3 up -d rustfs`，端口为 19000 / 19001，凭据在私有 `.env` 的 `RUSTFS_*` 字段；使用前建立私有 bucket 并把凭据填入 `S3_*`。本轮已针对 RustFS 1.0.1 实测上传、下载、权限隔离和删除，不据此承诺所有 S3 供应商已验收。
+已准备好 Node.js、JDK 和 Android SDK 的 Windows 开发者，可在仓库根目录运行：
 
 ```powershell
-./scripts/Stop-Local.ps1 -Infrastructure
+./scripts/Build-Android.ps1 -BuildType Release -Compact
 ```
 
-此命令停止本项目进程和开发容器，保留数据卷。更换 `.env` 中的数据库密码不会自动重设已经初始化的数据卷密码。
+手机包输出到 `artifacts/apk/tada-latest.apk`。模拟器需要单独构建 `-Target Emulator`，详情见客户端文档。构建前请阅读 [开发存储约定](docs/development-storage-policy.md)。
 
-## 构建与验证
+### 把后端部署到自己的机器
 
-本地开发遵守[开发磁盘预算](docs/development-storage-policy.md)：所有工作区共用 10 GB 项目预算，9 GB 预警；每次打包前检查用量、完成后清理无用缓存和旧产物并复测，保留最新版及一个验收过的回退版本，不通过转移目录规避统计。
+需要 Docker Engine 和 Docker Compose v2。自建首版使用 PostgreSQL、Rust API / Worker、Pi 服务与 Web 管理后台。
 
-```powershell
-cargo test --workspace --locked
-cargo check -p tomorrow-worker --features temporal --locked
-./scripts/Test-Smoke.ps1
-./scripts/Test-Pi.ps1
-./scripts/Build-Android.ps1
+```sh
+git clone https://github.com/lihailong00/tomorrow-ai.git
+cd tomorrow-ai
+docker compose -f infra/selfhost/compose.yaml build
+docker compose -f infra/selfhost/compose.yaml up -d
 ```
 
-`Test-Smoke.ps1` 需要本地 API 和 Worker 已启动，创建隔离验证账号，检查实际 HTTP 流程；不会打印密码或令牌。报告为 `artifacts/smoke-results.json`。Android 构建需要 Node、完整 JDK、Android SDK / NDK，脚本支持指定工具路径，详情见 [客户端说明](apps/mobile/README.md)。
+在部署机器访问 `http://localhost:8080/admin/`。读取一次性安装凭证：
 
-### APK 存放与清理约定
-
-Release 构建从 `TADA_ANDROID_KEYSTORE`、`TADA_ANDROID_STORE_PASSWORD`、`TADA_ANDROID_KEY_ALIAS` 和 `TADA_ANDROID_KEY_PASSWORD` 读取签名配置。请将私钥和密码保存在仓库之外。调试构建使用 Android SDK 生成的本机签名。
-
-所有交付 APK 统一保存在 `artifacts/apk/`。`./scripts/Build-Android.ps1` 默认执行空间检查、构建、发布和收尾清理，无需另行运行删除命令：
-
-默认仅打 ARM64 手机包，根目录 `tada-latest.apk` 始终用于手机。模拟器使用 `./scripts/Build-Android.ps1 -Target Emulator`，x86_64 包发布到 `artifacts/apk/emulator/`，其 latest、回退包和元数据独立保存。发布前会验证实际架构并拒绝内置 OCR 残留；客户端不再携带本机 OCR 库与模型。
-
-- 所有 Git 工作区与登记的外部构建路径合并计量，9 GB 预警，10 GB 为尽量控制的项目目标；不足预计构建所需的磁盘空闲空间时停止构建。预计构建增量默认 2 GB，可用 `-EstimatedBuildBytes` 调整；它不是实测峰值。
-- 成功发布后保留带版本号的当前 APK、固定入口 `tada-latest.apk`、兼容入口 `tomorrow-ai-latest.apk` 和一个 `tada-rollback.apk`。`latest.json` 记录真实版本与 SHA256。第一次发布尚无回退包；以后发布不同内容时将原 latest 保存为回退，相同内容重发保留已有回退。
-- 校验 latest 与回退包后才清理本输出目录内能确认的旧生成包。近期可能正在等待发布、版本相同或更高、被占用、自定义、其他应用或无法验证的文件会保留并报告，因此可能临时超过两个版本。失败时恢复先前的 latest、回退与元数据。
-- 构建结束（包括失败）清理本工作区的 Android 可重建缓存；接近预算时也尝试清理本工作区带 Rust 缓存标记的 `target`。不清理其他工作区、公共依赖、Docker、数据库、上传、签名文件或必要验收资料。有活动构建、源码、私有数据或链接的目录会跳过。
-
-构建和清理均使用同一 Git 仓库的跨工作区互斥锁，Gradle 使用 `--no-daemon`，避免本脚本之间同时构建和清理。直接调用 Gradle/Cargo 的开发窗口也应遵守该约定；检测到相关活动进程时自动清理会保守跳过。
-
-每次收尾覆盖写入小型报告 `artifacts/packaging-storage.json`，包含前后用量、预计增量、实际清理结果及无法清理的原因。若仍超过 10 GB 或统计不完整，明确告警，不为凑限额删除必要资料，也不宣称硬配额。共享 SDK、工具链、全局依赖缓存和 Docker 另外核算。
-
-外部 `-NativeBuildDirectory`、`CARGO_TARGET_DIR`、`GRADLE_USER_HOME` 会登记到主工作区的 `.tada-storage.local.json`，后续仍计入用量；该本机文件已忽略，不提交个人路径。其他项目专用目录可加入其中的 `additional_measure_paths`（绝对路径数组）。登记只用于统计，不授权清理；外部原生缓存仅在脚本为新建/空目录写入匹配的归属标记后才可自动清理。详细边界见[开发磁盘预算](docs/development-storage-policy.md)。
-
-只检查空间而不构建、不清理：
-
-```powershell
-. ./scripts/Project-Storage.ps1
-Get-TadaStorageUsage -RepoPath (Get-Location).Path | Select-Object TotalBytes, Status, ErrorCount, SkippedLinkCount
+```sh
+docker compose -f infra/selfhost/compose.yaml exec server cat /data/config/setup-token
 ```
 
-隔离的小文件回归（不构建 APK、不访问服务器、不操作现有安装包）：
+然后创建实例所有者 → 选择模型供应商 → 填入 Key 并校验 → 连接手机。首次启动无需先准备模型 Key；自建可使用邮箱密码账号，不强制接入短信。
 
-```powershell
-./scripts/Test-PackagingStorage.ps1
-./scripts/Test-AndroidPackageTargets.ps1
+默认只监听服务器回环地址。手机连接、公网 HTTPS、注册策略和数据备份请按 [完整自建指南](docs/selfhost.md) 配置。源码克隆需要具有当前仓库的访问权限。
+
+## 为长期使用而搭建
+
+| 层 | 技术与职责 |
+| --- | --- |
+| Android | React Native / TypeScript，Kotlin 适配录音、权限、安全存储、分享等系统能力 |
+| Windows 预览版 | React + Tauri 2 / Rust，共享客户端协议层，见 [桌面说明](docs/windows-client.md) |
+| 业务后端 | Rust、Axum、SQLx；负责身份、资料、记忆、事项、工具网关和持久化 |
+| Agent 执行 | 独立 TypeScript + Pi 服务；模型执行循环与 Rust 业务边界分开 |
+| 数据与任务 | PostgreSQL / SQLite；独立 Rust Worker；Temporal、S3 兼容存储按需配置 |
+| 管理后台 | Web 页面管理模型、语音、连接、用户、用量与加密备份 |
+
+```text
+Tada/
+├── apps/mobile       Android 客户端与平台适配
+├── apps/client       共享 Web / 桌面界面
+├── apps/desktop      Tauri 桌面外壳
+├── apps/admin        服务管理后台
+├── crates            Rust API、领域、连接器、文件与 Worker
+├── services/agent    Pi 执行服务
+├── packages          客户端共享协议与能力
+└── infra/selfhost    自建部署入口
 ```
 
-`Test-Pi.ps1` 需要默认 Pi 模式服务在线，会进行真实付费模型调用，使用独立账号，逐项核验工具事件与实际资源。报告为 `artifacts/pi-live-verification.json`，包含虚构测试题、真实回答、Token 用量和脱敏执行记录，不包含会话令牌或模型密钥。测试结束删除测试计划和附件并注销测试会话。
+想了解实现，可以从 [开发指南](docs/development.md)、[Agent 服务](services/agent/README.md)、[流式对话](docs/chat-streaming.md) 和 [API 协作契约](docs/implementation-contract.md) 开始。
 
-冒烟脚本的聊天等待窗口为 120 秒，后台任务默认等待至多 360 秒，覆盖 Pi 多轮调用和 Worker 最多三次持久重试；可用 `-TaskTimeoutSeconds` 显式缩短。等待上限不是耗时承诺，上游失败可能导致重试和更长延迟。
+## 现在与接下来
 
-2026-10-26 验收：Rust workspace 检查、真实 PostgreSQL 回归、14 项客户端测试、32 项 HTTP 流程检查通过；另对真实 Temporal 进行进程终止/重启回放，对 RustFS 1.0.1 进行 S3 上传/下载/删除及用户隔离验证。已在 Android 15 / x86_64 模拟器安装最终双架构 APK，完成注册、保存记忆、任务审批与成果、文本附件上传/对话、录音上传/未配置转写提示、文件删除、计划暂停/恢复、覆盖安装与安全会话恢复。随后接入 DeepSeek Flash，49 项 Rust workspace 测试通过，并验证真实聊天与后台任务生成。arm64 真机、Google 实号授权与真实 ASR 尚未验收。
+- [x] Android 对话、记忆、事项、每日成长与应用连接。
+- [x] 官方 / 自建实例切换与 Web 管理后台。
+- [x] Windows 桌面预览版。
+- [ ] iOS、原生鸿蒙的平台适配与独立验收。
+- [ ] macOS / Linux 桌面打包与实机验证。
+- [ ] 公开安装包发布、正式签名与更新体验。
+- [ ] 更多连接器，以及更多真实账号、设备和网络场景验证。
 
-界面已按 Today 的轻盈淡彩与小艺的移动交互方向更新：底部固定导航、导航上方的对话入口、分层简报与任务结果、统一矢量图标与助手球。实际安卓截图：[首页](artifacts/android-redesign-home.png)、[对话](artifacts/android-redesign-chat.png)、[任务结果](artifacts/android-redesign-task-result.png)、[记忆](artifacts/android-redesign-memories.png)、[能力](artifacts/android-redesign-capabilities.png)。
+当前支持 APK 的鸿蒙设备可按 Android 兼容方式试用；这与原生鸿蒙客户端是两件事。iOS 和原生鸿蒙目前不是已交付客户端。项目仍在快速迭代，功能范围请以对应文档和版本记录为准。
 
-本轮 UI 更新通过类型检查、ESLint（无错误）和 14 项客户端测试，并在 Android 15 模拟器检查覆盖安装与会话恢复、四个主页面、成果查看、对话发送、录音开始/结束，以及 360×740 dp 短屏下带附件的键盘避让和滚动操作。Android 10、arm64 真机、iOS 与鸿蒙仍需独立验证。当前 APK 校验值与本轮验证记录见 `artifacts/verification.json`；首次完整流程记录保存在 `artifacts/verification-alpha-baseline.json`。
+## 参与一起做
 
-OpenAPI：运行中的 `GET /v1/openapi.json`；也可用 `cargo run -p tomorrow-api -- --export-openapi` 导出。主业务类型位于 `crates/domain`，移动端协议适配位于 `apps/mobile/src/api`。
+欢迎通过 [Issue](https://github.com/lihailong00/tomorrow-ai/issues) 告诉我们：你最想让个人 AI 替你理顺哪件事，或在哪一步遇到了问题。复现问题时请带上版本、设备 / 系统、使用的服务类型和操作步骤，隐藏账号、密钥及私人内容。
 
-## iOS 与原生鸿蒙迁移
+特别欢迎一起完善应用连接、Android 交互、跨平台适配、自建体验和文档。开发与验证入口见 [开发指南](docs/development.md)。
 
-界面、业务状态和协议类型放在共享 TypeScript 层，系统能力统一经 `src/platform/ports.ts` 注入。Android 已实现安全存储、文件、录音、权限、通知和分享。iOS 工程目前为骨架，仍需 Swift 平台适配与 macOS / Xcode 实测；鸿蒙保留 RNOH / ArkTS 接口和迁移清单，见 [鸿蒙说明](apps/mobile/harmony/README.md)。若 RNOH 不满足要求，可使用 ArkUI 宿主复用云端协议和业务设计。
-
-当前 RN 0.82.1 是锁定的首版构建基线，已停止上游支持，正式发布前需要升级并验证 RN / RNOH 与原生依赖组合。本轮不宣称 iOS 或原生鸿蒙已可打包、通知已跨平台可用或达到固定代码复用比例。
-
-## 产品与路线文档
-
-- [Today.ai 功能梳理与对标范围](docs/01-today-ai-功能梳理与对标范围.md)
-- [妥啦（Tada）技术路线与实施计划](docs/02-tomorrow-ai-技术路线与实施计划.md)
-- [首版接口协作契约](docs/implementation-contract.md)
-- [轻量图记忆首版：使用方式、来源校验与验证边界](docs/knowledge-graph.md)
-
-路线文档中的浏览器执行、跨外部服务的多步工具调用、语义检索、完整离线队列、远程推送、正式渠道发布与三端验证仍需后续实现和验收；当前 Pi 工具限于本产品的记忆、任务、计划和文本附件。
-
-## 许可证
-
-项目许可证待确定。
+<p align="center">
+  <b>把零散的日常，慢慢变成一句「妥啦」。</b><br />
+  <sub>妥啦自有代码采用 [PolyForm Noncommercial 1.0.0](LICENSE)，允许非商业使用、修改和分发。商业使用须另行获得授权。第三方组件及相关商标遵循各自的许可和权利声明。</sub>
+</p>

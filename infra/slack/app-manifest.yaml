@@ -1,0 +1,12 @@
+display_information:
+  name: Tada Slack Search
+  description: Search public Slack messages from Tada and open their original links.
+oauth_config:
+  redirect_urls:
+    - https://YOUR-TADA-API-HOST.example/v1/integrations/slack/callback
+  scopes:
+    user:
+      - search:read.public
+settings:
+  org_deploy_enabled: false
+  token_rotation_enabled: true

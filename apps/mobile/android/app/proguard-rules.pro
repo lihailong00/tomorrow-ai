@@ -22,3 +22,4 @@
 # Native alarm bridge and manifest receiver.
 -keep class com.tomorrowai.PhoneAlarmsModule { *; }
 -keep class com.tomorrowai.PhoneAlarmReceiver { *; }
+-keep class com.tomorrowai.PhoneCalendarModule { *; }

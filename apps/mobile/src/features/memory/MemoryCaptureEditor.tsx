@@ -22,7 +22,7 @@ import { AssistantOrb, Icon } from '../../ui/visuals';
 import { chatAppearance as colors } from '../../ui/ChatAppearance';
 import { suggestedMemoryKind } from './memoryModel';
 import { useMemoryCapture } from './useMemoryCapture';
-import { getMemoryConfirmation } from './memoryPresentation';
+import { getMemoryConfirmation, memoryGroup, memoryGroups, type MemoryGroup } from './memoryPresentation';
 import { MemoryConfirmationCard } from './MemoryConfirmationCard';
 
 interface MemoryCaptureEditorProps {
@@ -58,6 +58,7 @@ function MemoryCaptureBody({
 }: MemoryCaptureEditorProps) {
   const { api, invalidate } = useApp();
   const [content, setContent] = useState(memory?.content ?? '');
+  const [group, setGroup] = useState<MemoryGroup>();
   const [voiceMode, setVoiceMode] = useState(!memory);
   const [attachmentMenu, setAttachmentMenu] = useState(false);
   const [saved, setSaved] = useState<Memory | null>(null);
@@ -66,6 +67,8 @@ function MemoryCaptureBody({
   const record = useRef(memory);
   const beforeSave = useRef<Memory | undefined>(memory);
   const existing = record.current;
+  const defaultKind = existing?.kind ?? suggestedMemoryKind(content);
+  const activeGroup = group ?? memoryGroup(defaultKind);
   const inputRef = useRef<TextInput>(null);
   const focusInput = useRef(false);
   const action = useAction();
@@ -104,7 +107,7 @@ function MemoryCaptureBody({
         {
           content: text,
           title: [...text].slice(0, 40).join(''),
-          kind: target?.kind ?? suggestedMemoryKind(text),
+          kind: activeGroup === memoryGroup(defaultKind) ? defaultKind : activeGroup,
           ...(target
             ? { version: target.version }
             : { source: '用户主动添加', client_request_id: requestId.current }),
@@ -138,6 +141,7 @@ function MemoryCaptureBody({
       if (!previous) await api.deleteMemory(saved.id);
       if (!isCurrent()) return;
       record.current = restored;
+      setGroup(undefined);
       if (!previous) requestId.current = newRequestId();
       if (previous) setContent(previous.content);
       invalidate();
@@ -261,7 +265,7 @@ function MemoryCaptureBody({
               <View style={m.cardFoot}>
                 <Icon name="sparkles" size={14} color={colors.secondary} />
                 <Text style={[m.note, m.flex]}>
-                  {content.trim() ? '点文字可以修改' : '不用分类，也不用起名字'}
+                  {content.trim() ? '点文字可以修改' : '说一句就好，不用起名字'}
                 </Text>
                 {!!content.trim() && !capture.busy && (
                   <Pressable
@@ -289,6 +293,24 @@ function MemoryCaptureBody({
                 )}
               </View>
             </View>
+            {embedded && !capture.recording && !capture.phase && (
+              <View style={m.categorySection}>
+                <Text style={m.note}>分类</Text>
+                <View style={m.categoryChoices}>
+                  {(Object.keys(memoryGroups) as MemoryGroup[]).map(choice => (
+                    <Pressable key={choice} accessibilityRole="button"
+                      accessibilityLabel={`分类为：${memoryGroups[choice]}`}
+                      accessibilityState={{ selected: choice === activeGroup }}
+                      disabled={busy} onPress={() => setGroup(choice)}
+                      style={[m.category, choice === activeGroup && m.categorySelected]}>
+                      <Text style={[m.categoryText, choice === activeGroup && m.categoryTextSelected]}>
+                        {memoryGroups[choice]}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+            )}
             {!!notice && (
               <Text accessibilityLiveRegion="polite" style={m.notice}>
                 {notice}
@@ -479,6 +501,15 @@ const m = StyleSheet.create({
     backgroundColor: colors.accent,
   },
   confirmText: { color: colors.onAccent, fontSize: 13, fontWeight: '500' },
+  categorySection: { marginTop: 11, gap: 4 },
+  categoryChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
+  category: {
+    minHeight: 44, paddingHorizontal: 11, paddingVertical: 6, borderRadius: 11,
+    justifyContent: 'center', backgroundColor: colors.surface,
+  },
+  categorySelected: { backgroundColor: colors.keyboard },
+  categoryText: { fontSize: 13, color: colors.secondary },
+  categoryTextSelected: { color: colors.accent, fontWeight: '600' },
   inputArea: { marginTop: 'auto', padding: 10, paddingTop: 0 },
   captureText: { fontSize: 16, lineHeight: 27, color: colors.accent },
   success: { alignItems: 'center', paddingVertical: 22, gap: 4 },

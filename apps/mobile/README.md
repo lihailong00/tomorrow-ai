@@ -29,7 +29,7 @@ pnpm android
 
 ## 生成可独立启动的测试安装包
 
-在仓库根目录运行 `./scripts/Build-Android.ps1`，会查找 Node、JDK 17/21 与 Android SDK，安装锁定依赖、检查类型并构建 ARM64 手机测试包。手机交付 APK 输出到仓库根目录的 `artifacts/apk/`：每次保留带版本号与北京时间的 `tada-v<版本号>-yyyyMMdd-HHmmss-fff.apk`，同时更新 `tada-latest.apk` 作为手机最新版固定入口。版本号读取本目录 `package.json`。可通过 `-NodePath`、`-JavaHome`、`-AndroidHome` 指定本机工具；网络代理通过环境变量 `HTTPS_PROXY` / `HTTP_PROXY` 或 `-ProxyUrl` 临时传入。
+在仓库根目录运行 `./scripts/Build-Android.ps1`，会查找 Node、JDK 17/21 与 Android SDK，安装锁定依赖、检查类型并构建 ARM64 手机测试包。Debug 包输出到 `artifacts/apk/candidates/debug/`。运行 `./scripts/Build-Android.ps1 -BuildType Release -Compact` 后，已验证签名的正式手机包才会更新 `artifacts/apk/tada-latest.apk`。版本号读取本目录 `package.json`。可通过 `-NodePath`、`-JavaHome`、`-AndroidHome` 指定本机工具；网络代理通过环境变量 `HTTPS_PROXY` / `HTTP_PROXY` 或 `-ProxyUrl` 临时传入。
 
 模拟器单独运行 `./scripts/Build-Android.ps1 -Target Emulator`，仅构建 x86_64，输出到 `artifacts/apk/emulator/`，拥有独立的 `latest`、回退包和元数据，不会覆盖手机包。旧参数 `-Architectures` 仍支持单个 `arm64-v8a` 或 `x86_64` 并自动选择对应目录；混合架构会被拒绝。发布前还会检查 APK 的实际架构和 OCR 残留，验证失败时保留已有 `latest`。
 
@@ -41,7 +41,9 @@ pnpm android
 ./scripts/Build-Android.ps1 -BuildType Release -Compact -Candidate -RunNativeTests
 ```
 
-`Release` 启用 R8 代码与资源裁剪；`-Compact` 将原生库与 DEX 压缩打入 APK，安装时由 Android 解压，因此 APK 大小不等于安装后的占用。候选包位于 `artifacts/apk/candidates/release-compact/`。省略 `-Compact` 可在 `candidates/release/` 生成普通 Release 对照包；省略 `-Candidate` 才会进入原有发布流程。两种 Release 包均保留现有测试签名，以支持覆盖安装。
+`Release` 启用 R8 代码与资源裁剪；`-Compact` 将原生库与 DEX 压缩打入 APK，安装时由 Android 解压，因此 APK 大小不等于安装后的占用。候选包位于 `artifacts/apk/candidates/release-compact/`。省略 `-Compact` 可在 `candidates/release/` 生成普通 Release 对照包；省略 `-Candidate` 才会更新最新版。
+
+Debug 使用 Android 工具链在本机生成的调试密钥。Release 需要仓库外的正式密钥，通过 `TADA_ANDROID_KEYSTORE`、`TADA_ANDROID_STORE_PASSWORD`、`TADA_ANDROID_KEY_ALIAS` 和 `TADA_ANDROID_KEY_PASSWORD` 提供。Windows 本机发布脚本也支持从 `~/.tada-private/android-signing/` 读取 `release.jks` 和由当前 Windows 用户加密的 `release-password.dpapi`，别名为 `tada-release`。首次切换到不兼容的正式签名时，发布命令可加 `-ResetRollback` 清除旧签名的回退入口。以后发布沿用同一正式私钥，并将密钥和可恢复口令单独做好备份。
 
 发布校验会确认 R8 后的 JNI 入口、平台桥接和持久 Worker 类仍在 DEX 中。Release 的混淆映射以同名 `.apk.mapping.txt.gz` 保存，原生测试摘要写入对应的空间报告，均在自动清理编译缓存前保留。Release 继续支持用户明确开启的局域网 HTTP；公网服务仍需通过 HTTPS 与服务器身份校验。
 

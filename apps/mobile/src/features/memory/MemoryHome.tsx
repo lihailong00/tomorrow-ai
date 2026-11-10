@@ -1,8 +1,10 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  BackHandler,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -21,10 +23,9 @@ import { ErrorNotice, Loading } from '../../ui/components';
 import { Text } from '../../ui/Text';
 import { Icon } from '../../ui/visuals';
 import {
-  describeMemory,
+  memoryEffect,
   memoryReviewPrompt,
   memoryTryPrompt,
-  selectMemoryHighlights,
 } from './memoryModel';
 import { useMemoryCollection } from './useMemoryCollection';
 import { AutomaticMemorySettings } from './AutomaticMemory';
@@ -34,28 +35,47 @@ import {
   getMemoryConfirmation,
   memoryCategories,
   memoryCategory,
+  memoryGroup,
+  memoryGroups,
   memorySource,
+  type MemoryGroup,
 } from './memoryPresentation';
 
 const appearance = {
-  ink: '#303849',
-  muted: '#707B91',
-  accent: '#5665BE',
+  ink: '#252E43',
+  muted: '#59667D',
+  accent: '#435CB5',
   paper: '#FFFFFF',
-  soft: '#EEF0FD',
-  background: '#F7F8FC',
-  line: '#E9ECF4',
-  danger: '#AE465D',
+  soft: '#EDF0FB',
+  background: '#F5F6FA',
+  line: '#E4E9F3',
+  danger: '#A13851',
 };
+
+const primaryGroups = Object.entries(memoryGroups) as [MemoryGroup, string][];
+const rowSymbols = {
+  preference: { icon: 'memory', background: '#EEEDFD', color: '#6256A8' },
+  goal: { icon: 'flag', background: '#F9EFDF', color: '#915D30' },
+  fact: { icon: 'person', background: '#E7F2EE', color: '#3F7161' },
+  pending: { icon: 'clock', background: '#F0F2F8', color: appearance.muted },
+} as const;
+type HomeFilter = 'all' | 'pending' | MemoryGroup;
 
 type Pane =
   | { kind: 'all' }
+  | { kind: 'settings' }
   | { kind: 'detail'; memory: Memory }
   | { kind: 'edit'; memory?: Memory; entry: string }
   | null;
 
 function MemoryDivider() {
   return <View style={m.divider} />;
+}
+
+function matchesQuery(memory: Memory, query: string) {
+  return `${memory.title}\n${memory.content}\n${memorySource(memory.source).label}\n${memoryGroups[memoryGroup(memory.kind)]}`
+    .toLocaleLowerCase()
+    .includes(query);
 }
 
 function MemoryAction({
@@ -100,42 +120,42 @@ function MemoryAction({
 function MemoryRow({
   memory,
   onPress,
-  summary = false,
-  disabled = false,
+  inLibrary = false,
 }: {
   memory: Memory;
   onPress: () => void;
-  summary?: boolean;
-  disabled?: boolean;
+  inLibrary?: boolean;
 }) {
   const { formatDate } = useApp();
-  const presentation = describeMemory(memory);
   const pending = getMemoryConfirmation(memory);
+  const group = memoryGroup(memory.kind);
+  const symbol = rowSymbols[pending ? 'pending' : group];
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`查看记忆：${
         pending ? '体重待确认' : memory.title || memory.content
       }`}
-      disabled={disabled}
       onPress={onPress}
-      style={({ pressed }) => [m.memoryRow, pressed && m.pressed]}
+      style={({ pressed }) => [
+        m.memoryRow,
+        pressed && m.pressed,
+      ]}
     >
-      <View style={m.rowIcon}>
-        <Icon name={presentation.icon} size={18} color={appearance.muted} />
-      </View>
+      {inLibrary && (
+        <View style={[m.rowSymbol, { backgroundColor: symbol.background }]}>
+          <Icon name={symbol.icon} size={18} color={symbol.color} />
+        </View>
+      )}
       <View style={m.flex}>
-        {summary && <Text style={m.rowLabel}>{presentation.label}</Text>}
-        <Text style={m.rowContent} numberOfLines={summary ? 3 : 2}>
+        <Text style={m.rowContent} numberOfLines={2}>
           {pending ? '体重待确认' : memory.content}
         </Text>
-        {!summary && (
-          <Text style={m.rowSource} numberOfLines={1}>
-            {pending ? '待确认' : memoryCategory(memory)} ·{' '}
-            {memorySource(memory.source).label} ·{' '}
-            {formatDate(memory.updated_at)}
-          </Text>
-        )}
+        <Text style={m.rowSource} numberOfLines={1}>
+          {pending ? '待确认' : inLibrary ? memoryGroups[group] : memoryCategory(memory)}
+          {' · '}
+          {inLibrary ? formatDate(memory.updated_at) : `${memorySource(memory.source).label} · ${formatDate(memory.updated_at)}`}
+        </Text>
       </View>
       <Icon name="chevronRight" size={15} color={appearance.muted} />
     </Pressable>
@@ -153,20 +173,23 @@ function MemoryEntry(props: {
 export function MemoryHome() {
   const { api, revision, invalidate, navigate } = useApp();
   const data = useMemoryCollection(api, revision);
-  const highlights = useMemo(
-    () => selectMemoryHighlights(data.items),
-    [data.items],
-  );
-  const recent = data.items.find(
-    item =>
-      !getMemoryConfirmation(item) &&
-      !highlights.some(highlight => highlight.id === item.id),
-  );
-  const pending = data.items.filter(item => getMemoryConfirmation(item));
+  const { saved, pending } = useMemo(() => {
+    const saved: Memory[] = [];
+    const pending: Memory[] = [];
+    const recent = [...data.items].sort((a, b) =>
+      Date.parse(b.updated_at) - Date.parse(a.updated_at),
+    );
+    for (const item of recent) {
+      (getMemoryConfirmation(item) ? pending : saved).push(item);
+    }
+    return { saved, pending };
+  }, [data.items]);
+  const [filter, setFilter] = useState<HomeFilter>('all');
   const [pane, setPane] = useState<Pane>(null);
   const paneRef = useRef(pane);
   paneRef.current = pane;
   const [query, setQuery] = useState('');
+  const [menuOpen, setMenuOpen] = useState(false);
   const [category, setCategory] = useState('全部');
   const [editBusy, setEditBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -176,27 +199,43 @@ export function MemoryHome() {
   } | null>(null);
   const action = useAction();
   const busy = editBusy || action.busy;
-  const visible = data.items.filter(
-    item =>
-      (category === '全部' ||
-        (category === '待确认'
-          ? !!getMemoryConfirmation(item)
-          : memoryCategory(item) === category)) &&
-      `${item.title}\n${item.content}\n${memorySource(item.source).label}`
-        .toLocaleLowerCase()
-        .includes(query.trim().toLocaleLowerCase()),
+  const searchQuery = query.trim().toLocaleLowerCase();
+  const library = useMemo(
+    () => (filter === 'pending' ? pending : saved).filter(item =>
+      (filter === 'all' || filter === 'pending' || memoryGroup(item.kind) === filter) &&
+      (!searchQuery || matchesQuery(item, searchQuery)),
+    ),
+    [filter, pending, saved, searchQuery],
   );
+  const visible = useMemo(
+    () => data.items.filter(item =>
+      (category === '全部' || (category === '待确认'
+        ? !!getMemoryConfirmation(item) : memoryCategory(item) === category)) &&
+      (!searchQuery || matchesQuery(item, searchQuery)),
+    ),
+    [category, data.items, searchQuery],
+  );
+  useEffect(() => {
+    if (!menuOpen) return;
+    const listener = BackHandler.addEventListener('hardwareBackPress', () => {
+      setMenuOpen(false);
+      return true;
+    });
+    return () => listener.remove();
+  }, [menuOpen]);
   const openDetail = (memory: Memory) => {
+    Keyboard.dismiss();
     action.setError(null);
     setPane({ kind: 'detail', memory });
   };
   const openAll = () => {
     action.setError(null);
-    setQuery('');
+    setMenuOpen(false);
     setCategory('全部');
     setPane({ kind: 'all' });
   };
   const openEditor = (memory?: Memory) => {
+    Keyboard.dismiss();
     action.setError(null);
     setPane({ kind: 'edit', memory, entry: newRequestId() });
   };
@@ -252,191 +291,154 @@ export function MemoryHome() {
   };
   return (
     <>
-      <ScrollView
-        testID="memory-understand-home"
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={m.page}
-        refreshControl={
-          <RefreshControl
-            refreshing={data.loading && data.items.length > 0}
-            onRefresh={data.refresh}
-            tintColor={appearance.accent}
-          />
-        }
-      >
+      <View style={m.home}>
         <View style={m.heading}>
           <View style={m.flex}>
-            <Text style={m.title}>记忆</Text>
-            <Text style={m.subtitle}>不用每次从头说。</Text>
+            <Text accessibilityRole="header" style={m.title}>记忆</Text>
+            <Text style={m.subtitle}>把想留住的事记下来。</Text>
           </View>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="添加一条记忆"
-            onPress={() => openEditor()}
-            style={m.add}
-          >
-            <Icon name="plus" size={23} color={appearance.accent} />
-          </Pressable>
+          <View style={m.headingActions}>
+            <Pressable accessibilityRole="button" accessibilityLabel="添加一条记忆"
+              onPress={() => openEditor()} style={({ pressed }) => [m.add, pressed && m.pressed]}>
+              <Icon name="plus" size={16} color={appearance.accent} />
+              <Text style={m.addText}>新增</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="更多记忆操作"
+              accessibilityState={{ expanded: menuOpen }}
+              onPress={() => { Keyboard.dismiss(); setMenuOpen(true); }}
+              style={({ pressed }) => [m.iconButton, pressed && m.pressed]}>
+              <Icon name="more" size={22} color={appearance.muted} />
+            </Pressable>
+          </View>
         </View>
-        <AutomaticMemorySettings />
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="私密资料：地址、银行卡、身份证"
-          onPress={() => navigate({ name: 'privateVault' })}
-          style={({ pressed }) => [m.tryCard, pressed && m.pressed]}
-        >
-          <Icon name="shield" size={22} color={appearance.accent} />
-          <View style={m.flex}>
-            <Text style={m.tryTitle}>私密资料</Text>
-            <Text style={m.tryDescription}>地址、银行卡、身份证 · 本机加密保存</Text>
-          </View>
-          <Icon name="chevronRight" size={17} color={appearance.muted} />
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="从对话里整理记忆，先列出候选供你确认"
-          onPress={() => navigate({ name: 'chat', prompt: memoryReviewPrompt })}
-          style={({ pressed }) => [m.discover, pressed && m.pressed]}
-        >
-          <Icon name="sparkles" size={17} color={appearance.accent} />
-          <Text style={m.discoverText}>从对话里整理，先由你确认</Text>
-          <Icon name="chevronRight" size={15} color={appearance.accent} />
-        </Pressable>
-        <ErrorNotice message={data.error} retry={data.refresh} />
-        {pending.length > 0 && (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="查看待确认的记忆"
-            onPress={() => {
-              openAll();
-              setCategory('待确认');
-            }}
-            style={m.discover}
-          >
-            <Icon name="sparkles" size={17} color={appearance.accent} />
-            <Text style={m.discoverText}>
-              {pending.length} 条信息需要你确认一下
-            </Text>
-            <Icon name="chevronRight" size={15} color={appearance.accent} />
-          </Pressable>
-        )}
-        {data.loading && !data.items.length ? <Loading /> : null}
-        {(data.items.length > 0 || (!data.loading && !data.error)) && (
-          <View style={m.summary}>
-            <View style={m.summaryHeader}>
-              <Icon name="memory" size={16} color={appearance.accent} />
-              <Text style={m.summaryTitle}>妥啦了解的你</Text>
-            </View>
-            {highlights.map((memory, index) => (
-              <View key={memory.id} style={index > 0 && m.divider}>
-                <MemoryRow
-                  memory={memory}
-                  summary
-                  onPress={() => openDetail(memory)}
-                />
+        <FlatList
+          testID="memory-understand-home"
+          data={library}
+          keyExtractor={memory => memory.id}
+          renderItem={({ item }) => (
+            <MemoryRow memory={item} onPress={() => openDetail(item)} inLibrary />
+          )}
+          ItemSeparatorComponent={MemoryDivider}
+          contentContainerStyle={m.page}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          initialNumToRender={12}
+          maxToRenderPerBatch={12}
+          refreshControl={
+            <RefreshControl refreshing={data.loading && data.items.length > 0}
+              onRefresh={data.refresh} tintColor={appearance.accent} />
+          }
+          ListHeaderComponent={
+            <>
+              <View style={m.search}>
+                <Icon name="search" size={17} color={appearance.muted} />
+                <TextInput accessibilityLabel="搜索记忆" placeholder="搜索记忆"
+                  placeholderTextColor={appearance.muted} autoCorrect={false}
+                  returnKeyType="search" value={query} onChangeText={setQuery} style={m.searchInput} />
+                {!!query && (
+                  <Pressable accessibilityRole="button" accessibilityLabel="清空搜索"
+                    onPress={() => setQuery('')} style={m.iconButton}>
+                    <Icon name="close" size={16} color={appearance.muted} />
+                  </Pressable>
+                )}
               </View>
-            ))}
-            {!highlights.length && (
+              <View style={m.homeFilters}>
+                {([['all', '全部'], ...primaryGroups, ...(pending.length || filter === 'pending'
+                  ? [['pending', '待确认']] : [])] as [HomeFilter, string][]).map(([id, label]) => (
+                  <Pressable key={id} accessibilityRole="button"
+                    accessibilityLabel={id === 'pending' ? '查看待确认的记忆' : `筛选：${label}`}
+                    accessibilityState={{ selected: filter === id }} onPress={() => setFilter(id)}
+                    style={({ pressed }) => [m.homeFilter, filter === id && m.homeFilterSelected, pressed && m.pressed]}>
+                    <Text style={[m.homeFilterText, filter === id && m.homeFilterTextSelected]}>{label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <View style={m.libraryHeading}>
+                <Text accessibilityRole="header" style={m.sectionTitle}>
+                  {searchQuery ? '搜索结果' : filter === 'pending' ? '待确认' : '最近更新'}
+                </Text>
+                {(data.items.length > 0 || (!data.loading && !data.error)) && (
+                  <Text style={m.small} accessibilityLiveRegion="polite">
+                    {library.length}{filter === 'all' && !searchQuery && data.hasMore ? '+' : ''} 条
+                  </Text>
+                )}
+              </View>
+            </>
+          }
+          ListEmptyComponent={
+            data.loading ? <Loading /> : data.error ? null : (
               <View style={m.empty}>
                 <Text style={m.emptyTitle}>
-                  {pending.length
-                    ? '有信息等待你确认'
-                    : '先告诉我一件关于你的事'}
+                  {searchQuery ? data.hasMore
+                    ? '已加载的记忆中没有匹配项，可继续加载后查找。'
+                    : '没有找到匹配的记忆。' : filter === 'pending' ? '没有待确认的记忆' :
+                    saved.length ? '这个分类还没有记忆' : '先告诉我一件关于你的事'}
                 </Text>
-                <Text style={m.emptyBody}>
-                  {pending.length
-                    ? '先核对一下数字，确认后我再把它用于回答。'
-                    : '比如你喜欢怎样的回复，或者什么时候更专注。'}
-                </Text>
-                <MemoryAction
-                  label={pending.length ? '核对信息' : '告诉我一件事'}
-                  secondary
-                  onPress={() =>
-                    pending.length ? openDetail(pending[0]) : openEditor()
-                  }
-                />
+                {!searchQuery && filter === 'all' && !saved.length && !data.hasMore && (
+                  <MemoryAction label="告诉我一件事" secondary onPress={() => openEditor()} />
+                )}
               </View>
-            )}
-            {!!highlights.length && (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="查看全部记忆"
-                onPress={openAll}
-                style={m.summaryFooter}
-              >
-                <Text style={m.footerText}>
-                  查看全部 {data.items.length}
-                  {data.hasMore ? '+' : ''} 条记忆
-                </Text>
-                <Icon name="arrowRight" size={15} color={appearance.muted} />
-              </Pressable>
-            )}
-          </View>
-        )}
-        <View style={m.sectionHeading}>
-          <Text style={m.sectionTitle}>记住，然后帮上忙</Text>
-          <Text style={m.small}>试试看</Text>
-        </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="帮我安排明天，使用真实记忆开始对话"
-          onPress={() => navigate({ name: 'chat', prompt: memoryTryPrompt })}
-          style={({ pressed }) => [m.tryCard, pressed && m.pressed]}
-        >
-          <Icon name="sparkles" size={22} color={appearance.accent} />
-          <View style={m.flex}>
-            <Text style={m.tryTitle}>帮我安排明天</Text>
-            <Text style={m.tryDescription}>看看建议如何考虑你的习惯</Text>
-          </View>
-          <Icon name="arrowRight" size={17} color={appearance.accent} />
+            )
+          }
+          ListFooterComponent={
+            <>
+              <ErrorNotice message={data.error} retry={data.refresh} />
+              {data.hasMore && (
+                <MemoryAction label="加载更多记忆" secondary busy={data.loading} onPress={data.loadMore} />
+              )}
+            </>
+          }
+        />
+        <Pressable accessibilityRole="button" accessibilityLabel="私密资料：地址、银行卡、身份证"
+          onPress={() => navigate({ name: 'privateVault' })}
+          style={({ pressed }) => [m.vault, pressed && m.pressed]}>
+          <Icon name="lock" size={17} color={appearance.accent} />
+          <Text style={[m.vaultTitle, m.flex]}>私密资料</Text>
+          <Text style={m.small}>本机加密</Text>
+          <Icon name="chevronRight" size={15} color={appearance.muted} />
         </Pressable>
-        {recent && (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`最近记住：${recent.title}`}
-            onPress={() => openDetail(recent)}
-            style={m.recent}
-          >
-            <Icon name="clock" size={16} color={appearance.accent} />
-            <Text style={[m.small, m.flex]} numberOfLines={2}>
-              最近记住：{recent.content}
-            </Text>
-            <Icon name="chevronRight" size={14} color={appearance.muted} />
-          </Pressable>
-        )}
         {!!notice && (
           <View accessibilityLiveRegion="polite" style={m.notice}>
-            <Icon name="check" size={17} color={appearance.accent} />
             <Text style={[m.noticeText, m.flex]}>{notice}</Text>
-            {deleted ? (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="撤销忘记"
-                disabled={action.busy}
-                onPress={restore}
-                style={m.noticeButton}
-              >
-                <Text style={m.link}>{action.busy ? '恢复中…' : '撤销'}</Text>
-              </Pressable>
-            ) : (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="关闭提示"
-                onPress={() => setNotice('')}
-                style={m.noticeButton}
-              >
-                <Icon name="close" size={15} color={appearance.muted} />
+            {deleted && (
+              <Pressable accessibilityRole="button" accessibilityLabel="撤销忘记"
+                disabled={action.busy} onPress={restore} style={m.noticeButton}>
+                <Text style={m.noticeText}>{action.busy ? '恢复中…' : '撤销'}</Text>
               </Pressable>
             )}
+            <Pressable accessibilityRole="button" accessibilityLabel="关闭提示" disabled={action.busy}
+              onPress={() => { setNotice(''); setDeleted(null); action.setError(null); }} style={m.noticeButton}>
+              <Icon name="close" size={16} color={appearance.paper} />
+            </Pressable>
           </View>
         )}
-        {!pane && (
-          <ErrorNotice
-            message={action.error}
-            retry={deleted ? restore : undefined}
-          />
+        {!pane && <ErrorNotice message={action.error} retry={deleted ? restore : undefined} />}
+        {menuOpen && (
+          <View style={m.menuLayer}>
+            <Pressable accessibilityRole="button" accessibilityLabel="关闭记忆菜单"
+              onPress={() => setMenuOpen(false)} style={StyleSheet.absoluteFill} />
+            <View style={m.menu} accessibilityViewIsModal>
+              <Pressable accessibilityRole="button" accessibilityLabel="从对话里整理记忆，先列出候选供你确认"
+                onPress={() => { setMenuOpen(false); navigate({ name: 'chat', prompt: memoryReviewPrompt }); }}
+                style={({ pressed }) => [m.tool, pressed && m.pressed]}>
+                <Icon name="sparkles" size={17} color={appearance.accent} />
+                <Text style={m.toolText}>从对话整理</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel="按细分类查找"
+                onPress={openAll} style={({ pressed }) => [m.tool, pressed && m.pressed]}>
+                <Icon name="search" size={17} color={appearance.accent} />
+                <Text style={m.toolText}>按细分类查找</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel="记忆设置"
+                onPress={() => { setMenuOpen(false); setPane({ kind: 'settings' }); }}
+                style={({ pressed }) => [m.tool, pressed && m.pressed]}>
+                <Icon name="settings" size={17} color={appearance.accent} />
+                <Text style={m.toolText}>记忆设置</Text>
+              </Pressable>
+            </View>
+          </View>
         )}
-      </ScrollView>
+      </View>
       <Modal
         visible={pane !== null}
         transparent
@@ -454,17 +456,19 @@ export function MemoryHome() {
             onPress={close}
             style={StyleSheet.absoluteFill}
           />
-          <View style={m.sheet} accessibilityViewIsModal>
+          <View style={[m.sheet, pane?.kind === 'settings' && m.settingsSheet]} accessibilityViewIsModal>
             <View style={m.handle} />
             <View style={m.sheetHeading}>
               <Text style={m.sheetTitle}>
                 {pane?.kind === 'all'
-                  ? '记住的事'
+                  ? '搜索记忆'
+                  : pane?.kind === 'settings'
+                  ? '记忆设置'
                   : pane?.kind === 'edit'
                   ? pane.memory
-                    ? '改一下记忆'
-                    : '告诉我一件事'
-                  : '这条记忆'}
+                    ? '修改记忆'
+                    : '新记忆'
+                  : '记忆详情'}
               </Text>
               <Pressable
                 accessibilityRole="button"
@@ -476,6 +480,9 @@ export function MemoryHome() {
                 <Icon name="close" size={19} color={appearance.ink} />
               </Pressable>
             </View>
+            {pane?.kind === 'settings' && (
+              <ScrollView style={m.sheetScroll}><AutomaticMemorySettings /></ScrollView>
+            )}
             {pane?.kind === 'all' && (
               <>
                 <View style={m.search}>
@@ -519,6 +526,7 @@ export function MemoryHome() {
                   ))}
                 </ScrollView>
                 <FlatList
+                  testID="memory-search-results"
                   style={m.sheetScroll}
                   data={visible}
                   keyExtractor={memory => memory.id}
@@ -554,10 +562,13 @@ export function MemoryHome() {
                     </>
                   }
                 />
-                <MemoryAction
-                  label="再告诉我一件事"
-                  onPress={() => openEditor()}
-                />
+                <Pressable accessibilityRole="button"
+                  accessibilityLabel="帮我安排明天，使用真实记忆开始对话"
+                  onPress={() => navigate({ name: 'chat', prompt: memoryTryPrompt })}
+                  style={({ pressed }) => [m.tool, pressed && m.pressed]}>
+                  <Icon name="sparkles" size={16} color={appearance.accent} />
+                  <Text style={m.toolText}>用记忆帮我安排明天</Text>
+                </Pressable>
               </>
             )}
             {pane?.kind === 'detail' && (
@@ -585,7 +596,7 @@ export function MemoryHome() {
                   <Text style={m.effectText}>
                     {getMemoryConfirmation(pane.memory)
                       ? '确认后，才会用于相关回答。'
-                      : describeMemory(pane.memory).effect}
+                      : memoryEffect(pane.memory)}
                   </Text>
                 </View>
                 <MemorySourceCard
@@ -593,24 +604,19 @@ export function MemoryHome() {
                   memory={pane.memory}
                 />
                 <ErrorNotice message={action.error} />
-                <MemoryAction
-                  label="改一下"
-                  disabled={action.busy}
-                  onPress={() => openEditor(pane.memory)}
-                />
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="忘记这件事"
-                  disabled={action.busy}
-                  onPress={() => forget(pane.memory)}
-                  style={m.forget}
-                >
-                  {action.busy ? (
-                    <ActivityIndicator size="small" color={appearance.danger} />
-                  ) : (
-                    <Text style={m.forgetText}>忘记这件事</Text>
-                  )}
-                </Pressable>
+                <View style={m.detailActions}>
+                  <Pressable accessibilityRole="button" accessibilityLabel="修改"
+                    disabled={busy} onPress={() => openEditor(pane.memory)}
+                    style={({ pressed }) => [m.detailAction, busy && m.disabled, pressed && m.pressed]}>
+                    <Text style={m.toolText}>修改</Text>
+                  </Pressable>
+                  <Pressable accessibilityRole="button" accessibilityLabel="忘记这件事"
+                    disabled={busy} onPress={() => forget(pane.memory)}
+                    style={({ pressed }) => [m.detailAction, m.forget, pressed && m.pressed]}>
+                    {action.busy ? <ActivityIndicator size="small" color={appearance.danger} /> :
+                      <Text style={m.forgetText}>忘记这条</Text>}
+                  </Pressable>
+                </View>
               </ScrollView>
             )}
             {pane?.kind === 'edit' && (
@@ -620,6 +626,7 @@ export function MemoryHome() {
                 onBusyChange={setEditBusy}
                 onSaved={memory => {
                   data.updateLocal(memory);
+                  if (filter !== 'all' && filter !== 'pending') setFilter(memoryGroup(memory.kind));
                   setNotice(
                     pane.memory
                       ? '已改好，下次按新的来。'
@@ -637,348 +644,111 @@ export function MemoryHome() {
 }
 
 const m = StyleSheet.create({
-  flex: { flex: 1 },
-  page: { paddingHorizontal: 22, paddingTop: 9, paddingBottom: 26 },
+  flex: { flex: 1, minWidth: 0 },
+  home: { flex: 1, backgroundColor: 'rgba(252,252,255,0.76)' },
+  page: { paddingHorizontal: 18, paddingBottom: 12 },
   heading: {
-    flexDirection: 'row',
-    gap: 14,
-    alignItems: 'center',
-    marginBottom: 19,
+    flexDirection: 'row', gap: 8, alignItems: 'flex-start',
+    paddingHorizontal: 18, paddingTop: 8, paddingBottom: 17,
   },
-  title: {
-    fontSize: 30,
-    lineHeight: 40,
-    fontWeight: '500',
-    color: appearance.ink,
-  },
-  subtitle: {
-    fontSize: 14,
-    lineHeight: 22,
-    color: appearance.muted,
-    marginTop: 3,
-  },
+  headingActions: { flexDirection: 'row', alignItems: 'center', gap: 2 },
+  title: { fontSize: 32, fontWeight: '700', color: appearance.ink },
+  subtitle: { fontSize: 13, color: appearance.muted, marginTop: 3 },
   add: {
-    width: 45,
-    height: 45,
-    borderRadius: 16,
-    backgroundColor: appearance.paper,
-    alignItems: 'center',
-    justifyContent: 'center',
+    minHeight: 44, borderRadius: 13, paddingHorizontal: 11, paddingVertical: 8, gap: 5,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: appearance.soft,
   },
-  discover: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 9,
-    padding: 12,
-    borderRadius: 13,
-    backgroundColor: appearance.soft,
-    marginBottom: 18,
+  addText: { fontSize: 13, color: appearance.accent, fontWeight: '600' },
+  iconButton: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  vault: {
+    flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 46,
+    paddingHorizontal: 12, paddingVertical: 8, marginHorizontal: 18, marginVertical: 8,
+    borderRadius: 12, backgroundColor: '#F0F2F8',
   },
-  discoverText: {
-    flex: 1,
-    fontSize: 12,
-    lineHeight: 19,
-    color: appearance.accent,
+  vaultTitle: { fontSize: 14, fontWeight: '600', color: appearance.ink },
+  libraryHeading: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    gap: 8, paddingBottom: 4,
   },
-  summary: {
-    backgroundColor: appearance.paper,
-    borderRadius: 23,
-    paddingHorizontal: 18,
-    paddingTop: 17,
-    overflow: 'hidden',
+  sectionTitle: { fontSize: 15, fontWeight: '700', color: appearance.ink },
+  homeFilters: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 15 },
+  homeFilter: {
+    minHeight: 44, paddingHorizontal: 12, justifyContent: 'center', borderRadius: 12,
   },
-  summaryHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    marginBottom: 5,
+  homeFilterSelected: { backgroundColor: appearance.soft },
+  homeFilterText: { fontSize: 13, color: appearance.muted },
+  homeFilterTextSelected: { fontWeight: '600', color: appearance.accent },
+  memoryRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, minHeight: 68 },
+  rowSymbol: {
+    width: 36, height: 36, borderRadius: 11, alignItems: 'center', justifyContent: 'center',
   },
-  summaryTitle: {
-    fontSize: 13,
-    lineHeight: 20,
-    fontWeight: '500',
-    color: appearance.accent,
+  rowContent: { color: appearance.ink, fontSize: 15, lineHeight: 22, fontWeight: '600' },
+  rowSource: { color: appearance.muted, fontSize: 12, lineHeight: 18, marginTop: 2 },
+  divider: { borderTopWidth: StyleSheet.hairlineWidth, borderColor: appearance.line },
+  small: { fontSize: 12, color: appearance.muted },
+  empty: { paddingVertical: 16 },
+  emptyTitle: { fontSize: 15, fontWeight: '500', color: appearance.ink },
+  menuLayer: { ...StyleSheet.absoluteFillObject, zIndex: 2 },
+  menu: {
+    position: 'absolute', top: 56, right: 18, maxWidth: '85%',
+    padding: 5, borderRadius: 15, borderWidth: StyleSheet.hairlineWidth,
+    borderColor: appearance.line, backgroundColor: appearance.paper,
+    elevation: 6, shadowColor: appearance.ink, shadowOpacity: 0.14,
+    shadowRadius: 9, shadowOffset: { width: 0, height: 3 },
   },
-  memoryRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 11,
-    paddingVertical: 14,
-    minHeight: 63,
-  },
-  rowIcon: {
-    alignSelf: 'flex-start',
-    width: 32,
-    height: 32,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: appearance.background,
-    marginTop: 3,
-  },
-  rowLabel: {
-    fontSize: 11,
-    lineHeight: 17,
-    color: appearance.muted,
-    marginBottom: 3,
-  },
-  rowContent: { color: appearance.ink, fontSize: 14, lineHeight: 23 },
-  rowSource: {
-    color: appearance.muted,
-    fontSize: 11,
-    lineHeight: 18,
-    marginTop: 6,
-  },
-  divider: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderColor: appearance.line,
-  },
-  summaryFooter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 9,
-    minHeight: 45,
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    marginHorizontal: -18,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderColor: appearance.line,
-  },
-  footerText: {
-    fontSize: 12,
-    lineHeight: 18,
-    color: appearance.muted,
-    flexShrink: 1,
-  },
-  empty: { paddingVertical: 19 },
-  emptyTitle: {
-    fontSize: 16,
-    lineHeight: 25,
-    fontWeight: '500',
-    color: appearance.ink,
-  },
-  emptyBody: {
-    fontSize: 13,
-    lineHeight: 22,
-    color: appearance.muted,
-    marginTop: 8,
-  },
-  sectionHeading: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    gap: 9,
-    marginTop: 22,
-    marginBottom: 10,
-  },
-  sectionTitle: {
-    fontSize: 13,
-    lineHeight: 20,
-    fontWeight: '500',
-    color: appearance.ink,
-  },
-  small: { fontSize: 11, lineHeight: 19, color: appearance.muted },
-  tryCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    backgroundColor: appearance.soft,
-    padding: 16,
-    borderRadius: 17,
-  },
-  tryTitle: {
-    fontSize: 14,
-    lineHeight: 22,
-    fontWeight: '500',
-    color: appearance.ink,
-  },
-  tryDescription: {
-    fontSize: 11,
-    lineHeight: 19,
-    color: appearance.muted,
-    marginTop: 3,
-  },
-  recent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 9,
-    paddingVertical: 16,
-  },
+  tool: { minHeight: 44, flexShrink: 1, flexDirection: 'row', alignItems: 'center', gap: 9, paddingVertical: 7, paddingHorizontal: 10 },
+  toolText: { fontSize: 13, color: appearance.accent, fontWeight: '600', flexShrink: 1 },
   notice: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    borderRadius: 14,
-    padding: 12,
-    marginTop: 14,
-    backgroundColor: appearance.paper,
+    flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: 13,
+    marginHorizontal: 18, marginTop: 4, paddingLeft: 12, paddingRight: 4, backgroundColor: appearance.ink,
   },
-  noticeText: { fontSize: 12, lineHeight: 20, color: appearance.ink },
-  noticeButton: {
-    minWidth: 44,
-    minHeight: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  noticeText: { fontSize: 13, color: appearance.paper },
+  noticeButton: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   link: { fontSize: 13, color: appearance.accent },
-  modal: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    backgroundColor: 'rgba(48,56,73,0.28)',
-  },
+  modal: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(30,42,82,0.38)' },
   sheet: {
-    maxHeight: '88%',
-    minHeight: 240,
-    flexShrink: 1,
-    paddingTop: 12,
-    paddingHorizontal: 22,
-    paddingBottom: 28,
-    borderTopLeftRadius: 26,
-    borderTopRightRadius: 26,
-    backgroundColor: appearance.paper,
+    maxHeight: '88%', minHeight: 240, flexShrink: 1, paddingTop: 12, paddingHorizontal: 18, paddingBottom: 22,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24, backgroundColor: appearance.paper,
   },
+  settingsSheet: { minHeight: 0 },
   sheetScroll: { flexGrow: 0, flexShrink: 1 },
-  handle: {
-    width: 33,
-    height: 4,
-    borderRadius: 4,
-    backgroundColor: '#DCE0EB',
-    alignSelf: 'center',
-    marginBottom: 17,
-  },
-  sheetHeading: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 13,
-    marginBottom: 15,
-  },
-  sheetTitle: {
-    fontSize: 20,
-    lineHeight: 29,
-    fontWeight: '500',
-    color: appearance.ink,
-    flex: 1,
-  },
+  handle: { width: 33, height: 4, borderRadius: 4, backgroundColor: '#DCE0EB', alignSelf: 'center', marginBottom: 11 },
+  sheetHeading: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 9 },
+  sheetTitle: { fontSize: 21, fontWeight: '700', color: appearance.ink, flex: 1 },
   close: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: appearance.background,
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: 44, height: 44, borderRadius: 22, backgroundColor: appearance.background,
+    alignItems: 'center', justifyContent: 'center',
   },
-  detail: { paddingBottom: 4 },
+  detail: { paddingBottom: 4, gap: 10 },
+  detailContent: { fontSize: 17, fontWeight: '600', color: appearance.ink },
+  effect: { flexDirection: 'row', alignItems: 'flex-start', gap: 7, paddingVertical: 2 },
+  effectText: { flex: 1, color: appearance.muted, fontSize: 13, lineHeight: 21 },
+  detailActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  detailAction: {
+    minHeight: 44, padding: 8, borderRadius: 12, flexGrow: 1, flexBasis: 100,
+    alignItems: 'center', justifyContent: 'center', backgroundColor: appearance.soft,
+  },
+  forget: { backgroundColor: '#FFF1F3' },
+  forgetText: { color: appearance.danger, fontSize: 13, fontWeight: '600' },
   categories: { gap: 8, paddingBottom: 12 },
   category: {
-    minHeight: 44,
-    paddingHorizontal: 14,
-    justifyContent: 'center',
-    backgroundColor: appearance.background,
-    borderRadius: 22,
+    minHeight: 44, paddingHorizontal: 14, justifyContent: 'center',
+    backgroundColor: appearance.background, borderRadius: 22,
   },
   categorySelected: { backgroundColor: appearance.soft },
-  detailContent: { fontSize: 19, lineHeight: 31, color: appearance.ink },
-  effect: {
-    backgroundColor: appearance.soft,
-    borderRadius: 14,
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 9,
-    padding: 14,
-    marginVertical: 17,
-  },
-  effectText: {
-    flex: 1,
-    color: appearance.accent,
-    fontSize: 13,
-    lineHeight: 22,
-  },
-  source: {
-    backgroundColor: appearance.background,
-    borderRadius: 14,
-    padding: 14,
-  },
-  sourceLabel: {
-    color: appearance.muted,
-    fontSize: 11,
-    lineHeight: 18,
-    marginBottom: 6,
-  },
-  sourceText: { color: appearance.ink, fontSize: 13, lineHeight: 21 },
-  sourceDate: {
-    color: appearance.muted,
-    fontSize: 11,
-    lineHeight: 18,
-    marginTop: 7,
-  },
   action: {
-    minHeight: 48,
-    paddingHorizontal: 16,
-    paddingVertical: 13,
-    marginTop: 16,
-    borderRadius: 15,
-    backgroundColor: appearance.accent,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
+    minHeight: 44, paddingHorizontal: 12, paddingVertical: 9, marginTop: 10, borderRadius: 12,
+    backgroundColor: appearance.accent, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
   },
   actionSecondary: { backgroundColor: appearance.soft },
-  actionText: {
-    color: appearance.paper,
-    fontSize: 14,
-    lineHeight: 22,
-    fontWeight: '500',
-    textAlign: 'center',
-    flexShrink: 1,
-  },
+  actionText: { color: appearance.paper, fontSize: 13, fontWeight: '600', textAlign: 'center', flexShrink: 1 },
   actionSecondaryText: { color: appearance.accent },
-  forget: {
-    minHeight: 48,
-    paddingVertical: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  forgetText: { color: appearance.danger, fontSize: 13, lineHeight: 22 },
-  editor: { paddingBottom: 4 },
-  fieldLabel: {
-    color: appearance.muted,
-    fontSize: 12,
-    lineHeight: 20,
-    marginTop: 18,
-    marginBottom: 8,
-  },
-  input: {
-    backgroundColor: appearance.background,
-    borderWidth: 1,
-    borderColor: appearance.line,
-    borderRadius: 14,
-    padding: 14,
-    fontSize: 16,
-    lineHeight: 25,
-    color: appearance.ink,
-    minHeight: 130,
-    maxHeight: 240,
-  },
-  explanation: { fontSize: 12, lineHeight: 21, color: appearance.muted },
   search: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 9,
-    paddingHorizontal: 13,
-    borderRadius: 13,
-    backgroundColor: appearance.background,
-    marginBottom: 8,
+    flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 12, paddingRight: 4,
+    borderRadius: 13, backgroundColor: '#F0F2F8', marginBottom: 8,
   },
-  searchInput: { flex: 1, minHeight: 48, fontSize: 16, color: appearance.ink },
-  listEmpty: {
-    fontSize: 14,
-    lineHeight: 24,
-    color: appearance.muted,
-    paddingVertical: 24,
-  },
+  searchInput: { flex: 1, minWidth: 0, minHeight: 48, paddingRight: 8, fontSize: 16, color: appearance.ink },
+  listEmpty: { fontSize: 14, lineHeight: 24, color: appearance.muted, paddingVertical: 24 },
   disabled: { opacity: 0.45 },
   pressed: { opacity: 0.7 },
 });

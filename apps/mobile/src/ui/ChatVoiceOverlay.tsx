@@ -35,7 +35,8 @@ function useRecordingLevels(enabled: boolean) {
 }
 
 /** Visual feedback only. The caller mounts this after the native recorder starts. */
-export function ChatVoiceOverlay({ seconds, cancelled, holding, composerHeight, availableHeight, fontScale, reducedMotion }: {
+export function ChatVoiceOverlay({ seconds, cancelled, holding, composerHeight, availableHeight, fontScale, reducedMotion, reviewVoiceTranscript }: {
+  reviewVoiceTranscript?: boolean;
   seconds: number;
   cancelled: boolean;
   holding: boolean;
@@ -95,7 +96,7 @@ export function ChatVoiceOverlay({ seconds, cancelled, holding, composerHeight, 
                 opacity: 0.4 + 0.6 * Math.sin((index + 1) / (levels.length + 1) * Math.PI) }]} />)}
           </View>}
           {showHint && <Text testID="chat-voice-hint" style={[styles.hint, { color: cancelling ? foreground : appearance.secondary }]}>
-            {cancelling ? '这段录音不会发送' : holding ? '松开发送，上滑取消' : '点击结束转文字'}
+            {cancelling ? '这段录音不会发送' : holding ? (reviewVoiceTranscript ? '松开转文字，上滑取消' : '松开发送，上滑取消') : '点击结束转文字'}
           </Text>}
         </View>
       </ChatRecordingMotion>

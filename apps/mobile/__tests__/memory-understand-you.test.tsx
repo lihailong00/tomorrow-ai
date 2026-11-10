@@ -1,5 +1,5 @@
 import React from 'react';
-import { Alert, FlatList, Modal, Text, TextInput } from 'react-native';
+import { Alert, FlatList, Modal, Switch, Text, TextInput } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { ApiError } from '../src/api/client';
 import { AppContextValue, AppProvider } from '../src/app/context';
@@ -7,10 +7,8 @@ import type { Memory } from '../src/domain/types';
 import { MemoriesScreen } from '../src/screens/Main';
 import { ErrorNotice } from '../src/ui/components';
 import {
-  describeMemory,
   memoryReviewPrompt,
   memoryTryPrompt,
-  selectMemoryHighlights,
 } from '../src/features/memory/memoryModel';
 
 jest.mock('../src/platform/ports', () => ({ platform: {} }));
@@ -55,7 +53,8 @@ test('memory categories filter saved facts without exposing internal provenance'
       '对话 10d8be9f-bc1f-4e09-898a-bb67f309155b · 2026-11-02T04:07:37Z\n你的原话：我体重95公斤',
   };
   const app = await setup([...samples, weight]);
-  await app.press('查看全部记忆');
+  await app.press('更多记忆操作');
+  await app.press('按细分类查找');
   await app.press('分类：个人资料');
   expect(
     app.tree.root.findAll(
@@ -64,17 +63,17 @@ test('memory categories filter saved facts without exposing internal provenance'
   ).not.toHaveLength(0);
   expect(
     app.tree.root
-      .findByType(FlatList)
+      .findAllByType(FlatList).find(node => node.props.testID === 'memory-search-results')!
       .props.data.map((item: Memory) => item.id),
   ).toEqual(['weight']);
   expect(JSON.stringify(app.text())).not.toContain('10d8be9f');
   await app.close();
 });
 
-test('legacy abnormal weight stays out of highlights and offers confirmation', async () => {
+test('legacy abnormal weight stays out of saved memories and offers confirmation', async () => {
   const pending = memory('weight', '体重为“−95kg”。');
   const app = await setup([...samples, pending]);
-  expect(selectMemoryHighlights([pending])).toHaveLength(0);
+  expect(app.text()).not.toContain('体重待确认');
   expect(JSON.stringify(app.text())).not.toContain('−95kg');
   await app.press('查看待确认的记忆');
   await app.press('查看记忆：体重待确认');
@@ -96,6 +95,7 @@ async function setup(
   const api = {
     baseUrl: 'https://example.test',
     memories: jest.fn().mockResolvedValue({ items, next_offset: null }),
+    request: jest.fn().mockResolvedValue({ enabled: true }),
     saveMemory: jest.fn(),
     deleteMemory: jest.fn().mockResolvedValue({ ok: true }),
     ...overrides,
@@ -131,13 +131,10 @@ async function setup(
       target.props.onPress();
     });
   };
+  const editorInputs = () => tree.root.findAllByType(TextInput)
+    .filter(n => n.props.accessibilityLabel === '你希望我记住什么');
   const input = async (content: string) => {
-    await act(async () =>
-      tree.root
-        .findAllByType(TextInput)
-        .find(n => n.props.accessibilityLabel === '你希望我记住什么')!
-        .props.onChangeText(content),
-    );
+    await act(async () => editorInputs()[0].props.onChangeText(content));
   };
   return {
     api,
@@ -146,33 +143,36 @@ async function setup(
     text,
     press,
     input,
+    editorInputs,
     close: async () => {
       await act(async () => tree.unmount());
     },
   };
 }
 
-test('highlights contain only saved facts, diversify three rows, and leave classification off the homepage', async () => {
-  const repeated = memory('more-style', '回复再简短一些。', 'preference');
-  const highlights = selectMemoryHighlights([
-    samples[1],
-    repeated,
-    samples[0],
-    samples[2],
-    samples[3],
-  ]);
-  expect(highlights).toHaveLength(3);
-  expect(highlights.map(item => describeMemory(item).label)).toEqual([
-    '喜欢的沟通方式',
-    '最近在忙',
-    '适合你的节奏',
-  ]);
-  const app = await setup();
-  expect(app.text()).toContain('不用每次从头说。');
-  expect(app.text()).toContain('妥啦了解的你');
-  expect(app.text()).not.toContain('偏好');
-  expect(app.text()).not.toContain('人物');
-  expect(app.text()).not.toContain('1 条待确认');
+test('the homepage shows saved memories with filters and keeps automatic memory inside settings', async () => {
+  const fact = { ...memory('fact', '周三有固定课程。'), updated_at: '2026-11-01T08:00:00Z' };
+  const app = await setup([...samples, fact]);
+  const visibleIds = () => app.tree.root.findAllByType(FlatList)
+    .find(node => node.props.testID === 'memory-understand-home')!.props.data
+    .map((item: Memory) => item.id);
+  expect(app.text()).toContain('把想留住的事记下来。');
+  expect(app.text()).toContain('最近更新');
+  expect(visibleIds()).toEqual(['fact', 'project', 'voice', 'pace', 'extra']);
+  await app.press('筛选：偏好');
+  expect(visibleIds()).toEqual(['voice', 'pace', 'extra']);
+  await app.press('筛选：目标');
+  expect(visibleIds()).toEqual(['project']);
+  await app.press('筛选：关于我');
+  expect(visibleIds()).toEqual(['fact']);
+  expect(app.tree.root.findAllByType(Switch)).toHaveLength(0);
+  expect(app.api.request).not.toHaveBeenCalled();
+  await app.press('更多记忆操作');
+  await app.press('记忆设置');
+  expect(app.tree.root.findByType(Switch).props.value).toBe(true);
+  expect(app.api.request).toHaveBeenCalledWith('/memory/preferences');
+  await app.press('关闭');
+  expect(visibleIds()).toEqual(['fact']);
   expect(app.api.memories).toHaveBeenCalledWith(undefined, {
     offset: 0,
     limit: 50,
@@ -185,14 +185,14 @@ test('empty data has a compact honest starting point without demo memories', asy
   expect(app.text()).toContain('先告诉我一件关于你的事');
   expect(app.text()).not.toContain(samples[0].content);
   await app.press('告诉我一件事');
-  expect(app.tree.root.findAllByType(TextInput)).toHaveLength(1);
-  expect(app.tree.root.findByType(TextInput).props.value).toBe('');
+  expect(app.editorInputs()).toHaveLength(1);
+  expect(app.editorInputs()[0].props.value).toBe('');
   await app.close();
 });
 
-test('single sentence creation retries the same intent and keeps the draft on failure', async () => {
-  const content = '我周三晚上有固定课程。';
-  const saved = memory('new', content);
+test('single sentence creation preserves its selected category and draft when retrying', async () => {
+  const content = '读完一本书之后做笔记。';
+  const saved = memory('new', content, 'goal');
   const app = await setup([], {
     saveMemory: jest
       .fn()
@@ -201,8 +201,9 @@ test('single sentence creation retries the same intent and keeps the draft on fa
   });
   await app.press('添加一条记忆');
   await app.input(content);
+  await app.press('分类为：目标');
   await app.press('记住这件事');
-  expect(app.tree.root.findByType(TextInput).props.value).toBe(content);
+  expect(app.editorInputs()[0].props.value).toBe(content);
   expect(
     app.tree.root
       .findAllByType(ErrorNotice)
@@ -212,7 +213,7 @@ test('single sentence creation retries the same intent and keeps the draft on fa
   expect(first).toEqual([
     expect.objectContaining({
       content,
-      kind: 'fact',
+      kind: 'goal',
       source: '用户主动添加',
       client_request_id: expect.any(String),
     }),
@@ -222,7 +223,7 @@ test('single sentence creation retries the same intent and keeps the draft on fa
   expect(app.api.saveMemory.mock.calls[1]).toEqual(first);
   expect(app.value.invalidate).toHaveBeenCalledTimes(1);
   expect(app.text()).toContain(content);
-  expect(app.tree.root.findAllByType(TextInput)).toHaveLength(0);
+  expect(app.editorInputs()).toHaveLength(0);
   await app.close();
 });
 
@@ -241,7 +242,7 @@ test('editing preserves server version and does not erase the draft after a conf
   });
   await app.press(`查看记忆：${samples[2].title}`);
   expect(app.text()).toContain(samples[2].source);
-  await app.press('改一下');
+  await app.press('修改');
   await app.input('下午更专注。');
   await app.press('保存修改');
   expect(app.api.saveMemory).toHaveBeenLastCalledWith(
@@ -252,7 +253,7 @@ test('editing preserves server version and does not erase the draft after a conf
     }),
     'pace',
   );
-  expect(app.tree.root.findByType(TextInput).props.value).toBe('下午更专注。');
+  expect(app.editorInputs()[0].props.value).toBe('下午更专注。');
   expect(app.value.invalidate).not.toHaveBeenCalled();
   await app.press('保存修改');
   expect(app.text()).toContain('下午更专注。');
@@ -313,11 +314,16 @@ test('a native delete confirmation cannot delete after its detail sheet was clos
 
 test('review and trying memory open real chat drafts without making model calls or writing memories', async () => {
   const app = await setup();
+  await app.press('更多记忆操作');
   await app.press('从对话里整理记忆，先列出候选供你确认');
   expect(app.value.navigate).toHaveBeenLastCalledWith({
     name: 'chat',
     prompt: memoryReviewPrompt,
   });
+  await app.press('私密资料：地址、银行卡、身份证');
+  expect(app.value.navigate).toHaveBeenLastCalledWith({ name: 'privateVault' });
+  await app.press('更多记忆操作');
+  await app.press('按细分类查找');
   await app.press('帮我安排明天，使用真实记忆开始对话');
   expect(app.value.navigate).toHaveBeenLastCalledWith({
     name: 'chat',
@@ -338,7 +344,7 @@ test('switching account hides the old memory and ignores a pending old save', as
   await app.press('记住这件事');
   // A pending save cannot be dismissed accidentally by Android's back button.
   await act(async () => app.tree.root.findByType(Modal).props.onRequestClose());
-  expect(app.tree.root.findByType(TextInput).props.value).toBe(
+  expect(app.editorInputs()[0].props.value).toBe(
     '旧账号的私有内容',
   );
   const otherApi = {
@@ -367,15 +373,28 @@ test('switching account hides the old memory and ignores a pending old save', as
   await app.close();
 });
 
-test('manage view searches loaded content and is clear when older pages have not loaded', async () => {
+test('homepage search combines with filters and can find results after loading another page', async () => {
+  const older = memory('older', '学习 Rust 时先做练习。', 'goal');
   const app = await setup(samples, {
-    memories: jest.fn().mockResolvedValue({ items: samples, next_offset: 50 }),
+    memories: jest.fn()
+      .mockResolvedValueOnce({ items: samples, next_offset: 50 })
+      .mockResolvedValueOnce({ items: [older], next_offset: null }),
   });
-  await app.press('查看全部记忆');
+  const visibleIds = () => app.tree.root.findAllByType(FlatList)
+    .find(node => node.props.testID === 'memory-understand-home')!.props.data
+    .map((item: Memory) => item.id);
   const search = app.tree.root
     .findAllByType(TextInput)
-    .find(n => n.props.accessibilityLabel === '搜索已加载的记忆')!;
-  await act(async () => search.props.onChangeText('不存在的事'));
+    .find(n => n.props.accessibilityLabel === '搜索记忆')!;
+  await act(async () => search.props.onChangeText('rust'));
+  expect(app.text()).toContain('搜索结果');
+  expect(visibleIds()).toEqual(['extra']);
+  await app.press('筛选：目标');
   expect(app.text()).toContain('已加载的记忆中没有匹配项，可继续加载后查找。');
+  await app.press('加载更多记忆');
+  expect(app.api.memories).toHaveBeenLastCalledWith(undefined, { offset: 50, limit: 50 });
+  expect(visibleIds()).toEqual(['older']);
+  await app.press('清空搜索');
+  expect(visibleIds()).toEqual(['project', 'older']);
   await app.close();
 });

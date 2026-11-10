@@ -50,6 +50,8 @@ services:
       INSTANCE_NAME: ${INSTANCE_NAME:-}
       INSTANCE_PUBLIC_URL: ${INSTANCE_PUBLIC_URL:-}
       REGISTRATION_POLICY: ${REGISTRATION_POLICY:-}
+      AKSHARE_MCP_URL: ${AKSHARE_MCP_URL:-}
+      AKSHARE_MCP_TOKEN: ${AKSHARE_MCP_TOKEN:-}
     volumes:
       - instance-data:/data
     networks: [private, outbound]

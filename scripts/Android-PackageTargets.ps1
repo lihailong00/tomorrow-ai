@@ -29,19 +29,21 @@ function Get-TadaAndroidBuildPlan {
     [switch]$Candidate
   )
   if ($Compact -and $BuildType -ne 'Release') { throw 'Compact packaging requires a Release build.' }
+  # A debug build can be installed for testing but must not replace the phone release.
+  $candidateOnly = $Candidate.IsPresent -or ($PackageTarget.Name -eq 'Phone' -and $BuildType -eq 'Debug')
   $variant = $BuildType.ToLowerInvariant()
   $profile = $variant + $(if ($Compact) { '-compact' } else { '' })
   $directory = $PackageTarget.ArtifactDirectory
-  if ($Candidate) { $directory += '/candidates/' + $profile }
+  if ($candidateOnly) { $directory += '/candidates/' + $profile }
   [pscustomobject]@{
     BuildType = $BuildType
     Compact = [bool]$Compact
-    Candidate = [bool]$Candidate
+    Candidate = $candidateOnly
     GradleTask = ':app:assemble' + $BuildType
     NativeTestTask = ':app:test' + $BuildType + 'UnitTest'
     BuiltApk = 'android/app/build/outputs/apk/' + $variant + '/app-' + $variant + '.apk'
     ArtifactDirectory = $directory
-    StorageReport = $(if ($Candidate) { 'packaging-storage-' + $PackageTarget.Name.ToLowerInvariant() + '-' + $profile + '-candidate.json' } else { $PackageTarget.StorageReport })
+    StorageReport = $(if ($candidateOnly) { 'packaging-storage-' + $PackageTarget.Name.ToLowerInvariant() + '-' + $profile + '-candidate.json' } else { $PackageTarget.StorageReport })
   }
 }
 

@@ -68,8 +68,8 @@ function New-Apk([string]$Directory, [int]$Code, [string]$Filename, [string]$Pac
   return $path
 }
 
-function Publish-Fixture([string]$Path, [string]$Directory) {
-  $output = @(& $script:publishScript -ApkPath $Path -OutputDirectory $Directory -AaptPath $script:fakeAapt -LockTimeoutSeconds 1)
+function Publish-Fixture([string]$Path, [string]$Directory, [switch]$ResetRollback) {
+  $output = @(& $script:publishScript -ApkPath $Path -OutputDirectory $Directory -AaptPath $script:fakeAapt -LockTimeoutSeconds 1 -ResetRollback:$ResetRollback)
   $publication = @($output | Where-Object { $_.PSObject.Properties['Published'] })
   if ($publication.Count -ne 1) { throw 'Publisher must return exactly one result object.' }
   return $publication[0]
@@ -145,6 +145,22 @@ try {
     $rollbackHash = File-Sha (Join-Path $fixture.Directory 'tada-rollback.apk')
     Publish-Fixture $fixture.Second $fixture.Directory | Out-Null
     Assert-Equal (File-Sha (Join-Path $fixture.Directory 'tada-rollback.apk')) $rollbackHash 'Identical republish replaced rollback with latest'
+  }
+
+  Invoke-Case 'new-signing-series-does-not-adopt-the-old-rollback' {
+    $fixture = New-TwoPublished 'signing-reset'
+    $directory = $fixture.Directory
+    $replacement = New-Apk $directory 3 ''
+    $replacementHash = File-Sha $replacement
+    $result = Publish-Fixture $replacement $directory -ResetRollback
+    Assert-True $result.Published 'First package of the new signing series was not published.'
+    Publish-Fixture $replacement $directory | Out-Null
+    Assert-True (-not [IO.File]::Exists((Join-Path $directory 'tada-rollback.apk'))) 'Republishing recreated the retired rollback.'
+    $metadata = Get-Content -LiteralPath (Join-Path $directory 'latest.json') -Raw | ConvertFrom-Json
+    Assert-True ($null -eq $metadata.rollback) 'Retired rollback remains in release metadata.'
+    $next = New-Apk $directory 4 ''
+    Publish-Fixture $next $directory | Out-Null
+    Assert-Equal (File-Sha (Join-Path $directory 'tada-rollback.apk')) $replacementHash 'New signing series did not retain its own rollback.'
   }
 
   Invoke-Case 'schema-one-folder-adopts-verified-old-package-as-rollback' {
@@ -618,7 +634,7 @@ exit 42
     $env:CARGO_TARGET_DIR = 'relative-cargo-cache'
     Set-Location -LiteralPath $directory
     try {
-      Assert-Throws { & $buildCopy -NodePath $node -JavaHome $java -AndroidHome $sdk -NativeBuildDirectory ('../' + $nativeName) -SkipInstall -PreserveRustTarget -EstimatedBuildBytes 0 } 'Simulated TypeScript failure was not reported.'
+      Assert-Throws { & $buildCopy -BuildType Release -NodePath $node -JavaHome $java -AndroidHome $sdk -NativeBuildDirectory ('../' + $nativeName) -SkipInstall -PreserveRustTarget -EstimatedBuildBytes 0 } 'Simulated TypeScript failure was not reported.'
       Assert-Equal (Get-Location).Path $directory 'Build failure did not restore its entry working directory'
       Assert-Equal $env:GRADLE_USER_HOME 'relative-gradle-cache' 'Relative Gradle environment was not restored after failure'
       Assert-Equal $env:CARGO_TARGET_DIR 'relative-cargo-cache' 'Relative Cargo environment was not restored after failure'

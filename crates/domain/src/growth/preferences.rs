@@ -55,7 +55,7 @@ impl Repository {
         if input
             .halo
             .as_deref()
-            .is_some_and(|h| !["classic", "sunrise"].contains(&h))
+            .is_some_and(|h| !["classic", "sunrise", "starlight"].contains(&h))
         {
             return Err(DomainError::Validation("光环类型无效".into()));
         }
@@ -88,11 +88,11 @@ impl Repository {
             prefs.paused_date = v.then_some(today);
         }
         if let Some(v) = input.halo {
-            if v == "sunrise" {
+            if v == "sunrise" || v == "starlight" {
                 let xp:i64=sqlx::query_scalar("SELECT CAST(COALESCE(SUM(points),0) AS BIGINT) FROM growth_rewards WHERE user_id=$1 AND active=1").bind(user).fetch_one(&mut *tx).await?;
-                if xp < 120 {
+                if xp < if v=="starlight" {240} else {120} {
                     return Err(DomainError::Validation(
-                        "达到成长Lv.3后可使用晨光光环".into(),
+                        if v=="starlight" {"达到成长Lv.5后可使用星光光环"} else {"达到成长Lv.3后可使用晨光光环"}.into(),
                     ));
                 }
             }

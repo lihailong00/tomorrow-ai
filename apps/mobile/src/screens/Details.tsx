@@ -243,7 +243,7 @@ export function TaskDetailScreen({ id }: { id: string }) {
                 }}
               >
                 <Text selectable style={s.body}>
-                  {task.instruction}
+                  {task.kind === 'daily_news' ? '按已订阅的主题整理近期新闻。' : task.instruction}
                 </Text>
               </Card>
             </>

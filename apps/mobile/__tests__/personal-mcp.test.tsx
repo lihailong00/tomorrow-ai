@@ -109,6 +109,7 @@ async function setup(
   const context = {
     api: { request, baseUrl: 'https://server-a.example' },
     user: { id: 'user-a' },
+    invalidate: jest.fn(),
   } as unknown as AppContextValue;
   let tree!: ReactTestRenderer;
   const render = (value: AppContextValue) => {
@@ -559,19 +560,28 @@ it('clears the token immediately on API or account change and ignores old in-fli
   await view.unmount();
 });
 
-it('shows the unsupported reason without offering a misleading connect button', async () => {
+it('hides a disabled provider entirely when the user has no saved connection', async () => {
   const view = await setup(
     connection({
       status: 'not_configured',
       unavailable_reason: '厂商暂未开放此授权方式',
     }),
   );
-  expect(view.text()).toContain('厂商暂未开放此授权方式');
+  expect(view.text()).not.toContain('厂商暂未开放此授权方式');
+  expect(view.text()).not.toContain('滴滴出行');
   expect(
     view.tree.root
       .findAllByType(Button)
       .some(value => value.props.accessibilityLabel === '连接滴滴出行账号'),
   ).toBe(false);
+  await view.unmount();
+});
+
+it('retains disabled providers only to let the user remove an existing grant', async () => {
+  const view = await setup(connection({ status: 'not_configured', has_credentials: true }));
+  expect(view.text()).toContain('滴滴出行');
+  expect(view.tree.root.findAllByType(Button).some(value => value.props.accessibilityLabel === '断开滴滴出行连接')).toBe(true);
+  expect(view.tree.root.findAllByType(Button).some(value => value.props.accessibilityLabel === '连接滴滴出行账号')).toBe(false);
   await view.unmount();
 });
 

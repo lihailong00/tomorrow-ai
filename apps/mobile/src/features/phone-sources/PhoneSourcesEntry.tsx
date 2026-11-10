@@ -87,6 +87,7 @@ function PhoneSourcesForOwner({
   const [detail, setDetail] = useState<PhoneRecord>();
   const [expanded, setExpanded] = useState<PhoneSource>();
   const [photoSettings, setPhotoSettings] = useState(false);
+  const [showWeather, setShowWeather] = useState(false);
   const [busy, setBusy] = useState('');
   const busyRef = useRef(false);
   const refreshPending = useRef(false);
@@ -535,19 +536,15 @@ function PhoneSourcesForOwner({
           <ScrollView
             ref={scroll}
             contentOffset={{ x: 0, y: 0 }}
-            contentContainerStyle={s.content}
+            style={ui.scroll}
+            contentContainerStyle={ui.content}
             keyboardShouldPersistTaps="handled"
           >
-            <Text style={s.title}>从你的生活开始</Text>
-            <Text style={s.subtitle}>
-              选好资料，妥啦就能帮你整理安排。先在手机上读取和预览，你选择交给
-              AI 的内容才会发送。
-            </Text>
-            <Text style={[s.small, s.topGap]}>
-              本机时区：{status?.timezone || '读取中'} · 邮箱可以以后单独连接
-            </Text>
+            <Text accessibilityRole="header" style={ui.sectionTitle}>选择资料来源</Text>
+            <Text style={s.small}>先在手机上读取和预览。你主动交给 AI 的资料才会发送。</Text>
             <ErrorNotice message={error} />
             {notice ? <Notice>{notice}</Notice> : null}
+            <View style={ui.sourceGroup}>
             {phoneSourceIds.map(source => {
               const details = sourceDetails[source];
               const snapshot = snapshots[source];
@@ -556,7 +553,7 @@ function PhoneSourcesForOwner({
                   ? snapshot?.items
                   : snapshot?.items.slice(0, 3);
               return (
-                <Card key={source} style={{ marginTop: 14 }}>
+                <View key={source} style={ui.sourceItem}>
                   <Pressable
                     accessibilityRole="checkbox"
                     accessibilityLabel={`连接${details.title}`}
@@ -587,11 +584,9 @@ function PhoneSourcesForOwner({
                     <View style={{ flex: 1 }}>
                       <Text style={s.cardTitle}>{details.title}</Text>
                       <Text style={s.small}>{details.detail}</Text>
+                      <Text style={s.small}>{details.scope}</Text>
                     </View>
                   </Pressable>
-                  <Text style={[s.small, { marginTop: 10 }]}>
-                    {details.scope}
-                  </Text>
                   {failures[source] ? (
                     <Text
                       style={[s.small, { color: colors.danger, marginTop: 8 }]}
@@ -792,13 +787,11 @@ function PhoneSourcesForOwner({
                         </Button>
                       ) : null}
                     </>
-                  ) : (
+                  ) : status?.permissions[source] === 'blocked' ? (
                     <Text style={[s.small, { marginTop: 10 }]}>
-                      {status?.permissions[source] === 'blocked'
-                        ? '系统尚未授予权限，可在应用权限中检查。'
-                        : '尚未读取'}
+                      系统尚未授予权限，可在应用权限中检查。
                     </Text>
-                  )}
+                  ) : null}
                   {source === 'photos' && (
                     <Button
                       variant="ghost"
@@ -810,32 +803,25 @@ function PhoneSourcesForOwner({
                         : '设置图片理解与相册检索'}
                     </Button>
                   )}
-                </Card>
+                </View>
               );
             })}
-            <View style={{ marginTop: 18 }}>
-              <Button
-                disabled={
-                  !loaded || !selected.length || Boolean(busy) || photoSettings
-                }
-                loading={Boolean(busy)}
-                onPress={() => {
-                  void readSources(selected, true);
-                }}
-              >
-                {busy || '授权并在本机整理'}
-              </Button>
             </View>
             {photoSettings && (
               <Text style={[s.small, s.topGap]}>
                 请先完成并收起图片理解设置，再读取其他来源。
               </Text>
             )}
-            <Text style={[s.small, s.topGap]}>
-              首次读取后优先展示本机缓存，资料变化时后台增量更新，并低频核对遗漏变化。记录加密保存在手机本地；取消勾选会停止该来源并清除本机缓存，退出账号会清除全部本机资料缓存。系统权限可在手机设置中撤回。
-            </Text>
             {photoSettings && <PhotoIndexSettings />}
-            <PhoneWeatherCard />
+            <Text style={[s.small, s.topGap]}>
+              记录加密保存在手机，资料变化时会更新。取消选择或退出账号会清除相应缓存，可在手机设置中撤回权限。
+            </Text>
+            <Pressable accessibilityRole="button" accessibilityState={{ expanded: showWeather }} style={ui.disclosure}
+              onPress={() => setShowWeather(value => !value)}>
+              <Text style={ui.link}>{showWeather ? '收起天气与出行设置' : '天气与出行设置'}</Text>
+              <Text style={s.small}>{status?.timezone || '本机时区'}</Text>
+            </Pressable>
+            {showWeather && <PhoneWeatherCard />}
             <Card style={{ marginTop: 20 }}>
               <Text style={s.cardTitle}>从所选资料发现待办</Text>
               <Text style={[s.small, s.topGap]}>
@@ -899,8 +885,8 @@ function PhoneSourcesForOwner({
                 连接健康记录
               </Button>
             </Card>
-            <View style={{ height: 20 }} />
             <Button
+              variant="ghost"
               disabled={Boolean(busy)}
               onPress={() => {
                 void close();
@@ -909,6 +895,13 @@ function PhoneSourcesForOwner({
               完成，开始使用妥啦
             </Button>
           </ScrollView>
+          <View style={ui.footer}>
+            <Text style={s.small}>{photoSettings ? '收起图片理解设置后可继续' : selected.length ? `已选择 ${selected.length} 项资料` : '先选择要整理的资料'}</Text>
+            <Button disabled={!loaded || !selected.length || Boolean(busy) || photoSettings} loading={Boolean(busy)}
+              onPress={() => { void readSources(selected, true); }}>
+              {busy || '授权并在本机整理'}
+            </Button>
+          </View>
         </SafeAreaView>
       </Modal>
     </>
@@ -916,6 +909,13 @@ function PhoneSourcesForOwner({
 }
 const ui = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.background },
+  scroll: { flex: 1 },
+  content: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 16 },
+  sectionTitle: { fontSize: 23, fontWeight: '600', color: colors.ink, marginBottom: 6 },
+  sourceGroup: { backgroundColor: colors.surface, borderRadius: 18, marginTop: 12, paddingHorizontal: 14 },
+  sourceItem: { paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
+  disclosure: { minHeight: 44, marginTop: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  footer: { backgroundColor: colors.surface, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line, paddingHorizontal: 20, paddingVertical: 10, gap: 4 },
   header: {
     paddingHorizontal: 22,
     minHeight: 60,

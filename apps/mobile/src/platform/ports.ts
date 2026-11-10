@@ -18,6 +18,7 @@ export interface LocalFile {
   size?: number;
   duration_ms?: number;
 }
+export type RecentChatImage = { id: string; uri: string; name: string };
 export type NotificationPermissionStatus = 'granted' | 'requestable' | 'blocked';
 interface NativePort {
   secureGet(key: string): Promise<string | null>;
@@ -28,6 +29,8 @@ interface NativePort {
   removeSecureItem(key: string): Promise<void>;
   pickDocument(): Promise<LocalFile | null>;
   pickImage(): Promise<LocalFile | null>;
+  recentChatImages(): Promise<RecentChatImage[]>;
+  pickRecentChatImage(id: string): Promise<LocalFile | null>;
   capturePhoto(): Promise<LocalFile | null>;
   readTextFile(uri: string): Promise<string>;
   prepareChatImage(uri: string, mimeType: string, name: string): Promise<LocalFile>;
@@ -41,6 +44,8 @@ interface NativePort {
   openNotificationSettings(): Promise<void>;
   clearCache(): Promise<void>;
   showNotification(title: string, body: string): Promise<void>;
+  updateRideNotification(status: string, matching: boolean): Promise<void>;
+  configureDailyNewsNotifications(server: string, userId: string, enabled: boolean): Promise<void>;
 }
 const native = NativeModules.TomorrowPlatform as
   | Partial<NativePort>
@@ -57,6 +62,8 @@ const missing = () =>
 const SESSION_KEY = 'tomorrow.session.v1';
 const PREFS_KEY = 'tomorrow.preferences.v1';
 export interface Preferences {
+  reviewVoiceTranscript?: boolean;
+  continuationSuggestions?: boolean;
   serverUrl: string;
   onboarded: boolean;
   serverUrlCustomized?: boolean;
@@ -83,6 +90,7 @@ export const platform = {
   hasRecorder: Boolean(native?.startRecording && native?.stopRecording),
   hasRecordingLevel: typeof native?.getRecordingLevel === 'function',
   hasCamera: Boolean(native?.capturePhoto),
+  hasRecentChatImages: Boolean(native?.recentChatImages && native?.pickRecentChatImage),
   async getSystemFontScale(): Promise<number | null> {
     if (!native?.getSystemFontScale) return null;
     try {
@@ -111,6 +119,8 @@ export const platform = {
         connectionError: '本机服务设置不完整，请重新选择服务器。' };
     }
     const preferences: Preferences = {
+      ...(saved.continuationSuggestions === false ? { continuationSuggestions: false } : {}),
+      ...(typeof saved.reviewVoiceTranscript === 'boolean' ? { reviewVoiceTranscript: saved.reviewVoiceTranscript } : {}),
       serverUrl:
         typeof saved.serverUrl === 'string'
           ? saved.serverUrl
@@ -182,6 +192,13 @@ export const platform = {
     if (native?.pickImage) return native.pickImage();
     return platform.pickDocument();
   },
+  async recentChatImages(): Promise<RecentChatImage[]> {
+    return native?.recentChatImages ? native.recentChatImages() : [];
+  },
+  async pickRecentChatImage(id: string): Promise<LocalFile | null> {
+    if (!native?.pickRecentChatImage) throw missing();
+    return native.pickRecentChatImage(id);
+  },
   async capturePhoto(): Promise<LocalFile | null> {
     if (!native?.capturePhoto) throw new Error('此设备尚未接入拍照，可从“＋”选择图片。');
     return native.capturePhoto();
@@ -223,6 +240,10 @@ export const platform = {
     }
     return native.requestNotifications();
   },
+  async notificationPermissionStatus(): Promise<NotificationPermissionStatus | null> {
+    const status = await native?.notificationPermissionStatus?.();
+    return status === 'granted' || status === 'blocked' || status === 'requestable' ? status : null;
+  },
   async manageNotificationPermission(): Promise<'granted' | 'denied' | 'blocked' | 'settings'> {
     const status = await native?.notificationPermissionStatus?.();
     if (status === 'blocked') {
@@ -244,6 +265,14 @@ export const platform = {
       throw missing();
     }
     await native.showNotification(title, body);
+  },
+  supportsDailyNewsNotifications: () => Boolean(native?.configureDailyNewsNotifications),
+  async configureDailyNewsNotifications(server: string, userId: string, enabled: boolean) {
+    if (!native?.configureDailyNewsNotifications) throw missing();
+    await native.configureDailyNewsNotifications(server, userId, enabled);
+  },
+  async updateRideNotification(status: string, matching = false) {
+    await native?.updateRideNotification?.(status, matching);
   },
   isForeground: () => AppState.currentState === 'active',
   onForeground(listener: () => void): () => void {

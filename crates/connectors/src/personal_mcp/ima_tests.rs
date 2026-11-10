@@ -71,12 +71,11 @@ async fn discovery_uses_real_authenticated_read_probe_and_sensitive_headers() {
     )])
     .await;
     let tools = discover_with(&api, &credentials()).await.unwrap();
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 11);
     assert!(
         tools
             .iter()
-            .all(|t| is_read_only(t["name"].as_str().unwrap())
-                && t["annotations"]["readOnlyHint"] == true)
+            .all(|t| t["annotations"]["readOnlyHint"] == is_read_only(t["name"].as_str().unwrap()))
     );
     let calls = f.requests.lock().unwrap();
     assert_eq!(calls.len(), 1);
@@ -193,6 +192,11 @@ fn all_advertised_tools_have_only_verified_fixed_paths_and_bounded_schemas() {
             json!({"media_id":"media-1"}),
             "openapi/wiki/v1/get_media_info",
         ),
+        (
+            "ima_create_note",
+            json!({"title":"纪要","content":"整理后的内容"}),
+            "openapi/note/v1/import_doc",
+        ),
     ];
     for (name, args, path) in cases {
         let (actual, body) = request_for(name, &args).unwrap();
@@ -202,7 +206,7 @@ fn all_advertised_tools_have_only_verified_fixed_paths_and_bounded_schemas() {
         extra["url"] = json!("http://127.0.0.1/private");
         assert!(validate_arguments(name, &extra).is_err());
         assert!(
-            tools()
+            tool_catalog()
                 .iter()
                 .any(|t| t["name"] == name && t["inputSchema"]["additionalProperties"] == false)
         );
@@ -228,6 +232,83 @@ fn all_advertised_tools_have_only_verified_fixed_paths_and_bounded_schemas() {
         .is_err()
     );
     assert!(request_for("ima_search_notes", &json!({"query":"q","search_type":2})).is_err());
+    assert!(request_for("ima_search_notes", &json!({"query":"q","start":0,"end":50})).is_err());
+}
+
+#[tokio::test]
+async fn media_notes_return_paginated_text_without_temporary_access_metadata() {
+    let content = "会".repeat(CONTENT_PAGE) + "议结论";
+    let media = json!({"code":0,"data":{"media_type":11,"notebook_ext_info":{"notebook_id":"note-1"},"url_info":{"url":"https://private.invalid/x","headers":{"Authorization":"temporary"}}}});
+    let note = json!({"code":0,"data":{"content":content}});
+    let (api, f, task) = fixture(vec![
+        (StatusCode::OK, media.to_string()),
+        (StatusCode::OK, note.to_string()),
+        (StatusCode::OK, media.to_string()),
+        (StatusCode::OK, note.to_string()),
+    ])
+    .await;
+    let first = call_with(
+        &api,
+        &credentials(),
+        "ima_get_media",
+        json!({"media_id":"media-1"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        first["structuredContent"]["data"]["next_offset"],
+        CONTENT_PAGE
+    );
+    assert!(!first.to_string().contains("temporary"));
+    let second = call_with(
+        &api,
+        &credentials(),
+        "ima_get_media",
+        json!({"media_id":"media-1","offset":CONTENT_PAGE}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second["structuredContent"]["data"]["content"], "议结论");
+    assert_eq!(second["structuredContent"]["data"]["is_end"], true);
+    assert_eq!(f.requests.lock().unwrap()[1].3["note_id"], "note-1");
+    task.abort();
+}
+
+#[tokio::test]
+async fn resource_rejection_is_not_a_reconnect_and_writes_need_a_real_receipt() {
+    let (api, f, task) = fixture(vec![
+        (StatusCode::OK, json!({"code":220030}).to_string()),
+        (StatusCode::OK, json!({"code":0,"data":{}}).to_string()),
+        (
+            StatusCode::OK,
+            json!({"code":0,"data":{"note_id":"new-note"}}).to_string(),
+        ),
+    ])
+    .await;
+    let rejection = call_with(
+        &api,
+        &credentials(),
+        "ima_get_media",
+        json!({"media_id":"no-access"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(rejection.code, "ima_resource_forbidden");
+    let args = json!({"title":"纪要","content":"未决事项"});
+    assert!(
+        call_with(&api, &credentials(), "ima_create_note", args.clone())
+            .await
+            .is_err()
+    );
+    let result = call_with(&api, &credentials(), "ima_create_note", args)
+        .await
+        .unwrap();
+    assert_eq!(result["structuredContent"]["data"]["note_id"], "new-note");
+    assert_eq!(
+        f.requests.lock().unwrap()[2].3,
+        json!({"content_format":1,"content":"# 纪要\n\n未决事项"})
+    );
+    task.abort();
 }
 
 #[tokio::test]

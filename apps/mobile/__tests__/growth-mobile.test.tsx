@@ -159,6 +159,14 @@ function apiFixture(initial = todo()) {
         return clone(prefs);
       }
       if (path === '/growth/summary') return clone(summary(rewards));
+      if (path === '/growth/journeys') return { active: null, past: [] };
+      if (path.startsWith('/growth/history?')) {
+        const all = summary(rewards);
+        return { period: path.match(/period=([^&]+)/)?.[1], action_count: all.week.records.length,
+          active_days: all.week.active_days, learning_actions: all.week.learning_actions,
+          exercise_minutes: all.week.exercise_minutes, total_xp: all.total_xp,
+          records: all.week.records.map(reward => ({ reward, note: null })), next_offset: null };
+      }
       if (path.startsWith('/growth/todos/'))
         return {
           reward: clone(
@@ -273,6 +281,10 @@ const button = (tree: ReactTestRenderer, label: string) =>
     .find(node => [node.props.children].flat().join('') === label)!;
 const label = (tree: ReactTestRenderer, value: string) =>
   tree.root.findAll(node => node.props.accessibilityLabel === value)[0];
+async function openDailyActions(tree: ReactTestRenderer) {
+  await act(async () => label(tree, '更多事项功能').props.onPress());
+  await act(async () => label(tree, '每日小行动').props.onPress());
+}
 async function mount(ui: React.ReactNode, api: unknown, owner = 'owner') {
   const value = context(api, owner);
   let tree!: ReactTestRenderer;
@@ -387,6 +399,7 @@ test('suggestions use the actual accepted Todo and do not duplicate a referenced
   expect(app.tree.root.findAllByType(FlatList)).toHaveLength(1);
   expect(texts(app.tree).match(/唯一的真实待办/g)).toHaveLength(1);
   expect(texts(app.tree)).toContain('10月30日 · 周五');
+  await openDailyActions(app.tree);
   await act(async () =>
     label(app.tree, '开始建议：唯一的真实待办').props.onPress(),
   );
@@ -434,8 +447,9 @@ test('rest keeps unaccepted existing mail visible and accepted learning reachabl
     ],
   });
   const app = await mount(<TodosScreen />, api.api);
-  expect(texts(app.tree)).toContain('今天留点空白也可以');
   expect(texts(app.tree).match(/休息时仍在的邮件/g)).toHaveLength(1);
+  await openDailyActions(app.tree);
+  expect(texts(app.tree)).toContain('今天留点空白也可以');
   expect(
     api.api.request.mock.calls.filter(call => call[0] === '/daily-plan/ensure'),
   ).toHaveLength(0);
@@ -469,6 +483,7 @@ test('returning on the next server-local day replaces yesterday rest plan withou
       return () => {};
     });
   const app = await mount(<TodosScreen />, api.api);
+  await openDailyActions(app.tree);
   expect(texts(app.tree)).toContain('今天留点空白也可以');
   api.setPrefs(preferences({ paused_today: false }));
   serverDate = '2026-10-31';
@@ -524,6 +539,7 @@ test('an unknown daily ensure acknowledgement replays only on its server day and
   const attempts = () =>
     api.api.request.mock.calls.filter(call => call[0] === '/daily-plan/ensure');
   expect(attempts()).toHaveLength(1);
+  await openDailyActions(app.tree);
   await act(async () => button(app.tree, '准备今天的建议').props.onPress());
   expect(attempts()).toHaveLength(2);
   expect(attempts()[1][2]).toEqual(attempts()[0][2]);
@@ -551,6 +567,7 @@ test('failed generation with no safe retry never exposes a second model admissio
     items: [],
   });
   const app = await mount(<TodosScreen />, api.api);
+  await openDailyActions(app.tree);
   expect(texts(app.tree)).toContain('本次准备结果还未确认');
   expect(button(app.tree, '重新准备今天的建议')).toBeUndefined();
   expect(button(app.tree, '刷新准备状态')).toBeDefined();
@@ -578,6 +595,7 @@ test('uncertain daily retry reuses its intent until a fresh failed plan explicit
     return original(path, method, body);
   });
   const app = await mount(<TodosScreen />, api.api);
+  await openDailyActions(app.tree);
   const retry = () => button(app.tree, '重新准备今天的建议').props.onPress();
   await act(async () => retry());
   await act(async () => retry());

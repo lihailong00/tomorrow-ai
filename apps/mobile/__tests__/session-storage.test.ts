@@ -26,6 +26,21 @@ beforeEach(() => {
 });
 
 describe('cloud service defaults', () => {
+  it('keeps the explicit choice to send voice transcripts automatically across reloads', async () => {
+    const saved = { serverUrl: defaultServerUrl, onboarded: true, reviewVoiceTranscript: false };
+    await platform.savePreferences(saved);
+    const [, persisted] = (AsyncStorage.setItem as jest.Mock).mock.calls[0];
+    (AsyncStorage.getItem as jest.Mock).mockResolvedValue(persisted);
+    expect(await platform.loadPreferences()).toEqual(saved);
+  });
+  it('keeps continuation suggestions disabled across reloads without changing the selected server', async () => {
+    const saved={serverUrl:'https://private.example.test',onboarded:true,serverUrlCustomized:true,continuationSuggestions:false};
+    (AsyncStorage.getItem as jest.Mock).mockResolvedValue(JSON.stringify(saved));
+    expect(await platform.loadPreferences()).toEqual(saved);
+    await platform.savePreferences(saved);
+    expect(AsyncStorage.setItem).toHaveBeenCalledWith('tomorrow.preferences.v1',JSON.stringify(saved));
+    expect(NativeModules.TomorrowPlatform.secureRemove).not.toHaveBeenCalled();
+  });
   it('uses the HTTPS cloud service on a fresh installation', async () => {
     expect(await platform.loadPreferences()).toEqual({
       serverUrl: defaultServerUrl,

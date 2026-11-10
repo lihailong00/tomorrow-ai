@@ -1,6 +1,6 @@
 import { addChatStreamMock } from '../test/chatStreamMock';
 import React from 'react';
-import { Keyboard, ScrollView, StyleSheet, Text, TextInput } from 'react-native';
+import { Keyboard, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { act, create, ReactTestRenderer } from 'react-test-renderer';
 import { ChatScreen, createChatEntryState } from '../src/screens/Chat';
 import { ChatVoiceOverlay } from '../src/ui/ChatVoiceOverlay';
@@ -44,7 +44,7 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
-async function setup() {
+async function setup(preferences: { reviewVoiceTranscript?: boolean } = { reviewVoiceTranscript: false }) {
   const api = {
     capabilities: jest
       .fn()
@@ -68,14 +68,14 @@ async function setup() {
         },
       }),
   };
-  addChatStreamMock(api);
+  const { chatStream } = addChatStreamMock(api);
   let navigation!: ReturnType<typeof useRouteStack>;
   let chatState!: ReturnType<typeof createChatEntryState>;
   function Harness({ client }: { client: typeof api }) {
     navigation = useRouteStack(client);
     const route = navigation.entry.route;
     return (
-      <AppProvider value={{ api: client, invalidate: jest.fn(), formatDate: () => '' } as unknown as AppContextValue}>
+      <AppProvider value={{ api: client, preferences, invalidate: jest.fn(), formatDate: () => '' } as unknown as AppContextValue}>
         <React.Fragment key={navigation.entry.key}>
           {route.name === 'chat' ? <ChatScreen
             conversationId={route.conversationId}
@@ -100,6 +100,7 @@ async function setup() {
     )[0];
   return {
     api,
+    chatStream,
     state: () => chatState,
     tree: () => tree,
     value: () => tree.root.findByType(TextInput).props.value,
@@ -135,10 +136,11 @@ async function setup() {
     },
     button: async (label: string) => {
       await act(async () => {
-        await tree.root
+        const control = tree.root
           .findAllByType(Button)
-          .find(n => n.props.children === label)!
-          .props.onPress();
+          .find(n => n.props.children === label) ?? tree.root.findAll(n =>
+            n.props.accessibilityLabel === (label === '重试' ? '重试回复' : label) && typeof n.props.onPress === 'function')[0];
+        await control.props.onPress();
       });
     },
     buttonLabels: () => tree.root.findAllByType(Button).map(n => n.props.children),
@@ -170,8 +172,8 @@ async function hold(app: Awaited<ReturnType<typeof setup>>) {
   await act(async () => gestureNode(app).props.onResponderGrant(event(200)));
 }
 
-test('hold release transcribes once and automatically sends its text once', async () => {
-  const app = await setup(); await hold(app);
+test('by default hold release transcribes once and automatically sends its text once', async () => {
+  const app = await setup({}); await hold(app);
   await act(async () => { gestureNode(app).props.onResponderRelease(); });
   expect(platform.startRecording).toHaveBeenCalledTimes(1);
   expect(platform.stopRecording).toHaveBeenCalledTimes(1);
@@ -180,6 +182,64 @@ test('hold release transcribes once and automatically sends its text once', asyn
   expect(app.api.chat).toHaveBeenCalledTimes(1);
   expect(app.api.chat).toHaveBeenCalledWith('明天下午提醒我开会。', undefined, expect.any(String), []);
   expect(app.text()).not.toContain('voice.m4a'); await app.unmount();
+});
+
+test.each(['语音', '图片'])('%s发出后，AI 仍在回答时可以修改原消息', async source => {
+  const app = await setup();
+  let finish!: () => void;
+  const reply = new Promise<void>(resolve => { finish = resolve; });
+  app.chatStream.mockImplementationOnce(async (intent, receive) => {
+    const question = { id: 'submitted', conversation_id: 'c', role: 'user',
+      content: intent.message, created_at: '2026-11-09T05:57:00Z' };
+    receive({ id: 1, event: 'accepted', data: { conversation_id: 'c', user_message: question, message_id: 'reply' } });
+    receive({ id: 2, event: 'text_delta', data: { delta: '正在生成的回复' } });
+    await reply;
+  });
+  const measure = jest.spyOn(View.prototype, 'measureInWindow').mockImplementation(callback => callback(160, 400, 200, 50));
+  try {
+    if (source === '语音') {
+      await hold(app);
+      await act(async () => { gestureNode(app).props.onResponderRelease(); });
+    } else {
+      await app.input('帮我看看图片');
+      await app.press('选择附件');
+      await app.start('发送消息');
+    }
+    const snapshot = app.state().getSnapshot();
+    expect(snapshot.sending).toBe(true);
+    const sent = snapshot.messages.find(message => message.id === 'submitted')!;
+    const bubble = app.tree().root.findAll(n =>
+      n.props.testID === `chat-message-${sent.client_key}` && typeof n.props.onLongPress === 'function')[0];
+    await act(async () => bubble.props.onLongPress({ nativeEvent: { pageX: 340, pageY: 620 } }));
+    const edit = app.tree().root.findAll(n => n.props.accessibilityLabel === '修改' && typeof n.props.onPress === 'function')[0];
+    expect(edit.props.disabled).toBe(false);
+    await app.press('修改');
+    expect(app.value()).toBe(sent.content);
+    await app.input('更正后的问题');
+    expect(app.value()).toBe('更正后的问题');
+    expect(app.state().getSnapshot().sending).toBe(true);
+    expect(app.chatStream).toHaveBeenCalledTimes(1);
+  } finally {
+    await app.unmount();
+    finish();
+    measure.mockRestore();
+  }
+});
+
+test('the review preference fills a long transcript for correction before sending', async () => {
+  const app = await setup({ reviewVoiceTranscript: true }); await hold(app);
+  expect(gestureNode(app).props.accessibilityLabel).toBe('松开转文字');
+  const transcript = '我想把这段转写完整地保留在输入框里，检查清楚之后再点击发送。';
+  app.api.transcribe.mockResolvedValueOnce({ text: transcript });
+  await act(async () => { gestureNode(app).props.onResponderRelease(); });
+  expect(app.value()).toBe(transcript);
+  expect(StyleSheet.flatten(app.tree().root.findByType(TextInput).props.style).width).toBe('100%');
+  expect(app.api.chat).not.toHaveBeenCalled();
+  await app.input('明天上午提醒我开会。');
+  await app.press('发送消息');
+  expect(app.api.chat).toHaveBeenCalledTimes(1);
+  expect(app.api.chat).toHaveBeenCalledWith('明天上午提醒我开会。', undefined, expect.any(String), []);
+  await app.unmount();
 });
 
 test('compact recording hides secondary tools without remounting the held control or losing the draft', async () => {
@@ -195,7 +255,7 @@ test('compact recording hides secondary tools without remounting the held contro
   expect(StyleSheet.flatten(secondary.props.style).display).toBe('none');
   for (const label of ['拍照', '选择附件', '切换文字输入']) {
     const tool = app.tree().root.findAll(n => n.props.accessibilityLabel === label && typeof n.props.onPress === 'function')[0];
-    expect(StyleSheet.flatten(tool.props.style).display).toBe('none');
+    expect(tool).toBeUndefined();
   }
   const composer = app.tree().root.findAllByType(ScrollView).find(n => n.props.testID === 'chat-composer-scroll')!;
   expect(composer.props.scrollEnabled).toBe(false);
@@ -212,6 +272,13 @@ test('compact recording hides secondary tools without remounting the held contro
   expect(gestureNode(app)).toBe(beforeHold);
   expect(app.api.transcribe).not.toHaveBeenCalled();
   expect(app.tree().root.findAllByType(ScrollView).find(n => n.props.testID === 'chat-composer-scroll')!.props.scrollEnabled).toBe(true);
+  await app.press('切换文字输入');
+  for (const label of ['拍照', '选择附件', '切换语音输入', '发送消息']) {
+    const tool = app.tree().root.findAll(n => n.props.accessibilityLabel === label && typeof n.props.onPress === 'function')[0];
+    expect(tool.props.disabled).toBe(false);
+  }
+  expect(app.tree().root.findByType(TextInput)).toBe(input);
+  expect(app.value()).toBe('已有草稿');
   await app.unmount();
 });
 

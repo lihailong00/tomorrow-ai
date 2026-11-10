@@ -10,7 +10,7 @@ const INTERNAL = new Set(['list_mcp_connections', 'list_mcp_tools', 'call_mcp_to
 const TOPICS = [
   [/吃|饭|午餐|晚餐|早餐|餐饮|套餐|外卖|咖啡|food|meal|coffee/iu, '餐饮 门店 套餐 菜单 价格 优惠 活动 营养 咖啡 meal menu store price coupon'],
   [/算价|核价|报价|价格|多少钱|price|quote/iu, '价格 算价 报价 预估 price calculate estimate quote'],
-  [/附近|周边|门店|地址|定位|nearby|store|location/iu, '附近 门店 地址 定位 地点 nearby store location address'],
+  [/附近|周边|门店|地址|定位|nearby|store|location/iu, '附近 周边 地图 门店 地址 定位 地点 nearby map store location address'],
   [/出行|打车|叫车|车费|路线|导航|怎么去|ride|route|taxi/iu, '出行 地图 地点 路线 车费 预估 导航 route estimate location'],
   [/旅行|旅游|出差|航班|机票|酒店|flight|hotel|travel/iu, '旅行 出行 航班 机票 酒店 查询 flight hotel travel search'],
   [/笔记|知识库|日记|文章|note|document|知识/iu, '笔记 知识库 文档 搜索 读取 note document search read'],
@@ -71,12 +71,22 @@ export class ToolSearchSession {
   private readonly points = new Set<string>();
   private searches = 0;
   constructor(private readonly definitions: readonly SearchDefinition[], private readonly discover: Discover, coordinates: readonly {latitude:number;longitude:number}[] = []) {
-    for(const name of ['list_memories','get_memory','list_tasks','get_task']) {
+    for(const name of ['list_memories','get_memory','list_tasks','get_task','request_location','ask_user_choice','inspect_app_permissions','open_system_settings','prepare_personal_tool','read_github_repository']) {
       const definition=definitions.find(t=>t.name===name);if(definition)this.activate(definition);
     }
     for (const point of coordinates) this.points.add(`${point.longitude.toFixed(5)},${point.latitude.toFixed(5)}`);
   }
   get loaded(): SearchDefinition[] { return [...this.active.values()]; }
+  primeReadTools(queries: readonly string[]): void {
+    const readable = this.definitions.filter(tool => !INTERNAL.has(tool.name) &&
+      tool.name !== 'read_integration' && /^(?:list|get|read|search|find|fetch)_/.test(tool.name));
+    for (const query of queries) {
+      const ranked = readable.map(tool => ({ tool, rank: score(query, tool.name, tool.description) }))
+        .sort((a, b) => b.rank - a.rank);
+      const cutoff = Math.max(3, (ranked[0]?.rank ?? 0) * 0.6);
+      for (const { tool } of ranked.filter(item => item.rank >= cutoff).slice(0, 2)) this.activate(tool);
+    }
+  }
   private activate(definition: SearchDefinition): boolean {
     if (this.active.has(definition.name)) return true;
     if (this.active.size >= 32 || JSON.stringify([...this.loaded,definition]).length > 48000) {this.loadingLimited=true;return false;}
@@ -91,7 +101,7 @@ export class ToolSearchSession {
   }
   markAttempt(name: string, args: unknown): void {
     const call = this.canonical(name, args);
-    if (call.name === 'call_mcp_tool' && object(call.arguments) && typeof call.arguments.provider === 'string') {
+    if (['call_mcp_tool', 'prepare_personal_tool'].includes(call.name) && object(call.arguments) && typeof call.arguments.provider === 'string') {
       this.attemptedProviders.add(call.arguments.provider);
     }
     if (call.name === 'read_integration' && object(call.arguments) && typeof call.arguments.provider === 'string') {
@@ -106,13 +116,26 @@ export class ToolSearchSession {
   }
   validateCall(name: string, args: unknown): string | undefined {
     const call=this.canonical(name,args);
-    if (call.name!=='read_integration' || !object(call.arguments) || call.arguments.provider!=='amap' || !object(call.arguments.query) || call.arguments.query.operation!=='route') return;
+    if (call.name!=='read_integration' || !object(call.arguments) || call.arguments.provider!=='amap' || !object(call.arguments.query)) return;
+    if (call.arguments.query.operation === 'nearby' && call.arguments.query.location !== undefined) {
+      const point = this.point(call.arguments.query.location);
+      if (!point || !this.points.has(point)) return '周边搜索中心必须来自本轮已验证位置或高德真实地点查询。请用已验证的高德坐标或传入用户提供的地址。';
+    }
+    if (call.arguments.query.operation !== 'route') return;
     for (const field of ['origin','destination']) {
       const point=this.point(call.arguments.query[field]);
       if (!point || !this.points.has(point)) return '路线的起点和终点必须来自本轮已验证位置、用户明确提供的坐标或高德真实地点查询。请先搜索地名取得坐标，不要猜测坐标。';
     }
   }
   observeResult(name: string,args:unknown,result:unknown): void {
+    if (name === 'request_location' && object(result) && result.status === 'answered' && object(result.location)) {
+      for (const location of [result.location, result.location.map_coordinates]) {
+        if (!object(location)) continue;
+        const point = this.point(`${location.longitude},${location.latitude}`);
+        if (point) this.points.add(point);
+      }
+      return;
+    }
     if (name!=='read_integration' || !object(args) || args.provider!=='amap' || !object(args.query) || !['search','geocode'].includes(String(args.query.operation))) return;
     let remaining=1000;
     const visit=(value:unknown,depth=0)=>{
@@ -145,7 +168,9 @@ export class ToolSearchSession {
       !Number.isInteger(offset) || offset<0 || offset>256 || (offset>0 && !provider)) throw new Error('invalid tool search');
     if (++this.searches > 12) return { error: 'discovery_limit', message: '工具检索已达本轮上限，请使用已发现工具或如实说明缺少的能力。' };
     const services = await this.inspect();
-    const writing=/创建|新增|修改|删除|取消|记住|设置|安排|添加|更新|暂停|保存|\b(?:create|update|delete|save|add|cancel|set)\b/iu.test(query.replace(/(?:已|曾经|之前)?保存(?:的|过的|过)/gu,''));
+    const namedIma = provider === 'ima' || /\bima\b/i.test(query);
+    const writing=/创建|新增|修改|删除|取消|记住|设置|安排|添加|更新|暂停|保存|\b(?:create|update|delete|save|add|cancel|set)\b/iu.test(query.replace(/(?:已|曾经|之前)?保存(?:的|过的|过)/gu,'')) ||
+      (namedIma && /存成|存到|存进|记到|写入/u.test(query));
     const ranked = services.filter(s => s.status === 'connected').map(s => ({ service: s, score: score(query, `${s.id} ${s.name}`, s.description) }))
       .filter(s => s.score > 0).sort((a,b) => b.score-a.score);
     const business = this.definitions.filter(t => !INTERNAL.has(t.name)).map(t => {
@@ -155,8 +180,10 @@ export class ToolSearchSession {
       return {definition:t,relevance,writeTool,score:relevance+(writing?(writeTool?6:0):(readTool?6:0))};
     }).filter(item=>item.relevance>0 && (writing || !item.writeTool)).sort((a,b)=>b.score-a.score);
     const localRelevance=business.filter(item=>!['read_integration','web_search','web_fetch'].includes(item.definition.name)).reduce((max,item)=>Math.max(max,item.relevance),0);
+    const matching = ranked.filter(item=>(localRelevance<5 || item.score>=localRelevance) && item.score >= (ranked[0]?.score??0)*0.6).map(s => s.service);
+    const namedImaService = namedIma ? services.find(s => s.id === 'ima' && s.status === 'connected') : undefined;
     const candidates = provider ? services.filter(s=>s.id===provider && s.status==='connected').slice(0,1) :
-      ranked.filter(item=>(localRelevance<5 || item.score>=localRelevance) && item.score >= (ranked[0]?.score??0)*0.6).slice(0,2).map(s => s.service);
+      (namedImaService ? [namedImaService, ...matching.filter(s => s.id !== 'ima')] : matching).slice(0,2);
     const loadedBefore = new Set(this.loaded.map(t => t.name));
     const catalogs: { provider: string; search_query:string; has_more: boolean; next_offset?: number }[] = [];
     for (const service of candidates) {
@@ -170,7 +197,8 @@ export class ToolSearchSession {
       // The bridge strips query for older servers. All schemas remain subject to
       // the authorized server's real pagination and size limits.
       try {
-        const lookup=(expanded || query).slice(0,200);
+        const terms = service.id === 'ima' ? '笔记 知识库 搜索 读取 正文 保存' : expanded;
+        const lookup=[query, terms].filter(Boolean).join(' ').slice(0,200).trimEnd();
         const first = await this.discover('list_mcp_tools', { provider: service.id, query:lookup, offset, limit:20 });
         if (!object(first) || !Array.isArray(first.items)) { this.failures.push(service.id); continue; }
         let value:Record<string,unknown>=first;
@@ -185,9 +213,10 @@ export class ToolSearchSession {
           cursor=next as number;found.push(...more.items);value=more;
         }
         const items = found.filter(object).filter(item => typeof item.name === 'string' && item.name.length <= 200 &&
+          (service.id !== 'ima' || item.name !== 'ima_create_note' || writing) &&
           object(item.inputSchema) && item.inputSchema.type === 'object' && JSON.stringify(item.inputSchema).length <= 12000);
         const sorted = items.map(item => ({item, score:score(query,String(item.name),text(item.description,1600))})).sort((a,b)=>b.score-a.score);
-        const useful=sorted.some(item=>item.score>0)?sorted.filter(item=>item.score>0):sorted;
+        const useful=service.id !== 'ima' && sorted.some(item=>item.score>0)?sorted.filter(item=>item.score>0):sorted;
         const family=(name:string)=> /calculate|quote|算价|报价|estimate/.test(name)?'quote':/detail|详情/.test(name)?'detail':/nearby|附近/.test(name)?'nearby':/coupon|优惠/.test(name)?'coupon':/menu|meal|catalog|菜单|套餐/.test(name)?'catalog':/account|profile|current.?user/.test(name)?'identity':'other';
         const selected:typeof sorted=[];const families=new Set<string>();
         for(const item of useful) {const group=family(String(item.item.name));if(!families.has(group)){families.add(group);selected.push(item);}}

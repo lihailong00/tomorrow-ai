@@ -146,7 +146,8 @@ it('manual calendar drafts reject reversed dates, retain both inclusive endpoint
   expect(view.request.mock.calls.filter(call => call[0].includes('period=custom'))).toHaveLength(0);
   await view.press('统计周期自定义');
   await view.press('选择日期2026-11-01'); await view.press('选择日期2026-11-02');
-  expect(view.text()).toContain('已选 2 天，包含开始和结束当天。');
+  expect(view.text()).toContain('包含首尾两天');
+  expect(view.text()).toContain('已选 2 天');
   await view.press('查看这段时间的费用');
   expect(view.request).toHaveBeenCalledWith('/usage?period=custom&start=2026-11-01&end=2026-11-02', 'GET', undefined, expect.anything());
   await view.close();

@@ -93,6 +93,15 @@ export function createMessageHistory() {
     },
     // Data and measured heights survive Back; native message Views do not.
     viewport: createMessageViewport(),
+    // A verified, explicitly selected old conversation becomes this route's
+    // initial history without racing a second request or losing its cursor.
+    adoptLatest: (api: ApiClient, page: HistoryPage) => {
+      generation += 1;
+      owner = api;
+      update({ initialized: true, loading: false, error: null,
+        nextOffset: typeof page.next_offset === 'number' ? page.next_offset : null,
+        nextBefore: typeof page.next_offset === 'number' ? page.next_before ?? page.items[0]?.id ?? null : null });
+    },
     ensure: (api: ApiClient, id: string | undefined, apply: (items: Message[]) => void, canApply: () => boolean) =>
       snapshot.initialized ? Promise.resolve() : load(api, id, apply, canApply, false),
     refresh: (api: ApiClient, id: string | undefined, apply: (items: Message[]) => void, canApply: () => boolean) =>

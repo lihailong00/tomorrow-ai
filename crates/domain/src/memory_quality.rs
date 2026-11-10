@@ -129,6 +129,7 @@ pub fn resolve_weight(content: &str, kilograms: f64) -> Option<String> {
 
 /// Only single facts receive a stable merge key. Mixed legacy notes stay intact.
 pub fn fact_key(text: &str) -> Option<&'static str> {
+    if text.starts_with("家庭地址：") { return Some("家庭地址"); }
     let keys: Vec<_> = [("体重", "体重"), ("身高", "身高"), ("运动", "运动习惯")]
         .into_iter()
         .filter(|(needle, _)| text.contains(needle))

@@ -66,6 +66,9 @@ pub(super) async fn chat_stream(
         .client_request_id
         .clone()
         .expect("validated request id");
+    let interactive = input.interaction_mode.is_some() || input.didi_order_confirmation_supported == Some(true)
+        || input.action_confirmation_supported == Some(true)
+        || input.app_permission_inspection_supported == Some(true) || input.app_permission_tool_supported == Some(true);
     if cursor.is_some_and(|n| n > 0) {
         let view = state
             .repository
@@ -126,13 +129,18 @@ pub(super) async fn chat_stream(
     if cursor.is_some_and(|n| n > view.sequence) {
         return Err(DomainError::Conflict("消息游标超出当前进度".into()).into());
     }
+    let card = interaction(&state, &user_id, &view, interactive);
+    let interaction_id = card.as_ref().map(|card| card.id.clone());
+    let initial = snapshot(&view, card);
     let tail = Tail {
         state,
         user_id,
         request_id,
         cursor: view.sequence,
-        pending: VecDeque::from([snapshot(&view)]),
+        pending: VecDeque::from([initial]),
         terminal: view.status != "running",
+        interactive,
+        interaction_id,
         deadline: tokio::time::Instant::now()
             + Duration::from_secs(CHAT_STREAM_LIFETIME_SECONDS + 10),
     };
@@ -189,7 +197,7 @@ pub(super) async fn chat_stream(
                 || (events.is_empty() && view.sequence > tail.cursor)
             {
                 tail.cursor = view.sequence;
-                tail.pending.push_back(snapshot(&view));
+                tail.pending.push_back(snapshot(&view, interaction(&tail.state, &tail.user_id, &view, tail.interactive)));
             } else {
                 for ChatStreamEvent {
                     sequence,
@@ -202,6 +210,15 @@ pub(super) async fn chat_stream(
                 }
             }
             tail.terminal = view.status != "running" && tail.cursor >= view.sequence;
+            if tail.interactive && !tail.terminal {
+                let card = interaction(&tail.state, &tail.user_id, &view, true);
+                let id = card.as_ref().map(|card| card.id.clone());
+                if tail.interaction_id != id {
+                    tail.interaction_id = id;
+                    // Interaction state is ephemeral and independent of the durable replay cursor.
+                    tail.pending.push_back(sse("interaction", tail.cursor, json!({"card":card})));
+                }
+            }
         }
     });
     let mut response = Sse::new(events)
@@ -228,6 +245,8 @@ struct Tail {
     cursor: i64,
     pending: VecDeque<Event>,
     terminal: bool,
+    interactive: bool,
+    interaction_id: Option<String>,
     deadline: tokio::time::Instant,
 }
 
@@ -238,9 +257,15 @@ fn sse(kind: &str, sequence: i64, body: Value) -> Event {
         .data(body.to_string())
 }
 
-fn snapshot(view: &ChatStreamView) -> Event {
+fn interaction(state: &AppState, user: &str, view: &ChatStreamView, enabled: bool) -> Option<super::chat_interaction::Card> {
+    if !enabled || view.status != "running" { return None; }
+    let run = view.accepted.as_ref()?["agent_run_id"].as_str()?;
+    state.interactions.pending(user, run)
+}
+
+fn snapshot(view: &ChatStreamView, card: Option<super::chat_interaction::Card>) -> Event {
     let mut body = json!({"sequence":view.sequence,"attempt":view.attempt,"previous_content":view.previous_content,"status":view.status,"content":view.content,"error":view.error,"response":view.response,"tool_status":view.tool_status,
-        "conversation_id":null,"user_message":null,"message_id":null,"message_created_at":null,"agent_run_id":null});
+        "conversation_id":null,"user_message":null,"message_id":null,"message_created_at":null,"agent_run_id":null,"interaction":card});
     if let Some(accepted) = &view.accepted {
         for field in [
             "conversation_id",

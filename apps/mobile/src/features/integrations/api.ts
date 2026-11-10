@@ -30,6 +30,10 @@ export function integrationsApi(
         'POST',
         {},
       ),
+    searchSlack: (query: string, cursor?: string) =>
+      request<{ items: IntegrationResult[]; next_cursor: string | null }>(
+        '/integrations/slack/search', 'POST', { query, ...(cursor ? { cursor } : {}) },
+      ),
     disconnect: (id: string) => request<{ ok: boolean }>(path(id), 'DELETE'),
     sendMail: (id: string, draft: MailDraft) =>
       request<MailReceipt>(path(id) + '/send', 'POST', {

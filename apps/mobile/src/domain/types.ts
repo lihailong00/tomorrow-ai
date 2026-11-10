@@ -73,10 +73,12 @@ export type Message = {
   id: string;
   /** Stable native row identity while an optimistic ID is reconciled. */
   client_key?: string;
-  delivery?: 'sending' | 'sent' | 'failed';
+  delivery?: 'sending' | 'sent' | 'failed' | 'local';
   stream_status?: string;
   stream_activity?: readonly import('../screens/chatActivity').ChatActivity[];
   stream_error?: string;
+  /** Rendered only by the device that performed the inspection. */
+  app_permission_report?: import('../features/app-permissions/inspection').PermissionReport;
   conversation_id: string;
   role: 'user' | 'assistant';
   content: string;
@@ -140,7 +142,7 @@ export type Today = {
   };
   runtime: RuntimeInfo;
 };
-export type CapabilityResponse = { items: Capability[]; runtime: RuntimeInfo };
+export type CapabilityResponse = { items: Capability[]; runtime: RuntimeInfo; app_permission_tool?: boolean; device_settings_tools?: boolean };
 export type ReasoningEffort = 'off' | 'low' | 'high' | 'max';
 export type ChatLocationContext = Readonly<{
   source: 'device' | 'manual';
@@ -153,6 +155,14 @@ export type ChatLocationContext = Readonly<{
 }>;
 export type ChatClientContext = Readonly<{ timezone: string; location?: ChatLocationContext }>;
 export type ChatIntent = {
+  interaction_mode?: 'enabled' | 'location_decided';
+  personal_details_supported?: true;
+  didi_order_confirmation_supported?: true;
+  action_confirmation_supported?: true;
+  app_permission_inspection_supported?: true;
+  app_permission_tool_supported?: true;
+  device_settings_supported?: true;
+  device_inspection_context?: { has_report: boolean; has_selected_app: boolean };
   message: string;
   conversation_id: string | null;
   client_request_id: string;

@@ -1,10 +1,13 @@
 pub mod agent;
 pub mod automatic_memory;
+pub mod personal_context;
+mod home_memory;
 pub mod memory_quality;
 pub mod auth;
 pub mod chat_stream;
 pub mod chat_messages;
 pub mod dto;
+pub mod daily_news;
 pub mod knowledge;
 pub mod model;
 pub mod phone;

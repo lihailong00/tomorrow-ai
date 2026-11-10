@@ -3,6 +3,7 @@ import type { HealthAvailability } from '../health/native';
 import type { HealthConnection } from '../health/types';
 import type { PersonalMcpConnection } from '../personal-mcp/types';
 import { walletStatusLabel, type WalletConnectionStatus } from '../personal-mcp/walletModel';
+import { slackIntegration } from './slackModel';
 import type { Integration } from './types';
 
 export type ConnectionCategory = 'local' | 'cloud' | 'devices';
@@ -43,6 +44,7 @@ export type ConnectionSnapshot = {
 };
 
 const fallbackMcp = [
+  ['github', 'GitHub', '只读查找你授权的仓库、代码和拉取请求'],
   ['dida365', '滴答清单', '查看本人清单、待办与日程'],
   ['fliggy', '飞猪', '查询旅行信息与个人授权的出行服务'],
   ['jianguoyun', '坚果云', '读取本人授权的云端文件'],
@@ -54,6 +56,7 @@ const fallbackMcp = [
   ['ima', 'ima', '查找本人授权的知识库与资料'],
   ['mcdonalds', '麦当劳', '查看账号授权范围内的服务'],
   ['didi', '滴滴出行', '使用本人授权的出行服务'],
+  ['liepin', '猎聘', '搜索职位、筛选城市和薪资'],
   ['tencent_docs', '腾讯文档', '查找和读取自己的文档'],
   ['yuque', '语雀', '查找知识库和文档'],
   ['notion', 'Notion', '查找、阅读和保存自己的笔记'],
@@ -172,8 +175,7 @@ export function connectionRows(
       };
     }),
   ];
-  // Keep choices visible even when an older server does not advertise them.
-  // A missing server entry is unavailable, never an invented connection.
+  // Built-in names enrich server entries; missing/disabled choices are hidden below.
   const providerChoices = [
     ...fallbackMcp,
     ...(snapshot.mcp || [])
@@ -223,7 +225,7 @@ export function connectionRows(
       usable: item?.status === 'connected',
       attention: item?.status === 'needs_reconnect',
       unavailable:
-        item?.status === 'not_configured' || (snapshot.mcp !== null && !item),
+        id !== 'github' && (!item || item.status === 'not_configured'),
       target: { kind: 'mcp', id },
     }),
   );
@@ -256,6 +258,7 @@ export function connectionRows(
   });
   const integrationChoices: Integration[] = [
     ...(snapshot.integrations || []),
+    ...(snapshot.integrations?.some(item => item.id === 'slack') ? [] : [slackIntegration]),
     ...(
       [
         ['qq_mail', 'QQ 邮箱', 'mail', '查找邮件并确认后发送'],
@@ -305,7 +308,7 @@ export function connectionRows(
       added: userMapSupported && item.status === 'connected',
       usable: userMapSupported && item.status === 'connected',
       attention: !userMapSupported,
-      unavailable: item.status === 'not_configured',
+      unavailable: item.status === 'not_configured' || !userMapSupported,
       target: { kind: 'integration', id: item.id },
     });
   }
@@ -333,7 +336,7 @@ export function connectionRows(
       added: Boolean(item?.has_credentials),
       usable: item?.status === 'connected',
       attention: item?.status === 'reconnect_required',
-      unavailable: item?.status === 'not_configured',
+      unavailable: !item || item.status === 'not_configured',
       target: { kind: 'health', id },
     };
   });
@@ -376,7 +379,7 @@ export function connectionRows(
       unavailable: true,
       target: { kind: 'health', id: 'apple' },
     });
-  return [...local, ...cloud, ...devices];
+  return [...local, ...cloud, ...devices].filter(row => !row.unavailable || row.added);
 }
 
 export function filterConnectionRows(
@@ -388,6 +391,7 @@ export function filterConnectionRows(
   const text = query.trim().toLocaleLowerCase();
   return rows.filter(
     row =>
+      (!row.unavailable || row.added) &&
       (!managing || row.added) &&
       (text
         ? [row.name, row.purpose, row.method, row.status]

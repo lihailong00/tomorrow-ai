@@ -110,15 +110,37 @@ pub(super) fn succeeded(value: &Value) -> bool {
     value.get("code").and_then(Value::as_i64) == Some(200)
 }
 
+pub(super) fn native_apply_link(value: &Value) -> Option<&str> {
+    // The pinned CLI's successful apply JSON uses a top-level accessUrl
+    // and has no numeric code. Do not accept diagnostic or payment URLs.
+    if value.get("code").is_some() || value.get("status").and_then(Value::as_str) != Some("unbound") {
+        return None;
+    }
+    value.get("accessUrl").and_then(Value::as_str).filter(|link| official_url(link))
+}
+
 pub(super) fn wallet_state(value: &Value) -> &'static str {
+    // The official CLI returns a non-success business code for a wallet
+    // that has never been opened. Its explicit state distinguishes onboarding
+    // from an inconclusive check of a previously bound wallet.
+    if value.get("status").and_then(Value::as_str) == Some("unbound")
+        && value.get("neverCreated").and_then(Value::as_bool) == Some(true)
+    {
+        return "not_connected";
+    }
     if !succeeded(value) {
         return "needs_reconnect";
     }
     let message = field(value, &["message"]).unwrap_or("");
-    if message == "已申请开通，等待授权" {
+    let status = value.get("status").and_then(Value::as_str);
+    if status == Some("applied_unbound") || message == "已申请开通，等待授权" {
         return "awaiting_authorization";
     }
-    if field(value, &["access_url"]) == Some("")
+    let link = field(value, &["access_url", "accessUrl"]);
+    // The pinned CLI omits the URL entirely once it reports an explicit
+    // bound state. Older responses signal the same state with an empty URL.
+    if (status == Some("bound") && link.is_none_or(str::is_empty)
+        || status.is_none() && link == Some(""))
         && !message.is_empty()
         && !["未", "失败", "关闭", "撤销", "待", "异常", "错误"]
             .iter()
@@ -127,6 +149,17 @@ pub(super) fn wallet_state(value: &Value) -> &'static str {
         return "connected";
     }
     "needs_reconnect"
+}
+
+pub(super) fn authorization_error(error: ConnectorError) -> ConnectorError {
+    if error.code != "wallet_provider_error" {
+        return error;
+    }
+    ConnectorError::new(
+        StatusCode::BAD_GATEWAY,
+        "wallet_authorization_unavailable",
+        "暂时无法完成支付宝授权，请稍后重试。",
+    )
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -138,9 +171,10 @@ impl QueryReceipt {
     pub(super) fn from_output(value: &Value) -> Self {
         let order = field(value, &["outShakeNo", "out_shake_no"])
             .filter(|order| {
-                order.len() == 32
-                    && order.bytes().all(|c| c.is_ascii_digit())
-                    && &order[10..14] == "8282"
+                // 8282 identifies one wallet-opening flow, not every cashier
+                // transaction. Keep the provider's actual opaque order receipt.
+                (16..=128).contains(&order.len())
+                    && order.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
             })
             .map(str::to_owned);
         let url = field(value, &["shortUrl", "short_url", "launchUrl"])
@@ -224,6 +258,8 @@ mod tests {
     }
     #[test]
     fn no_success_or_identity_is_inferred_from_http_or_diagnostic_data() {
+        assert!(QueryReceipt::from_output(&json!({"code":200,"outShakeNo":"20261103000000123456789012345678"})).available());
+        assert!(!QueryReceipt::from_output(&json!({"code":200,"outShakeNo":"--launch-url evil"})).available());
         assert_eq!(
             wallet_state(&json!({"code":200,"message":"查询成功"})),
             "needs_reconnect"
@@ -243,5 +279,53 @@ mod tests {
             payment_state(&fake, &QueryReceipt::default()),
             "unknown_outcome"
         );
+    }
+
+    #[test]
+    fn distinguishes_a_wallet_never_opened_from_a_failed_check() {
+        assert_eq!(
+            wallet_state(&json!({"code":500,"message":"未开通","status":"unbound","neverCreated":true})),
+            "not_connected"
+        );
+        for result in [
+            json!({"code":500,"message":"系统暂时繁忙"}),
+            json!({"code":500,"status":"unbound","neverCreated":false}),
+            json!({"code":500,"diagnostic":{"status":"unbound","neverCreated":true}}),
+        ] {
+            assert_eq!(wallet_state(&result), "needs_reconnect");
+        }
+    }
+
+    #[test]
+    fn recognizes_the_bound_status_when_the_official_check_omits_the_url() {
+        assert_eq!(
+            wallet_state(&json!({"code":200,"status":"bound","message":"已开启支付宝支付功能"})),
+            "connected"
+        );
+        assert_eq!(
+            wallet_state(&json!({"code":200,"status":"applied_unbound","accessUrl":"https://u.alipay.cn/fixture","message":"已申请开通，等待授权"})),
+            "awaiting_authorization"
+        );
+        for result in [
+            json!({"code":500,"status":"bound","message":"已开启支付宝支付功能"}),
+            json!({"code":200,"status":"bound","accessUrl":"https://u.alipay.cn/fixture","message":"已开启支付宝支付功能"}),
+            json!({"code":200,"status":"unbound","access_url":"","message":"查询成功"}),
+        ] {
+            assert_eq!(wallet_state(&result), "needs_reconnect");
+        }
+    }
+
+    #[test]
+    fn accepts_only_the_official_native_application_link() {
+        let link = "https://u.alipay.cn/fixture";
+        assert_eq!(native_apply_link(&json!({"status":"unbound","accessUrl":link})), Some(link));
+        for result in [
+            json!({"code":500,"status":"unbound","accessUrl":link}),
+            json!({"status":"bound","accessUrl":link}),
+            json!({"status":"unbound","accessUrl":"https://u.alipay.cn.evil.example/fixture"}),
+            json!({"status":"unbound","diagnostic":{"accessUrl":link}}),
+        ] {
+            assert_eq!(native_apply_link(&result), None);
+        }
     }
 }

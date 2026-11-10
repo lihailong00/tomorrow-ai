@@ -13,6 +13,7 @@ import { phoneSources } from '../src/platform/phoneSources';
 import { platform } from '../src/platform/ports';
 import { Button } from '../src/ui/components';
 import { phoneAlarms } from '../src/platform/phoneAlarms';
+import { PhoneSourcesEntry } from '../src/features/phone-sources/PhoneSourcesEntry';
 import { unavailableWallet } from '../src/features/personal-mcp/walletModel';
 
 jest.mock('../src/platform/phoneAlarms', () => ({ phoneAlarms: {
@@ -24,7 +25,9 @@ jest.mock('../src/platform/phoneAlarms', () => ({ phoneAlarms: {
 
 
 import { PersonalMcpConnections } from '../src/features/personal-mcp/PersonalMcpConnections';
+import { McpConnectionCard } from '../src/features/personal-mcp/McpConnectionCard';
 import type { PersonalMcpConnection } from '../src/features/personal-mcp/types';
+import type { Integration } from '../src/features/integrations/types';
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
   getItem: jest.fn(),
@@ -96,7 +99,7 @@ function textChildren(value: unknown): string {
     ? textChildren(value.props.children)
     : '';
 }
-async function setup(mcpCatalog: PersonalMcpConnection[] = []) {
+async function setup(mcpCatalog: PersonalMcpConnection[] = [], extraIntegrations: Integration[] = [], wallet = unavailableWallet) {
   let catalog = [
     {
       id: 'qq_mail',
@@ -114,6 +117,7 @@ async function setup(mcpCatalog: PersonalMcpConnection[] = []) {
       status: 'not_connected',
       detail: '整理收件箱里的待办',
     },
+    ...extraIntegrations,
   ];
   let failed = false;
   let pending: Promise<unknown> | undefined;
@@ -125,7 +129,7 @@ async function setup(mcpCatalog: PersonalMcpConnection[] = []) {
         return { items: catalog.map(item => ({ ...item })) };
       if (path === '/personal-mcp')
         return { items: mcpCatalog.map(item => ({ ...item })) };
-      if (path === '/personal-wallet/alipay') return unavailableWallet;
+      if (path === '/personal-wallet/alipay') return wallet;
       if (path === '/health/connections') return { items: [] };
       if (path === '/integrations/netease163/connect') {
         if (pending) await pending;
@@ -196,11 +200,11 @@ async function setup(mcpCatalog: PersonalMcpConnection[] = []) {
         .map(node => node.props.testID),
     ),
   ];
-  const click = async (label: string) => {
+  const click = async (label: string, role = 'button') => {
     await act(async () => {
       const node = tree.root.findAll(
         node =>
-          node.props.accessibilityRole === 'button' &&
+          node.props.accessibilityRole === role &&
           node.props.accessibilityLabel === label &&
           typeof node.props.onPress === 'function',
       )[0];
@@ -278,12 +282,12 @@ it('searches both groups while preserving account management and import routes',
   expect(view.sources('available')).toEqual(
     expect.arrayContaining([
       'capability-source-integration:netease163',
-      'capability-source-integration:netease126',
     ]),
   );
   expect(view.sources('connected')).not.toContain(
     'capability-source-integration:qq_mail',
   );
+  expect(view.sources('available')).not.toContain('capability-source-integration:netease126');
   await view.click('导入 AI 对话');
   expect(view.context.navigate).toHaveBeenLastCalledWith({ name: 'aiHistory' });
   await view.click('管理手机通知、分享与已导入资料');
@@ -291,6 +295,42 @@ it('searches both groups while preserving account management and import routes',
     name: 'integrations',
   });
   await view.unmount();
+});
+
+it.each([
+  ['联系人', false],
+  ['通讯录', false],
+  ['联系人', true],
+  ['短信', true],
+] as const)('finds and opens local phone sources for %s (connected: %s)', async (query, connected) => {
+  if (connected) {
+    (AsyncStorage.getItem as jest.Mock).mockResolvedValue(JSON.stringify({
+      seen: true,
+      enabled: ['contacts'],
+    }));
+  }
+  const view = await setup();
+  try {
+    await view.field('搜索应用或用途', query);
+    expect(view.sources(connected ? 'connected' : 'available')).toContain('capability-source-phone');
+    await view.click(connected ? '管理手机资料连接' : '手机资料，连接');
+    expect(view.tree.root.findAllByType(PhoneSourcesEntry)).toHaveLength(1);
+  } finally {
+    await view.unmount();
+  }
+});
+
+it('keeps the local phone sources entry searchable if permission status fails to load', async () => {
+  (phoneSources.status as jest.Mock).mockRejectedValue(new Error('无法检查权限'));
+  const view = await setup();
+  try {
+    await view.field('搜索应用或用途', '联系人');
+    expect(view.sources('available')).toContain('capability-source-phone');
+    await view.click('手机资料，连接');
+    expect(view.tree.root.findAllByType(PhoneSourcesEntry)).toHaveLength(1);
+  } finally {
+    await view.unmount();
+  }
 });
 it('moves an email account only after real connect verification and refresh succeeds', async () => {
   const view = await setup(),
@@ -412,7 +452,6 @@ it('keeps expired grants above and one-off imports below, with no duplicate keys
   expect(all.connected.every(entry => entry.state === 'reconnect')).toBe(true);
   expect(groups.available.map(entry => entry.key)).toEqual([
     'integration:wechat',
-    'mcp:weread',
   ]);
   expect(groups.connected).toEqual([]);
 });
@@ -429,6 +468,7 @@ const searchableProviders = [
   ['mcp', 'tencent_docs', '腾讯文档', 'TENCENT DOCS'],
   ['mcp', 'tencent_meeting', '腾讯会议', 'TENCENT MEETING'],
   ['mcp', 'didi', '滴滴出行', 'DIDI'],
+  ['mcp', 'liepin', '猎聘', 'LIEPIN'],
   ['mcp', 'mcdonalds', '麦当劳', 'MCDONALDS'],
   ['mcp', 'notion', 'Notion', 'NOTION'],
   ['mcp', 'memos', 'Memos', 'MEMOS'],
@@ -439,8 +479,12 @@ const searchableProviders = [
   ['mcp', 'ima', 'ima', 'IMA'],
 ] as const;
 
-it('searches all nineteen Chinese and English service names on the actual primary page even with an older catalog', async () => {
-  const view = await setup();
+it('searches supported Chinese and English service names using the actual server catalog', async () => {
+  const providers = searchableProviders.filter(([kind]) => kind === 'mcp').map(([, id, name]) => ({ ...fliggy('not_connected'), id, name }));
+  const view = await setup(providers, [
+    { id: 'amap', name: '高德地图', category: '出行', mode: 'map', status: 'not_connected', credential_scope: 'user', detail: '地图查询' },
+    { id: 'netease126', name: '126邮箱', category: '邮箱', mode: 'mail', status: 'not_connected', detail: '邮箱连接' },
+  ]);
   try {
     await view.click('健康连接');
     for (const [kind, id, chinese, english] of searchableProviders) {
@@ -454,11 +498,114 @@ it('searches all nineteen Chinese and English service names on the actual primar
       }
     }
     await view.field('搜索应用或用途', '飞猪');
-    expect(view.text()).toContain('暂不可用');
+    expect(view.text()).not.toContain('暂不可用');
     expect(view.sources('connected')).toEqual([]);
   } finally {
     await view.unmount();
   }
+});
+
+it('offers the official Liepin entry before server support and enables account connection after refresh', async () => {
+  const catalog: PersonalMcpConnection[] = [];
+  const view = await setup(catalog);
+  const configUrl = 'https://www.liepin.com/mcp/auth#config';
+  try {
+    await view.field('搜索应用或用途', '猎聘');
+    expect(view.sources('available')).toEqual(['capability-source-mcp:liepin']);
+    expect(view.sources('connected')).toEqual([]);
+    await view.click('猎聘，查看接入');
+    expect(view.text()).toContain('当前服务器尚未开通猎聘');
+    expect(view.tree.root.findAllByType(McpConnectionCard)).toHaveLength(1);
+    expect(view.tree.root.findAllByType(PersonalMcpConnections)).toHaveLength(0);
+    await view.click('打开猎聘官方授权页');
+    expect(platform.openUrl).toHaveBeenLastCalledWith(configUrl);
+    expect(view.request.mock.calls.some(([, method]) => method === 'POST')).toBe(false);
+    catalog.push({ ...fliggy('not_connected'), id: 'liepin', name: '猎聘', credential_label: '个人 User Token', help_url: 'https://www.liepin.com/mcp/server' });
+    await view.click('刷新猎聘连接状态');
+    await view.click('授权范围与帮助');
+    await view.click('猎聘官方连接说明');
+    expect(platform.openUrl).toHaveBeenLastCalledWith(configUrl);
+    await view.click('连接猎聘账号');
+    expect(view.tree.root.findAllByType(TextInput).some(input => input.props.accessibilityLabel === '个人 User Token')).toBe(true);
+    await view.click('猎聘授权获取教程', 'link');
+    expect(platform.openUrl).toHaveBeenLastCalledWith(configUrl);
+  } finally {
+    await view.unmount();
+  }
+});
+
+it('opens every catalog provider in the same compact connection card before showing credentials', async () => {
+  const catalogIds = [
+    'github', 'dida365', 'fliggy', 'jianguoyun', 'baidu_maps', 'weread', 'weiyun',
+    'luckin', 'qq_music', 'ima', 'mcdonalds', 'liepin', 'didi', 'tencent_docs',
+    'yuque', 'notion', 'memos', 'tencent_meeting', 'feishu', 'baidu_netdisk', 'yinxiang',
+  ];
+  const view = await setup(catalogIds.map(id => ({ ...fliggy('not_connected'), id, name: id })));
+  try {
+    for (const id of catalogIds) {
+      await view.field('搜索应用或用途', id);
+      await view.click(id + '，连接');
+      expect(view.tree.root.findAllByType(McpConnectionCard)).toHaveLength(1);
+      expect(view.tree.root.findByType(McpConnectionCard).props.status).toBe('未连接');
+      expect(view.tree.root.findByType(McpConnectionCard).props.title).toBeUndefined();
+      expect(view.text()).not.toMatch(/你保留选择权|账号授权与管理|官方说明 ↗/);
+      expect(view.tree.root.findAllByType(TextInput).some(input => input.props.secureTextEntry)).toBe(false);
+      await view.click('关闭连接详情');
+    }
+    expect(view.request.mock.calls.filter(([path]) => path.startsWith('/personal-mcp')).every(([, method]) => method === 'GET')).toBe(true);
+  } finally { await view.unmount(); }
+});
+
+it('opens an existing Alipay wallet on a single verification card without fetching transactions', async () => {
+  const view = await setup([], [], {
+    ...unavailableWallet, status: 'needs_reconnect', binding_available: true, payment_available: true,
+    protocol_version: 1, runtime_mode: 'dedicated_single_user',
+  });
+  try {
+    await view.field('搜索应用或用途', '支付宝');
+    await view.click('管理支付宝连接');
+    expect(view.tree.root.findAllByType(McpConnectionCard)).toHaveLength(1);
+    const card = view.tree.root.findByType(McpConnectionCard);
+    expect(card.props.status).toBe('待核实');
+    const cardText = card.findAllByType(Text).map(node => textChildren(node.props.children)).join(' ');
+    expect(cardText).toContain('每笔付款都需要你确认');
+    expect(cardText).not.toMatch(/妥啦交易记录|刷新状态|账号授权与管理|你保留选择权/);
+    expect(view.request.mock.calls.some(([path]) => path.includes('/transactions'))).toBe(false);
+  } finally { await view.unmount(); }
+});
+
+it('hides disabled and unadvertised services from the real primary page and search', async () => {
+  const disabled = ['feishu', 'baidu_netdisk'].map(id => ({ ...fliggy('not_connected'), id,
+    name: id === 'feishu' ? '飞书' : '百度网盘', status: 'not_configured' as const }));
+  const view = await setup(disabled);
+  try {
+    for (const query of ['飞书', '百度网盘', 'FLIGGY', 'Alipay', 'Gmail']) {
+      await view.field('搜索应用或用途', query);
+      expect(view.sources('available')).toEqual([]);
+      expect(view.sources('connected')).toEqual([]);
+    }
+  } finally { await view.unmount(); }
+});
+
+it('keeps a disabled existing grant in management without advertising it for new connections', () => {
+  const entry = { ...fliggy('not_connected'), status: 'not_configured' as const, has_credentials: true };
+  const groups = splitHubEntries(buildHubEntries({ mcp: [entry] }), 'FLIGGY');
+  expect(groups.available).toEqual([]);
+  expect(groups.connected.map(item => item.key)).toEqual(['mcp:fliggy']);
+});
+
+it('closes an open connection form when a refreshed server catalog disables the provider', async () => {
+  const catalog = [fliggy('not_connected')];
+  const view = await setup(catalog);
+  try {
+    await view.field('搜索应用或用途', '飞猪');
+    await view.click('飞猪，连接');
+    expect(view.tree.root.findAllByType(PersonalMcpConnections)).toHaveLength(1);
+    catalog[0] = { ...catalog[0], status: 'not_configured' } as PersonalMcpConnection;
+    await act(async () => view.tree.root.findByType(RefreshControl).props.onRefresh());
+    expect(view.sources('available')).toEqual([]);
+    expect(view.tree.root.findAllByType(PersonalMcpConnections)).toHaveLength(0);
+  } finally { await view.unmount(); }
 });
 
 const fliggy = (

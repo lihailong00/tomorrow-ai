@@ -20,6 +20,7 @@ import type { Todo, UpdateTodo } from './types';
 import { todoStyles as s } from './ui';
 import { confirmTodoAction, getTodoActions } from '../growth/api';
 import { useGrowthData } from '../growth/context';
+import { GrowthFocusTimer } from '../growth/GrowthFocusTimer';
 
 const preparationPendingNotice = '妥啦正在准备内容。你可以稍后回来查看。';
 
@@ -338,6 +339,7 @@ function TodoContent({
         {todo.estimated_minutes ? ` · 预计 ${todo.estimated_minutes} 分钟` : ''}
       </Text>
       {!!todo.description && <Text style={s.body}>{todo.description}</Text>}
+      {todo.source_kind === 'growth_journey' && !terminal && <GrowthFocusTimer todoId={todo.id} minutes={todo.estimated_minutes} />}
       <ErrorNotice message={action.error} retry={refresh} />
       {!!notice && <Notice>{notice}</Notice>}
       {todo.kind === 'communication' && (

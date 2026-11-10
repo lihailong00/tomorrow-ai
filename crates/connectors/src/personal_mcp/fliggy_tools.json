@@ -1,0 +1,115 @@
+{
+  "parameter_groups": {
+    "query": {
+      "query": {"type":"string","minLength":1,"maxLength":2000,"description":"完整旅行查询"}
+    },
+    "transport": {
+      "origin": {"type":"string","description":"出发城市、机场或车站"},
+      "destination": {"type":"string","description":"到达城市、机场或车站"},
+      "dep_date": {"type":"string","format":"date","description":"出发日期 YYYY-MM-DD"},
+      "dep_date_start": {"type":"string","format":"date","description":"出发日期范围起点"},
+      "dep_date_end": {"type":"string","format":"date","description":"出发日期范围终点"},
+      "back_date": {"type":"string","format":"date","description":"返程日期 YYYY-MM-DD"},
+      "back_date_start": {"type":"string","format":"date","description":"返程日期范围起点"},
+      "back_date_end": {"type":"string","format":"date","description":"返程日期范围终点"},
+      "journey_type": {"type":"integer","enum":[1,2],"description":"1 直达，2 中转"},
+      "transport_no": {"type":"string","description":"航班号或车次，多个用逗号分隔"},
+      "transfer_city": {"type":"string","description":"中转城市，多个用逗号分隔"},
+      "dep_hour_start": {"type":"integer","minimum":0,"maximum":24,"description":"起飞或发车时段起点，24 小时制"},
+      "dep_hour_end": {"type":"integer","minimum":0,"maximum":24,"description":"起飞或发车时段终点，24 小时制"},
+      "arr_hour_start": {"type":"integer","minimum":0,"maximum":24,"description":"到达时段起点，24 小时制"},
+      "arr_hour_end": {"type":"integer","minimum":0,"maximum":24,"description":"到达时段终点，24 小时制"},
+      "total_duration_hour": {"type":"number","minimum":0,"description":"总时长上限，单位小时"},
+      "max_price": {"type":"number","minimum":0,"description":"价格上限，人民币元"},
+      "sort_type": {"type":"integer","minimum":1,"maximum":8,"description":"1 价格降序，2 推荐，3 价格升序，4 时长升序，5 时长降序，6 最早出发，7 最晚出发，8 直达优先"}
+    },
+    "hotel": {
+      "dest_name": {"type":"string","description":"目的地国家、省、市或区"},
+      "key_words": {"type":"string","description":"搜索关键词"},
+      "poi_name": {"type":"string","description":"希望靠近的机场、景点或其他地标"},
+      "hotel_bed_types": {"type":"string","description":"大床房、双床房、多床房，多个用逗号分隔"},
+      "sort": {"type":"string","enum":["distance_asc","rate_desc","price_asc","price_desc","no_rank"],"description":"依次为距离升序、评分降序、价格升序、价格降序、不排序"},
+      "check_in_date": {"type":"string","format":"date","description":"入住日期 YYYY-MM-DD"},
+      "check_out_date": {"type":"string","format":"date","description":"退房日期 YYYY-MM-DD"},
+      "max_price": {"type":"number","minimum":0,"description":"每晚价格上限，人民币元"}
+    }
+  },
+  "tools": [
+    {
+      "name": "fliggy_fast_search",
+      "command": "keyword-search",
+      "description": "飞猪关键词旅行搜索。适合景点门票、签证、邮轮、活动等跨品类快速检索。keyword search",
+      "group": "query",
+      "required": ["query"]
+    },
+    {
+      "name": "fliggy_ai_search",
+      "command": "ai-search",
+      "description": "飞猪自然语言旅行搜索。适合同时考虑目的地、行程、同行人和预算的综合旅行规划。semantic search",
+      "group": "query",
+      "required": ["query"]
+    },
+    {
+      "name": "fliggy_search_flight",
+      "command": "search-flight",
+      "description": "飞猪结构化航班机票查询。可按出发到达地、日期、直飞、起降时段、舱位和价格筛选。flight",
+      "group": "transport",
+      "required": ["origin"],
+      "properties": {
+        "seat_class_name": {"type":"string","description":"舱位，如 economy、business、first，多个用逗号分隔"}
+      }
+    },
+    {
+      "name": "fliggy_search_train",
+      "command": "search-train",
+      "description": "飞猪结构化火车票、高铁及车次查询。可按站点、日期、直达、席别和价格筛选。train railway",
+      "group": "transport",
+      "required": ["origin"],
+      "properties": {
+        "seat_class_name": {"type":"string","description":"席别，如 second class、first class、business class、hard sleeper、soft sleeper，多个用逗号分隔"}
+      }
+    },
+    {
+      "name": "fliggy_search_hotel",
+      "command": "search-hotel",
+      "description": "飞猪酒店、民宿和客栈查询。可按目的地、机场或景点、入住退房日期、星级及价格筛选。hotel lodging",
+      "group": "hotel",
+      "required": ["dest_name"],
+      "properties": {
+        "hotel_types": {"type":"string","description":"住宿类型，如 酒店、民宿、客栈"},
+        "hotel_stars": {"type":"string","description":"星级 1 至 5，多个用逗号分隔，例如 4,5"}
+      }
+    },
+    {
+      "name": "fliggy_search_poi",
+      "command": "search-poi",
+      "description": "飞猪按城市查景点、地标及景区门票信息。可按名称、等级和单个景点类别筛选。attraction POI",
+      "required": ["city_name"],
+      "properties": {
+        "city_name": {"type":"string","description":"景点所在城市"},
+        "poi_level": {"type":"integer","minimum":1,"maximum":5,"description":"景点等级 1 至 5"},
+        "keyword": {"type":"string","description":"景点名称关键词"},
+        "category": {"type":"string","description":"单个景点类别，如 地标建筑、博物馆、主题乐园、自然风光"}
+      }
+    },
+    {
+      "name": "fliggy_search_marriott_hotel",
+      "command": "search-marriott-hotel",
+      "description": "飞猪查询万豪集团旗下酒店住宿，支持目的地、入住日期、酒店关键词、床型和每晚价格。Marriott hotel",
+      "group": "hotel",
+      "required": ["dest_name"]
+    },
+    {
+      "name": "fliggy_search_marriott_package",
+      "command": "search-marriott-package",
+      "description": "飞猪查询万豪集团酒店套餐商品，如下午茶、餐饮或度假套餐。Marriott package",
+      "required": ["keyword"],
+      "properties": {
+        "keyword": {"type":"string","description":"城市、品牌、酒店名称或套餐卖点，选一个维度"},
+        "hotel_name": {"type":"string","description":"酒店名称"},
+        "province_or_city": {"type":"string","description":"省份或城市"},
+        "sort_type": {"type":"string","enum":["price_asc","price_desc"],"description":"按价格升序或降序"}
+      }
+    }
+  ]
+}

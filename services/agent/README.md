@@ -93,6 +93,38 @@ cargo test -p tomorrow-domain --test agent_postgres -- --ignored
 
 `Test-Pi.ps1` 是真实付费模型集成验证；独立账号、虚构数据、校验落库和执行事件，结果保存在 `artifacts/pi-live-verification.json`。单元测试使用真实 Pi 执行循环与可控模型流，便于复现故障，不计作真实供应商调用。
 
+### 腾讯文档调试剧本
+
+从仓库根目录运行 `./scripts/Start-TencentDocsDebug.ps1 -Compare`。脚本启动独立 SQLite、Rust API 和 Agent，输出测试邮箱、临时密码及服务地址。加 `-Harness dsh` 可切换引擎。模型沿用现有配置。`-BindAddress <电脑局域网 IPv4>` 只向该地址转发 App 的公开 API，内部 Agent 和 Rust 监听仍留在本机回环地址。
+
+手机和电脑连接同一 Wi-Fi，在妥啦的服务设置中开启「允许局域网 HTTP」，检查并切换到脚本输出的地址，然后用测试邮箱登录。能力页的腾讯文档是模拟连接。开两段新对话，分别给每条消息加「【改写开】」或「【改写关】」，按顺序发送同一组问题。
+
+1. 在腾讯文档帮我找青禾周会纪要，先列出有哪些同名文件，不用读正文。
+2. 选研发组那份，先记住我选的是哪份，不用读正文。
+3. 打开刚才选的那份，谁负责上线？具体什么时候？
+
+自动对照走相同的 `/v1/chat/stream`，从[同一剧本](../../crates/connectors/src/personal_mcp/tencent_docs_fixture.json)读取问题和验收事实。每组使用新对话，报告逐轮核对实际工具调用、改写请求、答案和耗时。用脚本输出的进程 ID 停止自己启动的调试实例。
+
+### 妥啦场景回归
+
+[固定题库](benchmarks/product-cases.mjs)包含 20 个场景。题目固定对话、候选工具、业务回执和验收条件，覆盖普通问答、记忆、历史对话、跨应用、出行、定位卡片、取消定位、断开连接和服务失败。外部模型使用已配置的 DeepSeek 或兼容模型，业务数据与操作由本地测试夹具隔离。
+
+飞猪场景覆盖后端注册的八个工具，并使用相同的工具定义。历史验收仅保留状态和响应结构摘要，[模拟回执](benchmarks/fliggy-receipts.json)按 [FlyAI 官方示例](https://github.com/alibaba-flyai/flyai-skill/tree/main/skills/flyai/references)生成。
+
+在 `services/agent` 下运行这些命令。
+
+```powershell
+node benchmarks/query-rewrite.mjs --list
+pnpm --config.verify-deps-before-run=false run bench:product
+$env:QUERY_EVAL_HARNESS = 'dsh'
+pnpm --config.verify-deps-before-run=false run bench:product
+Remove-Item Env:QUERY_EVAL_HARNESS
+```
+
+`--list` 只列题目。回归命令会实际调用模型，默认每题跑两遍。报告保存在 `artifacts/product-regression/`，包含逐题工具命中、完成率、失败原因、P50/P95 耗时和 Token 数。首次完整运行建立本机基线。以后自动与该引擎上一份兼容的完整报告对照，列出退步和改善的题目。要与某个固定版本对照，可用 `pnpm --config.verify-deps-before-run=false run bench:product --baseline <报告路径>`。用 `QUERY_EVAL_CASES` 指定逗号分隔的题号可做局部复查，结果会单独归档。完整运行出现模型或运行时错误时也会保留报告，供排查。
+
+题目、夹具或评分修改后，报告会显示基线口径不兼容。修复线上问题时先补对应场景，再用同版题库比较修改前后的结果。延迟和模型输出会波动，对接近的结果保留多次样本。
+
 公开题库的 40 题固定抽样入口（会产生真实模型费用）：
 
 ```powershell

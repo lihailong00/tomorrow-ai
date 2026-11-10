@@ -122,6 +122,8 @@ it('renders Home completion when a 9s response outlasts its real 8s poll', async
     () => new Promise<Today>(resolve => setTimeout(() => resolve(today(0)), 9000)),
   );
   const tree = await renderScreen({ today: read }, <HomeScreen onTasks={jest.fn()} />);
+  await act(async () => tree.root.findByProps({ accessibilityLabel: '查看简报' }).props.onPress());
+  expect(text(tree)).toContain('Queued briefing');
   await act(async () => jest.advanceTimersByTime(8000));
   await act(async () => jest.advanceTimersByTime(8000));
   expect(read).toHaveBeenCalledTimes(2);

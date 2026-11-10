@@ -15,7 +15,15 @@ import {
 } from 'react-test-renderer';
 import App from '../App';
 import { ChatScreen } from '../src/screens/Chat';
+import { ChatVoiceRecovery } from '../src/ui/ChatVoiceRecovery';
+import { UnifiedInputBar } from '../src/ui/UnifiedInputBar';
+import { platform } from '../src/platform/ports';
 import { AmbientBackground } from '../src/ui/visuals';
+
+const mockChatStream = jest.fn();
+const mockTranscribe = jest.fn();
+const mockUpload = jest.fn().mockResolvedValue({ id: 'voice-upload' });
+const mockAnalyzeImage = jest.fn().mockResolvedValue({ text: '白板上的计划' });
 
 jest.mock('react-native-safe-area-context', () => ({
   SafeAreaProvider: ({ children }: { children: React.ReactNode }) => children,
@@ -24,6 +32,7 @@ jest.mock('react-native-safe-area-context', () => ({
 jest.mock('../src/platform/ports', () => ({
   defaultServerUrl: 'https://test',
   platform: {
+    updateRideNotification: jest.fn().mockResolvedValue(undefined),
     loadPreferences: jest.fn().mockResolvedValue({
       serverUrl: 'https://test',
       onboarded: true,
@@ -40,10 +49,15 @@ jest.mock('../src/platform/ports', () => ({
     onForeground: () => () => {},
     initialConnectionLink: jest.fn().mockResolvedValue(null),
     onConnectionLink: () => () => {},
+    startRecording: jest.fn().mockResolvedValue(undefined),
+    stopRecording: jest.fn().mockResolvedValue({ uri: 'file:///voice.m4a', name: 'voice.m4a', mime_type: 'audio/mp4', size: 1000 }),
+    pickImage: jest.fn(),
+    pickDocument: jest.fn(),
   },
 }));
 jest.mock('../src/api/client', () => ({
   normalizeServerUrl: (url: string) => url,
+  ApiError: class ApiError extends Error {},
   newRequestId: () => 'request',
   errorMessage: (failure: unknown) => failure instanceof Error ? failure.message : '请求失败',
   ApiClient: jest.fn().mockImplementation(() => ({
@@ -56,6 +70,11 @@ jest.mock('../src/api/client', () => ({
     capabilities: jest
       .fn()
       .mockResolvedValue({ runtime: { model_mode: 'local' } }),
+    chatStream: mockChatStream,
+    upload: mockUpload,
+    transcribe: mockTranscribe,
+    analyzeImage: mockAnalyzeImage,
+    deleteUpload: jest.fn().mockResolvedValue(undefined),
     dispose: jest.fn(),
   })),
 }));
@@ -180,6 +199,132 @@ const button = (root: ReactTestInstance, label: string) =>
       node.props.accessibilityLabel === label &&
       typeof node.props.onPress === 'function',
   )[0];
+
+const touch = (pageY: number) => ({ nativeEvent: { pageX: 140, pageY } });
+const stopChat = async (_intent: unknown, emit: (event: unknown) => void) => {
+  emit({ id: 1, event: 'error', data: { message: '测试结束' } });
+};
+
+test('Today edits text in place, sends once, and leaves an empty draft on return', async () => {
+  mockChatStream.mockReset().mockImplementation(stopChat);
+  let tree!: ReactTestRenderer;
+  await act(async () => { tree = create(<App />); });
+  try {
+    expect(tree.root.findByType(UnifiedInputBar).props.inputProps.placeholder).toBe('发消息…');
+    await act(async () => tree.root.findByType(TextInput).props.onChangeText('第一行草稿\n第二行草稿'));
+    expect(tree.root.findByType(UnifiedInputBar).props.expandedText).toBe(true);
+    await act(async () => {
+      tree.root.findByType(TextInput).props.onChangeText('今天有什么安排？');
+    });
+    expect(tree.root.findAllByType(ChatScreen)).toHaveLength(0);
+    expect(mockChatStream).not.toHaveBeenCalled();
+    await act(async () => button(tree.root, '发送消息').props.onPress());
+    expect(tree.root.findAllByType(ChatScreen)).toHaveLength(1);
+    expect(mockChatStream).toHaveBeenCalledTimes(1);
+    expect(mockChatStream.mock.calls[0][0].message).toBe('今天有什么安排？');
+    await act(async () => button(tree.root, '历史对话').props.onPress());
+    await act(async () => button(tree.root, '返回').props.onPress());
+    expect(mockChatStream).toHaveBeenCalledTimes(1);
+    await act(async () => button(tree.root, '返回').props.onPress());
+    expect(tree.root.findByType(TextInput).props.value).toBe('');
+  } finally {
+    await act(async () => tree.unmount());
+  }
+});
+
+test.each([
+  ['选择图片', '白板.png', 'image/png', 'pickImage'],
+  ['选择文件', '会议纪要.txt', 'text/plain', 'pickDocument'],
+] as const)('Today keeps its draft and sends %s with the message exactly once', async (label, name, mime, picker) => {
+  mockChatStream.mockReset().mockImplementation(stopChat);
+  mockUpload.mockClear();
+  mockAnalyzeImage.mockClear();
+  jest.mocked(platform[picker]).mockResolvedValueOnce({ uri: 'file:///draft', name, mime_type: mime });
+  let tree!: ReactTestRenderer;
+  await act(async () => { tree = create(<App />); });
+  try {
+    await act(async () => button(tree.root, '选择附件').props.onPress());
+    await act(async () => button(tree.root, label).props.onPress());
+    await act(async () => tree.root.findByType(TextInput).props.onChangeText('帮我总结这个附件。'));
+    expect(tree.root.findAllByType(ChatScreen)).toHaveLength(0);
+    expect(mockUpload).not.toHaveBeenCalled();
+    await act(async () => button(tree.root, '打开测试对话').props.onPress());
+    await act(async () => button(tree.root, '返回').props.onPress());
+    expect(tree.root.findByType(TextInput).props.value).toBe('帮我总结这个附件。');
+    expect(button(tree.root, '移除附件')).toBeDefined();
+    await act(async () => {
+      const send = button(tree.root, '发送消息');
+      send.props.onPress();
+      send.props.onPress();
+    });
+    expect(mockUpload).toHaveBeenCalledTimes(1);
+    expect(mockUpload.mock.calls[0][0].name).toBe(name);
+    expect(mockAnalyzeImage).toHaveBeenCalledTimes(picker === 'pickImage' ? 1 : 0);
+    expect(mockChatStream).toHaveBeenCalledTimes(1);
+    expect(mockChatStream.mock.calls[0][0]).toMatchObject({ message: '帮我总结这个附件。', upload_ids: ['voice-upload'] });
+  } finally {
+    await act(async () => tree.unmount());
+  }
+});
+
+test('Today cancels a swipe and retries voice with its existing draft and picture without re-uploading the clip', async () => {
+  jest.useFakeTimers();
+  mockChatStream.mockReset().mockImplementation(stopChat);
+  jest.mocked(platform.startRecording).mockClear();
+  mockUpload.mockClear();
+  mockUpload.mockResolvedValueOnce({ id: 'voice-upload' }).mockResolvedValueOnce({ id: 'image-upload' });
+  jest.mocked(platform.pickImage).mockResolvedValueOnce({
+    uri: 'file:///notes.png', name: 'notes.png', mime_type: 'image/png',
+  });
+  mockTranscribe.mockReset()
+    .mockRejectedValueOnce(new Error('识别服务暂不可用'))
+    .mockResolvedValueOnce({ text: '帮我安排明天的会议。' });
+  let tree!: ReactTestRenderer;
+  try {
+    await act(async () => { tree = create(<App />); });
+    await act(async () => tree.root.findByType(TextInput).props.onChangeText('参考这张图。'));
+    await act(async () => button(tree.root, '选择附件').props.onPress());
+    await act(async () => button(tree.root, '选择图片').props.onPress());
+    await act(async () => button(tree.root, '切换语音输入').props.onPress());
+    const mic = tree.root.findByProps({ testID: 'home-hold-to-talk' });
+    await act(async () => {
+      mic.props.onResponderGrant(touch(540));
+      mic.props.onResponderRelease();
+      jest.advanceTimersByTime(160);
+    });
+    expect(platform.startRecording).not.toHaveBeenCalled();
+    await act(async () => {
+      mic.props.onResponderGrant(touch(540));
+      jest.advanceTimersByTime(160);
+    });
+    expect(jest.mocked(platform.startRecording)).toHaveBeenCalled();
+    await act(async () => {
+      mic.props.onResponderMove(touch(475));
+      mic.props.onResponderRelease();
+    });
+    expect(tree.root.findAllByType(ChatScreen)).toHaveLength(0);
+    expect(mockUpload).not.toHaveBeenCalled();
+    await act(async () => {
+      mic.props.onResponderGrant(touch(540));
+      jest.advanceTimersByTime(160);
+    });
+    await act(async () => mic.props.onResponderRelease());
+    const recovery = tree.root.findByType(ChatVoiceRecovery);
+    expect(recovery.props.failure?.message).toContain('识别服务暂不可用');
+    expect(mockChatStream).not.toHaveBeenCalled();
+    expect(mockUpload).toHaveBeenCalledTimes(1);
+    await act(async () => recovery.props.onRetry());
+    expect(mockUpload.mock.calls.map(([file]) => file.name)).toEqual(['voice.m4a', 'notes.png']);
+    expect(mockTranscribe).toHaveBeenCalledTimes(2);
+    expect(mockChatStream).toHaveBeenCalledTimes(1);
+    expect(mockChatStream.mock.calls[0][0]).toMatchObject({
+      message: '参考这张图。\n帮我安排明天的会议。', upload_ids: ['image-upload'],
+    });
+  } finally {
+    if (tree) await act(async () => tree.unmount());
+    jest.useRealTimers();
+  }
+});
 
 test('the connection centre owns one navigation header and restores the application header on return', async () => {
   let tree!: ReactTestRenderer;

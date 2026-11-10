@@ -24,6 +24,7 @@ jest.mock('react-native-safe-area-context', () => ({
 jest.mock('../src/platform/ports', () => ({
   defaultServerUrl: 'https://test',
   platform: {
+    updateRideNotification: jest.fn().mockResolvedValue(undefined),
     loadPreferences: jest.fn().mockResolvedValue({
       serverUrl: 'https://test',
       onboarded: true,

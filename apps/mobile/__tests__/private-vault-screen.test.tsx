@@ -74,7 +74,7 @@ test('masked previews reveal only after native authentication and leave no full 
   await app.press('验证并打开资料库');
   await app.press('查看私密资料：工资卡');
   expect(app.text()).not.toContain('0000000000001234');
-  await app.press('验证并查看完整资料');
+  await app.press('查看完整资料');
   expect(native.reveal).toHaveBeenCalled();
   expect(app.text()).toContain('0000000000001234');
   await act(async () => { foreground?.('background'); });
@@ -82,9 +82,27 @@ test('masked previews reveal only after native authentication and leave no full 
   await app.close();
 });
 
+test('phone and documents can be added and a saved phone can be found locally', async () => {
+  native.summaries.mockResolvedValue([{ id: 'phone', type: 'phone', alias: '本人手机号', summary: '尾号 0100' }]);
+  const app = await mount();
+  try {
+    await app.press('添加私密资料');
+    expect(app.text()).toContain('社保卡');
+    expect(app.text()).toContain('居住证');
+    await app.press('手机号');
+    expect(app.tree.root.findAllByType(TextInput).some(input => input.props.accessibilityLabel === '手机号码')).toBe(true);
+    await app.press('返回上一页');
+    await app.press('对话取用');
+    await app.press('我的手机号');
+    expect(app.text()).toContain('本人手机号');
+    expect(app.text()).toContain('尾号 0100');
+    expect(app.api.request).not.toHaveBeenCalled();
+  } finally { await app.close(); }
+});
+
 test('account changes synchronously hide full data and close the old native protection scope', async () => {
   const app = await mount();
-  await app.press('验证并打开资料库'); await app.press('查看私密资料：工资卡'); await app.press('验证并查看完整资料');
+  await app.press('验证并打开资料库'); await app.press('查看私密资料：工资卡'); await app.press('查看完整资料');
   await act(async () => { app.tree.update(<AppProvider value={{ ...app.value, user: { ...app.value.user!, id: 'other-owner' } }}><PrivateVaultScreen /></AppProvider>); });
   expect(app.text()).not.toContain('0000000000001234');
   expect(app.text()).toContain('你的资料已锁定');
@@ -105,11 +123,52 @@ test('a device without the native secure port fails closed', async () => {
 test('full values are removed after the reveal timeout', async () => {
   jest.useFakeTimers();
   const app = await mount();
-  await app.press('验证并打开资料库'); await app.press('查看私密资料：工资卡'); await app.press('验证并查看完整资料');
+  await app.press('验证并打开资料库'); await app.press('查看私密资料：工资卡'); await app.press('查看完整资料');
   expect(app.text()).toContain('0000000000001234');
-  await act(async () => { jest.advanceTimersByTime(30000); });
+  expect(app.text()).toContain('显示中 00:30');
+  await act(async () => { jest.advanceTimersByTime(1000); });
+  expect(app.text()).toContain('显示中 00:29');
+  await act(async () => { jest.advanceTimersByTime(29000); });
   expect(app.text()).not.toContain('0000000000001234');
   expect(app.text()).toContain('完整资料已自动隐藏');
+  await app.close();
+});
+
+test('address sharing starts with only the address and requires an explicit choice for contact details', async () => {
+  native.summaries.mockResolvedValueOnce([{ id: 'address', type: 'address', alias: '家庭住址', summary: '完整收件地址已隐藏' }]);
+  native.reveal.mockResolvedValueOnce({ id: 'address', type: 'address', alias: '家庭住址', fields: { owner: '示例姓名', phone: '00000000000', address: '示例市清和区测试路 1 号' } });
+  const app = await mount();
+  await app.press('验证并打开资料库'); await app.press('查看私密资料：家庭住址');
+  expect(app.text()).not.toContain('测试路');
+  expect(app.text()).not.toContain('复制地址');
+  await app.press('查看完整资料');
+  expect(app.text()).toContain('测试路');
+  expect(app.text()).not.toContain('完整收件地址已隐藏');
+  await app.press('分享资料'); await app.press('验证并选择接收人');
+  expect(native.share).toHaveBeenLastCalledWith(expect.stringContaining('owner'), 'address', false);
+  await app.press('分享资料'); await app.press('同时分享收件人和电话'); await app.press('验证并选择接收人');
+  expect(native.share).toHaveBeenLastCalledWith(expect.stringContaining('owner'), 'address', true);
+  await app.press('分享资料'); await app.press('验证并选择接收人');
+  expect(native.share).toHaveBeenLastCalledWith(expect.stringContaining('owner'), 'address', false);
+  await app.press('更多资料操作'); await app.press('查看使用记录');
+  expect(app.text()).toContain('打开资料分享');
+  await app.press('返回上一页');
+  expect(app.text()).toContain('家庭住址');
+  expect(app.text()).not.toContain('测试路');
+  expect(app.text()).not.toContain('分享资料');
+  await app.close();
+});
+
+test('an open sharing dialog closes when the details time out', async () => {
+  jest.useFakeTimers();
+  const app = await mount();
+  await app.press('验证并打开资料库'); await app.press('查看私密资料：工资卡'); await app.press('查看完整资料');
+  await app.press('分享资料');
+  expect(app.text()).toContain('验证并选择接收人');
+  await act(async () => { jest.advanceTimersByTime(30000); });
+  expect(app.text()).not.toContain('验证并选择接收人');
+  expect(app.text()).not.toContain('0000000000001234');
+  expect(native.share).not.toHaveBeenCalled();
   await app.close();
 });
 

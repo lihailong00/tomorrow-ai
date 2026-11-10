@@ -1,6 +1,7 @@
 //! A deliberately small bridge: trusted local UI -> the selected Tada server.
 //! It does not run agent tools, shell commands, or parse provider/model output.
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use url::{Host, Url};
 
 const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MULTIPART_BYTES: usize = 4 * 1024 * 1024 + 4096;
 const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 16;
 
@@ -88,9 +90,16 @@ pub struct NativeRequest {
     method: String,
     #[serde(default)]
     headers: HashMap<String, String>,
-    body: Option<String>,
+    body: Option<RequestBody>,
     #[serde(default)]
     allow_insecure_lan: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RequestBody {
+    Text(String),
+    Multipart { base64: String },
 }
 
 #[derive(Serialize)]
@@ -187,9 +196,22 @@ fn request_builder(
     }
     let method = Method::from_bytes(request.method.to_ascii_uppercase().as_bytes())
         .map_err(|_| "Invalid HTTP method")?;
+    let image_analysis = method == Method::POST
+        && url
+            .path()
+            .strip_prefix("/v1/uploads/")
+            .is_some_and(|path| path.ends_with("/analyze"));
+    let image_upload = method == Method::POST && url.path() == "/v1/uploads" && !stream;
     let mut builder = client
         .request(method, url)
-        .timeout(Duration::from_secs(if stream { 900 } else { 45 }));
+        .timeout(Duration::from_secs(if stream {
+            900
+        } else if image_analysis {
+            120
+        } else {
+            45
+        }));
+    let mut multipart = false;
     for (name, value) in request.headers {
         if !matches!(
             name.to_ascii_lowercase().as_str(),
@@ -207,13 +229,33 @@ fn request_builder(
         if value.len() > 16_384 || value.contains(['\r', '\n']) {
             return Err("Invalid HTTP header".into());
         }
+        if name.eq_ignore_ascii_case("content-type")
+            && value.starts_with("multipart/form-data; boundary=")
+        {
+            multipart = true;
+        }
         builder = builder.header(name, value);
     }
-    if let Some(body) = request.body {
-        if body.len() > MAX_JSON_BYTES {
-            return Err("Request exceeds the 8 MB limit".into());
+    match request.body {
+        Some(RequestBody::Text(body)) => {
+            if body.len() > MAX_JSON_BYTES {
+                return Err("Request exceeds the 8 MB limit".into());
+            }
+            builder = builder.body(body);
         }
-        builder = builder.body(body);
+        Some(RequestBody::Multipart { base64 }) => {
+            if !image_upload || !multipart || base64.len() > MAX_MULTIPART_BYTES.div_ceil(3) * 4 {
+                return Err("Invalid multipart upload".into());
+            }
+            let bytes = STANDARD
+                .decode(base64)
+                .map_err(|_| "Invalid multipart encoding")?;
+            if bytes.len() > MAX_MULTIPART_BYTES {
+                return Err("Multipart upload exceeds the size limit".into());
+            }
+            builder = builder.body(bytes);
+        }
+        None => {}
     }
     Ok(builder)
 }
@@ -484,6 +526,40 @@ mod tests {
         assert!(!first.is_cancelled());
         state.finish("test-id");
         assert!(state.register("test-id").is_ok());
+    }
+
+    #[test]
+    fn multipart_preserves_binary_bytes_and_stays_on_upload_endpoint() {
+        let state = DesktopState::new().unwrap();
+        let mut input = request("https://example.com", "/v1/uploads", false);
+        input.method = "POST".into();
+        input.headers.insert(
+            "content-type".into(),
+            "multipart/form-data; boundary=test".into(),
+        );
+        let bytes = [0, 255, 13, 10];
+        input.body = Some(RequestBody::Multipart {
+            base64: STANDARD.encode(bytes),
+        });
+        let request = request_builder(&state.client, input, false)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.body().and_then(reqwest::Body::as_bytes),
+            Some(bytes.as_slice())
+        );
+
+        let mut input = self::request("https://example.com", "/v1/chat/stream", false);
+        input.method = "POST".into();
+        input.headers.insert(
+            "content-type".into(),
+            "multipart/form-data; boundary=test".into(),
+        );
+        input.body = Some(RequestBody::Multipart {
+            base64: STANDARD.encode(bytes),
+        });
+        assert!(request_builder(&state.client, input, false).is_err());
     }
 
     #[test]

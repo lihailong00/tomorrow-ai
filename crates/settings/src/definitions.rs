@@ -201,6 +201,9 @@ pub static DEFINITIONS: &[SettingDefinition] = &[
         "text",
         "kso.file.read"
     ),
+    item!("SLACK_CLIENT_ID", "connections", "Slack Client ID", "text", ""),
+    item!(secret "SLACK_CLIENT_SECRET","connections","Slack Client Secret"),
+    item!("SLACK_REDIRECT_URI", "connections", "Slack HTTPS 回调地址", "url", ""),
     item!("FEISHU_CLIENT_ID", "connections", "飞书应用 ID", "text", ""),
     item!(secret "FEISHU_CLIENT_SECRET","connections","飞书应用 Secret"),
     item!(

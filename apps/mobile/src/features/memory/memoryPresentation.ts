@@ -1,4 +1,17 @@
-import type { Memory, MemoryConfirmation } from '../../domain/types';
+import type { Memory, MemoryConfirmation, MemoryKind } from '../../domain/types';
+
+export const memoryGroups = {
+  preference: '偏好',
+  goal: '目标',
+  fact: '关于我',
+} as const;
+export type MemoryGroup = keyof typeof memoryGroups;
+
+export function memoryGroup(kind: MemoryKind): MemoryGroup {
+  if (kind === 'project') return 'goal';
+  if (kind === 'person') return 'fact';
+  return kind;
+}
 
 // Also recognize older records which predate server-side confirmation metadata.
 const weightPattern =

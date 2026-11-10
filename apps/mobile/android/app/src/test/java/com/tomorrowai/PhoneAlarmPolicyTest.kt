@@ -29,6 +29,11 @@ class PhoneAlarmPolicyTest {
   @Test fun tooNearTimesAreRejected() {
     rejects { PhoneAlarmPolicy.target("2026-11-03", "12:00", at("2026-11-03T11:59:57"), zone) }
   }
+  @Test fun systemAlarmOnlyReceivesTheNextOccurrence() {
+    val now = at("2026-11-03T22:31:00")
+    assertEquals(java.time.LocalTime.of(6, 31), PhoneAlarmPolicy.nextSystemTarget("2026-11-04", "06:31", now, zone))
+    rejects { PhoneAlarmPolicy.nextSystemTarget("2026-11-04", "23:00", now, zone) }
+  }
   @Test fun daylightSavingGapsAndFoldsAreNotGuessed() {
     val ny = ZoneId.of("America/New_York")
     rejects { PhoneAlarmPolicy.target("2027-03-14", "02:30", at("2027-03-13T12:00:00", ny), ny) }
@@ -44,7 +49,7 @@ class PhoneAlarmPolicyTest {
     val methods = PhoneAlarmsModule::class.java.declaredMethods.filter {
       it.getAnnotation(com.facebook.react.bridge.ReactMethod::class.java) != null
     }
-    assertEquals(8, methods.size)
+    assertEquals(9, methods.size)
     methods.forEach { assertEquals(Void.TYPE, it.returnType) }
   }
 }

@@ -154,6 +154,9 @@ async function screen(element: React.ReactNode, instance = manifest, extra = {})
     text: () => tree.root.findAllByType(Text).map(n => n.props.children).flat().join('\n'),
     button,
     press: async (label: string) => { await act(async () => { await button(label)!.props.onPress(); }); },
+    revealDataflow: async () => { await act(async () => {
+      tree.root.findAll(node => node.props.accessibilityLabel === '查看数据去向' && typeof node.props.onPress === 'function')[0].props.onPress();
+    }); },
     input: async (label: string, value: string) => { await act(async () => {
       tree.root.findAllByType(TextInput).find(n => n.props.accessibilityLabel === label)!.props.onChangeText(value);
     }); },
@@ -175,6 +178,7 @@ describe('self-hosted phone UI', () => {
   it('shows the separate text embedding destination in connection settings', async () => {
     const view = await screen(<SettingsScreen />, { ...manifest,
       dataflow: { ...manifest.dataflow, embeddings: 'vectors.example.test' } });
+    await view.revealDataflow();
     expect(view.text()).toContain('文字向量：\nvectors.example.test');
     await view.close();
   });
@@ -295,6 +299,7 @@ describe('self-hosted phone UI', () => {
       });
       expect(view.savePreferences).not.toHaveBeenCalled(); expect(globalThis.fetch).not.toHaveBeenCalled();
       await view.press('检查服务器');
+      await view.revealDataflow();
       expect(view.text()).toContain('家庭服务器本地模型');
       expect(view.savePreferences).not.toHaveBeenCalled();
       await view.press('连接这台服务器');

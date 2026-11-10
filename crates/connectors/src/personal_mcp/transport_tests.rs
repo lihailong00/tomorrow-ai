@@ -44,6 +44,10 @@ async fn handle(
         json!({"protocolVersion":PROTOCOL,"capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
     } else if fixture.mode == 5 {
         json!({"tools":[{"name":if input["params"]["cursor"].is_null(){"first"}else{"second"},"inputSchema":{"type":"object"}}],"nextCursor":"repeat"})
+    } else if fixture.mode == 7 {
+        json!({"structuredContent":{"success":true,"data":{"meals":{
+            "11002":{"name":"双人套餐","image":"x".repeat(MAX_BYTES + 1)}
+        }}}})
     } else {
         json!({"tools":[{"name":"lookup","description":"fixture","inputSchema":{"type":"object"}}]})
     };
@@ -65,6 +69,19 @@ async fn handle(
         HeaderValue::from_static("fixture-session"),
     );
     response
+}
+
+#[tokio::test]
+async fn large_menu_keeps_product_codes_without_changing_other_tool_limits() {
+    let (mut connection, _, server) = server(7).await;
+    let params = json!({"name":"query-meals","arguments":{}});
+    assert!(connection.rpc("tools/call", params.clone()).await.is_err());
+    let result = connection
+        .rpc_limited("tools/call", params, MCDONALDS_MENU_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(result["structuredContent"]["data"]["meals"]["11002"]["name"], "双人套餐");
+    server.abort();
 }
 
 async fn server(
@@ -216,21 +233,21 @@ fn read_policy_does_not_trust_names_or_upstream_annotations() {
 #[test]
 fn meeting_metadata_keeps_actual_run_model_and_reports_manual_calls_truthfully() {
     let input = json!({"meeting_id":"fixture","_client_info":{"model":"actual-frozen-model","agent":"override","os":"override"}});
-    let output = call_arguments("tencent_meeting", input);
+    let output = call_arguments("tencent_meeting", "get_user_meetings", input);
     assert_eq!(
         output["_client_info"],
         json!({"os":std::env::consts::OS,"agent":"Tada","model":"actual-frozen-model"})
     );
     assert_eq!(
-        call_arguments("tencent_meeting", json!({}))["_client_info"]["model"],
+        call_arguments("tencent_meeting", "get_user_meetings", json!({}))["_client_info"]["model"],
         "not_provided"
     );
     assert_eq!(
-        call_arguments("tencent_meeting", json!({"_client_info":{"model":""}}))["_client_info"]["model"],
+        call_arguments("tencent_meeting", "get_user_meetings", json!({"_client_info":{"model":""}}))["_client_info"]["model"],
         "not_provided"
     );
     assert_eq!(
-        call_arguments("didi", json!({"name":"unchanged"})),
+        call_arguments("didi", "maps_textsearch", json!({"name":"unchanged"})),
         json!({"name":"unchanged"})
     );
 }
@@ -374,4 +391,53 @@ async fn stdio_bounds_output_and_does_not_pass_parent_secrets_to_child() {
     );
     stdio.child.kill().await.unwrap();
     stdio.child.wait().await.unwrap();
+}
+#[test]
+fn structured_provider_failure_is_not_reported_as_a_completed_tool() {
+    for (provider, result) in [
+        ("mcdonalds", json!({"structuredContent":{"code":508,"success":false}})),
+        ("tencent_meeting", json!({"jsonrpc":"2.0","id":2,"error":{"code":-32603}})),
+        ("tencent_docs", json!({"structuredContent":{"error":"access denied"}})),
+        ("weiyun", json!({"structuredContent":{"error":{"code":5}}})),
+    ] {
+        assert_eq!(normalize_tool_result(provider, result)["isError"], true);
+    }
+    for (provider, result) in [
+        ("mcdonalds", json!({"structuredContent":{"code":200,"success":true}})),
+        ("tencent_docs", json!({"structuredContent":{"error":"","list":[]}})),
+        ("weiyun", json!({"structuredContent":{"error":{"code":0},"file_list":[]}})),
+        ("tencent_meeting", json!({"content":[{"type":"text","text":"no meetings"}]})),
+    ] {
+        assert_eq!(normalize_tool_result(provider, result.clone()), result);
+    }
+}
+
+#[test]
+fn tencent_docs_recent_list_fills_the_required_upstream_page_size() {
+    assert_eq!(
+        call_arguments("tencent_docs", "manage.recent_online_file", json!({"num":2})),
+        json!({"num":2,"count":20})
+    );
+    assert_eq!(
+        call_arguments("tencent_docs", "manage.recent_online_file", json!({"num":1,"count":3})),
+        json!({"num":1,"count":3})
+    );
+    assert_eq!(call_arguments("tencent_docs", "manage.folder_list", json!({})), json!({}));
+}
+
+#[test]
+fn meeting_recordings_and_weiyun_categories_report_missing_selectors() {
+    assert!(validate_tool_arguments("tencent_meeting", "get_records_list", &json!({
+        "start_time":1793059200,"end_time":1794096000
+    })).is_err());
+    assert!(validate_tool_arguments("tencent_meeting", "get_records_list", &json!({
+        "start_time":"2026-11-01T00:00:00+08:00","end_time":"2026-11-07T23:59:59+08:00"
+    })).is_ok());
+    assert!(validate_tool_arguments("tencent_meeting", "get_records_list", &json!({
+        "meeting_code":"123456789"
+    })).is_ok());
+    assert!(validate_tool_arguments("weiyun", "weiyun.list_by_category", &json!({"count":3})).is_err());
+    assert!(validate_tool_arguments("weiyun", "weiyun.list_by_category", &json!({
+        "count":3,"category_id":4095
+    })).is_ok());
 }

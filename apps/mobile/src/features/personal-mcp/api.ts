@@ -33,6 +33,16 @@ export function personalMcpApi(api: ApiClient, signal: () => AbortSignal) {
     disconnect: (id: string) =>
       request<{ ok: boolean }>(provider(id), 'DELETE'),
     actions: () => request<{ items: PersonalMcpAction[] }>('/actions'),
+    didiDrivingRoute: (origin: string, destination: string) =>
+      request<{ status?: string; result?: { content?: { text?: string }[] } }>('/didi/call', 'POST', {
+        tool: 'maps_direction_driving',
+        arguments: { origin, destination },
+      }),
+    prepareRideCancellation: (orderId: string) =>
+      request<{ action: PersonalMcpAction }>('/didi/call', 'POST', {
+        tool: 'taxi_cancel_order',
+        arguments: { order_id: orderId },
+      }),
     confirm: (id: string) =>
       request<PersonalMcpAction>(
         '/actions/' + encodeURIComponent(id) + '/confirm',

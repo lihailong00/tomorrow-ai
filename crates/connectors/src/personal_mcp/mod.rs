@@ -10,6 +10,7 @@ pub(crate) mod ima;
 pub(crate) mod weread;
 pub(crate) mod qq_music;
 pub(super) mod state;
+mod tencent_docs_fixture;
 
 pub use state::{PersonalMcpState, router};
 

@@ -71,6 +71,43 @@ describe('输入与富文本', () => {
 });
 
 describe('聊天真实事件与重试', () => {
+  it('粘贴图片只在本地预览，发送后上传并理解，失败时复用已上传的图片', async () => {
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({width: 64, height: 64, close: vi.fn()})));
+    const revoke = vi.fn();
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL() {return 'blob:preview';}
+      static revokeObjectURL = revoke;
+    });
+    try {
+      const uploadImage = vi.fn(async () => ({id: 'upload-1', name: '粘贴的图片.png', mime_type: 'image/png', size: 3}));
+      const analyzeImage = vi.fn().mockRejectedValueOnce(new Error('图片理解暂时繁忙')).mockResolvedValue({text: '图片内容'});
+      const chatStream = vi.fn(async (_intent, onEvent) => {
+        onEvent({id: 1, event: 'done', data: {response: {conversation_id: 'c1', message: {id: 'a1', role: 'assistant', content: '看到了图片', conversation_id: 'c1', created_at: ''}}}});
+      });
+      const api = {uploadImage, analyzeImage, chatStream} as unknown as ApiClient;
+      render(<Chat api={api} conversationId={null} user={session.user} onConversation={vi.fn()} onDone={vi.fn()}/>);
+      const input = screen.getByRole('textbox', {name: '发送消息'});
+      expect(fireEvent.paste(input, {clipboardData: {files: [], items: [{kind: 'string', type: 'text/plain'}]}})).toBe(true);
+      const picture = new File(['PNG'], 'image.png', {type: 'image/png'});
+      expect(fireEvent.paste(input, {clipboardData: {files: [], items: [{kind: 'file', type: 'image/png', getAsFile: () => picture}]}})).toBe(false);
+      expect(screen.getByAltText('待发送图片预览').getAttribute('src')).toBe('blob:preview');
+      expect(uploadImage).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('button', {name: '移除图片'}));
+      expect(screen.queryByAltText('待发送图片预览')).toBeNull();
+      fireEvent.paste(input, {clipboardData: {files: [picture], items: []}});
+      fireEvent.click(screen.getByRole('button', {name: '发送'}));
+      await screen.findByText('图片理解暂时繁忙');
+      expect(chatStream).not.toHaveBeenCalled();
+      expect(screen.getByAltText('待发送图片预览')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', {name: '发送'}));
+      await screen.findByText('看到了图片');
+      expect(uploadImage).toHaveBeenCalledTimes(1);
+      expect(analyzeImage).toHaveBeenCalledTimes(2);
+      expect(chatStream).toHaveBeenCalledWith(expect.objectContaining({message: '请帮我看看这张图片。', upload_ids: ['upload-1']}), expect.any(Function), expect.anything());
+      expect(screen.getByLabelText('你发送的消息').textContent).toContain('粘贴的图片.png');
+      expect(revoke).toHaveBeenCalledTimes(2);
+    } finally {vi.unstubAllGlobals();}
+  });
   it('首事件之前失败也能复用原请求重连，用户消息不重复', async () => {
     const attempts: Array<{intent: ChatIntent; cursor: number | undefined}> = [];
     const api = {chatStream: vi.fn(async (intent, onEvent, options) => {

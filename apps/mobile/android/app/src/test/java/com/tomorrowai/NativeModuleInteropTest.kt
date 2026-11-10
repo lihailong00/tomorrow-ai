@@ -6,7 +6,8 @@ import org.junit.Test
 
 class NativeModuleInteropTest {
   @Test fun asynchronousBridgeMethodsReturnVoidForTurboModuleInterop() {
-    val modules = listOf(PhoneAlarmsModule::class.java, PhotoIndexModule::class.java, TomorrowPlatformModule::class.java, AppInputsModule::class.java)
+    val modules = listOf(PhoneAlarmsModule::class.java, PhoneCalendarModule::class.java, PhotoIndexModule::class.java,
+      TomorrowPlatformModule::class.java, AppInputsModule::class.java, AppPermissionInspectionModule::class.java)
     for (module in modules) {
       val methods = module.declaredMethods.filter { it.getAnnotation(ReactMethod::class.java) != null }
       assertTrue("${module.simpleName} must expose bridge methods", methods.isNotEmpty())

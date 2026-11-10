@@ -49,7 +49,7 @@ impl PersonalWalletState {
     pub(super) async fn initialize_store(&self) -> Result<()> {
         let pool = self.inner.repository.pool();
         for query in [
-            "CREATE TABLE IF NOT EXISTS personal_wallet_profile(slot INTEGER PRIMARY KEY,owner TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'not_connected',authorization TEXT NOT NULL DEFAULT '',authorization_expires BIGINT NOT NULL DEFAULT 0,checked_at BIGINT NOT NULL DEFAULT 0)",
+            "CREATE TABLE IF NOT EXISTS personal_wallet_profile(slot INTEGER PRIMARY KEY,owner TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'not_connected',\"authorization\" TEXT NOT NULL DEFAULT '',authorization_expires BIGINT NOT NULL DEFAULT 0,checked_at BIGINT NOT NULL DEFAULT 0)",
             "CREATE TABLE IF NOT EXISTS personal_wallet_payments(id TEXT PRIMARY KEY,owner TEXT NOT NULL,request_key TEXT NOT NULL UNIQUE,order_key TEXT NOT NULL,argument_hash TEXT NOT NULL,encrypted_payload TEXT NOT NULL,status TEXT NOT NULL,created_at BIGINT NOT NULL,expires_at BIGINT NOT NULL,started_at BIGINT NOT NULL DEFAULT 0,receipt_hash TEXT UNIQUE)",
             "CREATE INDEX IF NOT EXISTS personal_wallet_payment_owner ON personal_wallet_payments(owner,created_at)",
             "CREATE UNIQUE INDEX IF NOT EXISTS personal_wallet_active_order ON personal_wallet_payments(owner,order_key) WHERE status IN ('pending','executing','awaiting_payment','unknown_outcome','paid')",
@@ -118,15 +118,15 @@ impl PersonalWalletState {
             .map(|link| self.seal(user, "authorization", &link))
             .transpose()?
             .unwrap_or_default();
-        sqlx::query("UPDATE personal_wallet_profile SET status=$1,authorization=$2,authorization_expires=$3,checked_at=$4 WHERE slot=1 AND owner=$5")
+        sqlx::query("UPDATE personal_wallet_profile SET status=$1,\"authorization\"=$2,authorization_expires=$3,checked_at=$4 WHERE slot=1 AND owner=$5")
             .bind(status).bind(encoded).bind(if authorization.is_some(){now()+300}else{0}).bind(now()).bind(user).execute(&self.inner.repository.pool()).await?;
-        if status == "needs_reconnect" {
+        if matches!(status, "needs_reconnect" | "not_connected") {
             self.cancel_pending(user).await?;
         }
         Ok(())
     }
     pub(super) async fn saved_authorization(&self, user: &str) -> Result<Option<Value>> {
-        let row=sqlx::query("SELECT authorization,authorization_expires FROM personal_wallet_profile WHERE slot=1 AND owner=$1 AND status='awaiting_authorization' AND authorization_expires>$2")
+        let row=sqlx::query("SELECT \"authorization\",authorization_expires FROM personal_wallet_profile WHERE slot=1 AND owner=$1 AND status='awaiting_authorization' AND authorization_expires>$2")
             .bind(user).bind(now()).fetch_optional(&self.inner.repository.pool()).await?;
         let Some(row) = row else { return Ok(None) };
         let link: String = self.unseal(
@@ -141,7 +141,7 @@ impl PersonalWalletState {
         Ok(Some(value))
     }
     pub(super) async fn claim_binding(&self, user: &str) -> Result<()> {
-        let changed=sqlx::query("UPDATE personal_wallet_profile SET status='binding',authorization='' WHERE slot=1 AND owner=$1 AND status='awaiting_authorization' AND authorization_expires>$2")
+        let changed=sqlx::query("UPDATE personal_wallet_profile SET status='binding',\"authorization\"='' WHERE slot=1 AND owner=$1 AND status='awaiting_authorization' AND authorization_expires>$2")
             .bind(user).bind(now()).execute(&self.inner.repository.pool()).await?.rows_affected();
         if changed != 1 {
             return Err(conflict());

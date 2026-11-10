@@ -15,7 +15,27 @@ function number(text: string): number {
   return text.length === 1 ? digit(text) : NaN;
 }
 
-/** An editable suggestion, never authority to execute. Relative days use message time. */
+/** Only a fresh, standalone alarm command may be dispatched automatically. */
+export function directAlarmProposal(text: string, createdAt: string): AlarmProposal | null {
+  const value = text.trim().replace(/[。！!]+$/, '');
+  const command = '(?:给我|帮我|请)?(?:设(?:置|定)?|定|订)(?:一个|个)?';
+  const duration = '([0-9零一二两三四五六七八九十]{1,3}|半)(?:个)?(小时|钟头|分钟)';
+  const relative = new RegExp(`^(?:我要睡了[，,]\\s*)?${command}${duration}后(?:的)?闹[钟铃](?:吧)?$`).exec(value)
+    ?? new RegExp(`^${duration}后[，,]?\\s*${command}闹[钟铃](?:吧)?$`).exec(value);
+  if (relative) {
+    const minutes = (relative[1] === '半' ? 0.5 : number(relative[1])) * (relative[2] === '分钟' ? 1 : 60);
+    const base = Date.parse(createdAt);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes >= 1440 || !Number.isFinite(base)) return null;
+    const target = new Date(Math.ceil((base + minutes * 60_000) / 60_000) * 60_000);
+    return { date: day(target), time: `${pad(target.getHours())}:${pad(target.getMinutes())}`, title: '妥啦闹铃', needsReview: false };
+  }
+  const time = '(?:今天|明天)?(?:凌晨|早上|上午|中午|下午|晚上|晚间)?[0-9零一二两三四五六七八九十]{1,3}(?::[0-9]{2}|[点时](?:半|[0-9零一二两三四五六七八九十]{1,3}分?)?)';
+  if (!new RegExp(`^(?:${command}${time}(?:的)?闹[钟铃]|${time}${command}闹[钟铃])(?:吧)?$`).test(value)) return null;
+  const proposal = alarmProposal(value, createdAt);
+  return proposal.date && proposal.time && !proposal.needsReview ? proposal : null;
+}
+
+/** An editable suggestion. Relative days use message time. */
 export function alarmProposal(text: string, createdAt: string): AlarmProposal {
   const empty: AlarmProposal = { date: '', time: '', title: '提醒', needsReview: true };
   const base = new Date(createdAt);

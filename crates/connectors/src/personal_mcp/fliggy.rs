@@ -3,12 +3,81 @@
 use super::transport::Credentials;
 use crate::{ConnectorError, Result};
 use axum::http::StatusCode;
+use chrono::NaiveDate;
 use rand::RngCore;
-use serde_json::{Value, json};
-use std::{path::PathBuf, process::Stdio};
+use serde::Deserialize;
+use serde_json::{Map, Value, json};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::LazyLock};
 use tokio::io::AsyncReadExt;
 
 const MAX_BYTES: usize = 256 * 1024;
+
+#[derive(Deserialize)]
+struct Tool {
+    name: String,
+    command: String,
+    description: String,
+    group: Option<String>,
+    required: Vec<String>,
+    #[serde(default)]
+    properties: Map<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct Catalog {
+    parameter_groups: HashMap<String, Map<String, Value>>,
+    tools: Vec<Tool>,
+}
+
+static TOOLS: LazyLock<Vec<Tool>> = LazyLock::new(|| {
+    let Catalog {
+        parameter_groups,
+        mut tools,
+    } = serde_json::from_str(include_str!("fliggy_tools.json"))
+        .expect("valid FlyAI tool definitions");
+    for tool in &mut tools {
+        if let Some(group) = tool.group.take() {
+            let mut properties = parameter_groups[&group].clone();
+            properties.append(&mut tool.properties);
+            tool.properties = properties;
+        }
+    }
+    tools
+});
+
+fn find_tool(name: &str) -> Option<&'static Tool> {
+    TOOLS.iter().find(|tool| tool.name == name)
+}
+
+pub(super) fn tool_catalog() -> Vec<Value> {
+    TOOLS
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": tool.properties,
+                    "required": tool.required,
+                    "additionalProperties": false
+                },
+                "requires_confirmation": false
+            })
+        })
+        .collect()
+}
+
+pub(super) fn is_legacy_catalog(tools: &[Value]) -> bool {
+    tools.len() == 2
+        && ["fliggy_fast_search", "fliggy_ai_search"]
+            .iter()
+            .all(|name| {
+                tools
+                    .iter()
+                    .any(|tool| tool["name"].as_str() == Some(*name))
+            })
+}
 
 pub fn script() -> Option<PathBuf> {
     let relative = "services/agent/node_modules/@fly-ai/flyai-cli/dist/flyai-bundle.cjs";
@@ -52,18 +121,68 @@ fn upstream() -> ConnectorError {
     )
 }
 pub fn is_read_only(tool: &str) -> bool {
-    matches!(tool, "fliggy_fast_search" | "fliggy_ai_search")
+    find_tool(tool).is_some()
 }
-pub fn validate_arguments(tool: &str, args: &Value) -> Result<()> {
-    if !is_read_only(tool)
-        || !args.as_object().is_some_and(|object| object.len() == 1)
-        || !args["query"].as_str().is_some_and(|query| {
-            !query.trim().is_empty() && query.len() <= 2000 && !query.chars().any(char::is_control)
+fn valid_parameter(schema: &Value, value: &Value) -> bool {
+    if schema["enum"]
+        .as_array()
+        .is_some_and(|values| !values.contains(value))
+    {
+        return false;
+    }
+    match schema["type"].as_str() {
+        Some("string") => value.as_str().is_some_and(|text| {
+            let max_bytes = schema["maxLength"].as_u64().unwrap_or(2000) as usize;
+            !text.trim().is_empty()
+                && text.len() <= max_bytes
+                && !text.chars().any(char::is_control)
+                && (schema["format"] != "date"
+                    || (text.len() == 10
+                        && NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                            .is_ok_and(|date| date.format("%Y-%m-%d").to_string() == text)))
+        }),
+        Some("integer" | "number") => {
+            (schema["type"] == "number" || value.is_i64())
+                && value.as_f64().is_some_and(|number| {
+                    schema["minimum"].as_f64().is_none_or(|min| number >= min)
+                        && schema["maximum"].as_f64().is_none_or(|max| number <= max)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn validated_tool(name: &str, arguments: &Value) -> Result<&'static Tool> {
+    let tool = find_tool(name).ok_or_else(invalid)?;
+    let arguments = arguments.as_object().ok_or_else(invalid)?;
+    if !tool.required.iter().all(|key| arguments.contains_key(key))
+        || !arguments.iter().all(|(key, value)| {
+            tool.properties
+                .get(key)
+                .is_some_and(|schema| valid_parameter(schema, value))
         })
     {
         return Err(invalid());
     }
-    Ok(())
+    Ok(tool)
+}
+
+pub fn validate_arguments(tool: &str, arguments: &Value) -> Result<()> {
+    validated_tool(tool, arguments).map(|_| ())
+}
+
+fn cli_arguments(name: &str, arguments: &Value) -> Result<Vec<String>> {
+    let tool = validated_tool(name, arguments)?;
+    let mut argv = vec![tool.command.clone()];
+    for (key, value) in arguments.as_object().expect("validated object") {
+        let value = match value {
+            Value::String(text) => text.clone(),
+            _ => value.to_string(),
+        };
+        // Bind the value to its allowlisted flag even when it starts with a dash.
+        argv.push(format!("--{}={value}", key.replace('_', "-")));
+    }
+    Ok(argv)
 }
 
 struct Home(PathBuf);
@@ -96,20 +215,14 @@ impl Drop for Home {
 
 async fn invoke(credentials: &Credentials, tool: &str, args: Value) -> Result<Value> {
     credentials.validate("fliggy")?;
-    validate_arguments(tool, &args)?;
+    let argv = cli_arguments(tool, &args)?;
     let script = script().ok_or_else(unavailable)?;
     let home = Home::create()?;
     let node = std::env::var_os("PERSONAL_MCP_NODE").unwrap_or_else(|| "node".into());
     let mut command = tokio::process::Command::new(node);
     command
         .arg(script)
-        .arg(if tool == "fliggy_fast_search" {
-            "keyword-search"
-        } else {
-            "ai-search"
-        })
-        .arg("--query")
-        .arg(args["query"].as_str().ok_or_else(invalid)?)
+        .args(argv)
         .env_clear()
         .env("FLYAI_API_KEY", &credentials.token)
         .env("NO_COLOR", "1")
@@ -153,7 +266,11 @@ async fn invoke(credentials: &Credentials, tool: &str, args: Value) -> Result<Va
     if !child.wait().await.map_err(|_| upstream())?.success() {
         return Err(upstream());
     }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| upstream())?;
+    parse_result(&bytes)
+}
+
+fn parse_result(bytes: &[u8]) -> Result<Value> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| upstream())?;
     if !value.is_object()
         || (value["status"] != 0 && value["status"] != "0")
         || value.get("data").is_none_or(Value::is_null)
@@ -175,7 +292,7 @@ pub async fn discover(credentials: &Credentials) -> Result<Vec<Value>> {
         json!({"query":"杭州旅游"}),
     )
     .await?;
-    Ok([("fliggy_fast_search", "飞猪关键词旅行搜索"), ("fliggy_ai_search", "飞猪自然语言旅行搜索")].into_iter().map(|(name, description)| json!({"name":name,"description":description,"inputSchema":{"type":"object","required":["query"],"additionalProperties":false,"properties":{"query":{"type":"string","minLength":1,"maxLength":2000}}}})).collect())
+    Ok(tool_catalog())
 }
 pub async fn call(credentials: &Credentials, tool: &str, args: Value) -> Result<Value> {
     invoke(credentials, tool, args).await
@@ -184,6 +301,7 @@ pub async fn call(credentials: &Credentials, tool: &str, args: Value) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn searches_are_fixed_and_arguments_cannot_become_flags() {
         assert!(validate_arguments("fliggy_fast_search", &json!({"query":"北京到杭州"})).is_ok());
@@ -196,5 +314,82 @@ mod tests {
         }
         assert!(validate_arguments("config", &json!({"query":"杭州"})).is_err());
         assert!(!is_read_only("book_flight"));
+        assert_eq!(
+            cli_arguments("fliggy_search_poi", &json!({"city_name":"--help"})).unwrap(),
+            ["search-poi", "--city-name=--help"]
+        );
+        for args in [
+            json!({"destination":"成都"}),
+            json!({"origin":"上海","dep_date":"2026-02-30"}),
+            json!({"origin":"上海","sort_type":"3"}),
+            json!({"origin":"上海","journey_type":3}),
+            json!({"origin":"上海","max_price":-1}),
+            json!({"origin":"上海","token":"secret"}),
+        ] {
+            assert!(validate_arguments("fliggy_search_flight", &args).is_err());
+        }
+        assert!(
+            validate_arguments(
+                "fliggy_search_marriott_hotel",
+                &json!({
+                    "dest_name":"上海","hotel_brands":"万豪"
+                })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn all_eight_tools_route_to_the_official_commands_and_parse_their_receipts() {
+        let commands = [
+            ("fliggy_fast_search", "keyword-search"),
+            ("fliggy_ai_search", "ai-search"),
+            ("fliggy_search_flight", "search-flight"),
+            ("fliggy_search_train", "search-train"),
+            ("fliggy_search_hotel", "search-hotel"),
+            ("fliggy_search_poi", "search-poi"),
+            ("fliggy_search_marriott_hotel", "search-marriott-hotel"),
+            ("fliggy_search_marriott_package", "search-marriott-package"),
+        ];
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../../../services/agent/benchmarks/fliggy-receipts.json"
+        ))
+        .unwrap();
+        let catalog = tool_catalog();
+        assert_eq!(catalog.len(), commands.len());
+        for (tool, command) in commands {
+            let definition = catalog.iter().find(|item| item["name"] == tool).unwrap();
+            assert_eq!(definition["requires_confirmation"], false);
+            assert!(is_read_only(tool));
+            let sample = fixtures["samples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|sample| sample["tool"] == tool)
+                .unwrap();
+            let argv = cli_arguments(tool, &sample["arguments"]).unwrap();
+            assert_eq!(argv[0], command);
+            let args = sample["arguments"].as_object().unwrap();
+            assert_eq!(argv.len(), args.len() + 1);
+            for (key, value) in args {
+                let value = value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string());
+                assert!(argv.contains(&format!("--{}={value}", key.replace('_', "-"))));
+            }
+            let response = &sample["response"];
+            assert_eq!(
+                parse_result(&serde_json::to_vec(response).unwrap()).unwrap(),
+                *response
+            );
+            for failure in [
+                json!({"status":401,"message":"unauthorized","data":{}}),
+                json!({"status":0,"data":null}),
+                json!({"status":0,"data":{},"isError":true}),
+            ] {
+                assert!(parse_result(&serde_json::to_vec(&failure).unwrap()).is_err());
+            }
+        }
     }
 }

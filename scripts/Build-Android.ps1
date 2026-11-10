@@ -11,6 +11,7 @@ param(
   [switch]$Compact,
   [switch]$Candidate,
   [switch]$RunNativeTests,
+  [switch]$ResetRollback,
   [switch]$PreserveRustTarget,
   [ValidateRange(0,100000000000)][long]$EstimatedBuildBytes = 2000000000,
   [switch]$DetailedLogs,
@@ -22,13 +23,15 @@ $repoPath = Split-Path -Parent $PSScriptRoot
 $mobilePath = Join-Path $repoPath 'apps/mobile'
 $previousLocation = Get-Location
 $previousEnvironment = @{}
-foreach ($name in @('Path','JAVA_HOME','ANDROID_HOME','ANDROID_SDK_ROOT','CARGO_TARGET_DIR','GRADLE_USER_HOME')) {
+$signingVariables = @('TADA_ANDROID_KEYSTORE','TADA_ANDROID_STORE_PASSWORD','TADA_ANDROID_KEY_ALIAS','TADA_ANDROID_KEY_PASSWORD')
+foreach ($name in @('Path','JAVA_HOME','ANDROID_HOME','ANDROID_SDK_ROOT','CARGO_TARGET_DIR','GRADLE_USER_HOME') + $signingVariables) {
   $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 . (Join-Path $PSScriptRoot 'Project-Storage.ps1')
 . (Join-Path $PSScriptRoot 'Android-PackageTargets.ps1')
 $packageTarget = Get-TadaAndroidPackageTarget -Target $Target -Architectures $Architectures
 $buildPlan = Get-TadaAndroidBuildPlan -PackageTarget $packageTarget -BuildType $BuildType -Compact:$Compact -Candidate:$Candidate
+if ($ResetRollback -and ($buildPlan.Candidate -or $BuildType -ne 'Release')) { throw 'ResetRollback requires a published Release build.' }
 $Architectures = $packageTarget.Architecture
 if ($NativeBuildDirectory) { $NativeBuildDirectory = Get-TadaFullPath $NativeBuildDirectory }
 $packagingLease = $null
@@ -41,13 +44,68 @@ $packageContents = $null
 $apkPath = $null
 $mappingPath = $null
 $nativeTestSummary = $null
+$releaseCertificateSha256 = $null
+$localSigningDirectory = Join-Path $env:USERPROFILE '.tada-private/android-signing'
 $storagePaths = @($NativeBuildDirectory, $env:CARGO_TARGET_DIR, $env:GRADLE_USER_HOME) | Where-Object { $_ } | ForEach-Object { Get-TadaFullPath $_ }
+if ($BuildType -eq 'Release') {
+  if ($env:TADA_ANDROID_KEYSTORE) { $storagePaths += Get-TadaFullPath $env:TADA_ANDROID_KEYSTORE }
+  elseif (Test-Path -LiteralPath $localSigningDirectory -PathType Container) { $storagePaths += Get-TadaFullPath $localSigningDirectory }
+}
 
 function First-ExistingFile([string[]]$Candidates) {
   foreach ($candidatePath in $Candidates) {
     if ($candidatePath -and (Test-Path -LiteralPath $candidatePath -PathType Leaf)) { return (Resolve-Path -LiteralPath $candidatePath).Path }
   }
   return $null
+}
+
+function Get-ReleaseCertificateSha256 {
+  if (-not ($signingVariables | Where-Object { [Environment]::GetEnvironmentVariable($_, 'Process') })) {
+    $store = Join-Path $localSigningDirectory 'release.jks'
+    $protectedPassword = Join-Path $localSigningDirectory 'release-password.dpapi'
+    if ((Test-Path -LiteralPath $store -PathType Leaf) -and (Test-Path -LiteralPath $protectedPassword -PathType Leaf)) {
+      Assert-TadaPlainPath $store
+      Assert-TadaPlainPath $protectedPassword
+      $securePassword = ConvertTo-SecureString (Get-Content -LiteralPath $protectedPassword -Raw)
+      try {
+        $credential = [pscredential]::new('tada-release', $securePassword)
+        $env:TADA_ANDROID_KEYSTORE = $store
+        $env:TADA_ANDROID_KEY_ALIAS = $credential.UserName
+        $env:TADA_ANDROID_STORE_PASSWORD = $credential.GetNetworkCredential().Password
+        $env:TADA_ANDROID_KEY_PASSWORD = $env:TADA_ANDROID_STORE_PASSWORD
+      } finally { $securePassword.Dispose() }
+    }
+  }
+  foreach ($name in $signingVariables) {
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name, 'Process'))) {
+      throw ('Release 签名缺少 ' + $name + '。请配置仓库外的正式密钥。')
+    }
+  }
+  $env:TADA_ANDROID_KEYSTORE = Get-TadaFullPath $env:TADA_ANDROID_KEYSTORE
+  Assert-TadaPlainPath $env:TADA_ANDROID_KEYSTORE
+  $certificate = & (Join-Path $JavaHome 'bin/keytool.exe') -exportcert -rfc -keystore $env:TADA_ANDROID_KEYSTORE -alias $env:TADA_ANDROID_KEY_ALIAS '-storepass:env' TADA_ANDROID_STORE_PASSWORD 2>$null
+  if ($LASTEXITCODE -ne 0) { throw '无法读取正式签名证书，请检查密钥路径、别名和口令。' }
+  $base64 = (($certificate | Where-Object { $_ -notmatch '^-----' }) -join '').Trim()
+  $certificateBytes = [Convert]::FromBase64String($base64)
+  $x509 = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certificateBytes)
+  try {
+    if ($x509.Subject -match '(?i)(?:^|,\s*)CN=Android Debug(?:,|$)') { throw '正式包必须使用正式证书，调试证书已禁用。' }
+  } finally { $x509.Dispose() }
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { return ([BitConverter]::ToString($sha.ComputeHash($certificateBytes))).Replace('-', '').ToLowerInvariant() }
+  finally { $sha.Dispose() }
+}
+
+function Assert-ReleaseApkSignature([string]$Path, [string]$ExpectedFingerprint) {
+  $apksigner = Join-Path $AndroidHome 'build-tools/36.0.0/apksigner.bat'
+  $output = & $apksigner verify --print-certs $Path 2>$null
+  if ($LASTEXITCODE -ne 0) { throw 'Release APK 签名验证失败，保留原最新版。' }
+  $digests = @($output | ForEach-Object {
+    if ($_ -match '^Signer #\d+ certificate SHA-256 digest: ([a-fA-F0-9]{64})$') { $Matches[1] }
+  })
+  if ($digests.Count -ne 1 -or $digests[0] -ine $ExpectedFingerprint) {
+    throw 'Release APK 签名与配置的正式证书不一致，保留原最新版。'
+  }
 }
 
 try {
@@ -158,7 +216,6 @@ try {
   $sdkProperty = 'sdk.dir=' + $AndroidHome.Replace('\','/') + [Environment]::NewLine
   [System.IO.File]::WriteAllText((Join-Path $mobilePath 'android/local.properties'), $sdkProperty, [System.Text.UTF8Encoding]::new($false))
   $gradleArgs = @($buildPlan.GradleTask,'-PofflineBundle=true',('-PreactNativeArchitectures=' + $Architectures),('-PtadaCompactApk=' + $Compact.IsPresent.ToString().ToLowerInvariant()),'-Pkotlin.compiler.execution.strategy=in-process','--console=plain','--max-workers=4','--no-daemon')
-  if ($BuildType -eq 'Release') { $gradleArgs += '--no-configuration-cache' }
   if ($RunNativeTests) { $gradleArgs = @($buildPlan.NativeTestTask) + $gradleArgs }
   if ($NativeBuildDirectory) {
     $nativePath = [IO.Path]::GetFullPath($NativeBuildDirectory).Replace('\','/')
@@ -181,10 +238,17 @@ try {
   }
   try {
     Set-Location -LiteralPath (Join-Path $mobilePath 'android')
+    if ($BuildType -eq 'Release') {
+      $releaseCertificateSha256 = Get-ReleaseCertificateSha256
+      $gradleArgs += '--no-configuration-cache'
+    }
     & '.\gradlew.bat' @gradleArgs
     if ($LASTEXITCODE -ne 0) { throw 'Android 构建失败，请查看上方诊断。' }
   } finally {
     if ($ProxyUrl) { $env:JAVA_OPTS = $oldJavaOpts }
+    foreach ($name in $signingVariables) {
+      [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
+    }
   }
 
   $artifactPath = Join-Path $repoPath $buildPlan.ArtifactDirectory
@@ -200,6 +264,7 @@ try {
   Assert-TadaPlainPath $builtApkPath
   Assert-TadaPlainPath $apkPath
   $packageContents = Assert-TadaAndroidPackageContents -ApkPath $builtApkPath -Architecture $packageTarget.Architecture -RequireReleaseInterop:($BuildType -eq 'Release')
+  if ($BuildType -eq 'Release') { Assert-ReleaseApkSignature $builtApkPath $releaseCertificateSha256 }
   Copy-Item -LiteralPath $builtApkPath -Destination $apkPath -Force
   if ($BuildType -eq 'Release') {
     # Preserve crash deobfuscation data before automatic cache housekeeping.
@@ -224,12 +289,12 @@ try {
     })
     $nativeTestSummary = [pscustomobject]@{ suites=$nativeSuites; tests=($nativeSuites | Measure-Object tests -Sum).Sum; failures=($nativeSuites | Measure-Object failures -Sum).Sum; errors=($nativeSuites | Measure-Object errors -Sum).Sum }
   }
-  if (-not $Candidate) {
-    $publication = & (Join-Path $PSScriptRoot 'Publish-AndroidApk.ps1') -ApkPath $apkPath -OutputDirectory $artifactPath -AndroidHome $AndroidHome
+  if (-not $buildPlan.Candidate) {
+    $publication = & (Join-Path $PSScriptRoot 'Publish-AndroidApk.ps1') -ApkPath $apkPath -OutputDirectory $artifactPath -AndroidHome $AndroidHome -ResetRollback:$ResetRollback
   }
   $buildSucceeded = $true
   Write-Output ('测试安装包已生成（' + $packageTarget.Name + ' / ' + $packageTarget.Architecture + '）：' + $apkPath)
-  if ($Candidate) {
+  if ($buildPlan.Candidate) {
     Write-Output ('候选包已保留，latest 未替换：' + $apkPath)
   } elseif ($publication.Published) {
     Write-Output ('最新版固定入口：' + $publication.LatestApkPath)
@@ -256,7 +321,7 @@ try {
       Write-TadaStorageStatus -Usage $storageAfter -Phase 'after housekeeping'
       $report = [ordered]@{
         schema_version=1; finished_at=[DateTimeOffset]::UtcNow.ToString('o'); build_succeeded=$buildSucceeded
-        package_target=$packageTarget.Name; build_type=$BuildType; compact=[bool]$Compact; candidate=[bool]$Candidate; apk_path=$apkPath; mapping_path=$mappingPath; native_tests=$nativeTestSummary; package_contents=$packageContents; rust_target_preserved=[bool]$PreserveRustTarget
+        package_target=$packageTarget.Name; build_type=$BuildType; compact=[bool]$Compact; candidate=$buildPlan.Candidate; apk_path=$apkPath; mapping_path=$mappingPath; native_tests=$nativeTestSummary; package_contents=$packageContents; release_certificate_sha256=$releaseCertificateSha256; rust_target_preserved=[bool]$PreserveRustTarget
         budget_bytes=$storageAfter.BudgetBytes; warning_bytes=$storageAfter.WarningBytes; estimated_build_bytes=$EstimatedBuildBytes
         retained_limit_status=$(if ($storageAfter.Status -eq 'incomplete') { 'unverified' } elseif ($storageAfter.TotalBytes -gt $storageAfter.BudgetBytes) { 'exceeded' } else { 'met' })
         budget_scope='retained_after_housekeeping'; temporary_overage_allowed=$true; pre_cleanup_policy='deferred_until_build_finishes'

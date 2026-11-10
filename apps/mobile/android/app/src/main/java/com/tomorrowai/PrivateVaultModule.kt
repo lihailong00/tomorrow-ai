@@ -16,8 +16,6 @@ import android.os.PersistableBundle
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.AtomicFile
-import android.view.WindowManager
-import android.view.Window
 import com.facebook.react.bridge.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -43,20 +41,16 @@ class PrivateVaultModule(private val context: ReactApplicationContext) : ReactCo
   private var nextCredentialRequest = 7319
   @Volatile private var generation = 0L
   @Volatile private var protectedScope: String? = null
-  private var protectedWindow: Window? = null
+  private val documentNumberTypes = setOf("social_security", "medical_insurance", "passport", "driver_license", "travel_permit", "residence_permit")
   private val fields = mapOf(
     "address" to listOf("owner", "phone", "address"),
     "bank" to listOf("bank", "owner", "number", "branch"),
     "identity" to listOf("owner", "number", "validUntil")
-  )
+  ) + (documentNumberTypes + setOf("phone", "email")).associateWith { listOf("owner", "number") }
 
   init {
     context.addLifecycleEventListener(object : LifecycleEventListener {
-      override fun onHostResume() {
-        if (protectedScope != null) context.currentActivity?.window?.let { window ->
-          window.addFlags(WindowManager.LayoutParams.FLAG_SECURE); protectedWindow = window
-        }
-      }
+      override fun onHostResume() {}
       override fun onHostPause() {}
       override fun onHostDestroy() {
         generation++; prompt?.cancel(); pendingCredential = null; credentialRequestCode = -1
@@ -187,9 +181,16 @@ class PrivateVaultModule(private val context: ReactApplicationContext) : ReactCo
     for (index in 0 until records.length()) {
       val item = records.getJSONObject(index)
       val type = item.getString("type")
-      val tail = if (type == "address") "完整收件地址已隐藏" else "尾号 " + item.getJSONObject("fields").optString("number").replace(" ", "").takeLast(4)
-      result.put(JSONObject().put("id", item.getString("id")).put("type", type).put("alias", item.getString("alias"))
-        .put("summary", if (type == "bank") item.getJSONObject("fields").optString("bank") + " · " + tail else tail))
+      val values = item.getJSONObject("fields")
+      val summary = when (type) {
+        "address" -> "完整收件地址已隐藏"
+        "email" -> "邮箱地址已隐藏"
+        else -> "尾号 " + values.optString("number").replace(" ", "").takeLast(4)
+      }
+      val entry = JSONObject().put("id", item.getString("id")).put("type", type).put("alias", item.getString("alias"))
+        .put("summary", if (type == "bank") values.optString("bank") + " · " + summary else summary)
+      if (type == "address") entry.put("has_contact_phone", values.optString("phone").isNotBlank())
+      result.put(entry)
     }
     return result.toString()
   }
@@ -213,6 +214,12 @@ class PrivateVaultModule(private val context: ReactApplicationContext) : ReactCo
     }
     if (type == "identity") require(result.getString("number").uppercase().matches(Regex("[0-9]{17}[0-9X]"))) { "请填写 18 位身份证号码" }
     if (type == "address") require(result.getString("address").isNotBlank()) { "请填写完整地址" }
+    if (type == "phone") require(result.getString("number").matches(Regex("(?:1[3-9][0-9]{9}|\\+[1-9][0-9]{7,14})"))) { "请核对手机号码格式" }
+    if (type == "email") require(result.getString("number").matches(Regex("[a-zA-Z0-9.!#\$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\\.[a-zA-Z0-9-]+)+"))) { "请核对邮箱地址格式" }
+    if (type in documentNumberTypes) {
+      val number = result.getString("number")
+      require(number.matches(Regex("[a-zA-Z0-9-]{5,32}")) && number.any { it in '0'..'9' }) { "请核对证件或卡号格式" }
+    }
     return JSONObject().put("id", id).put("type", type).put("alias", alias).put("fields", result)
   }
   private fun find(doc: JSONObject, id: String): JSONObject {
@@ -220,10 +227,15 @@ class PrivateVaultModule(private val context: ReactApplicationContext) : ReactCo
     for (index in 0 until items.length()) if (items.getJSONObject(index).getString("id") == id) return items.getJSONObject(index)
     error("资料已不存在，请重新打开列表")
   }
-  private fun secretText(item: JSONObject, share: Boolean): String {
+  private fun secretText(item: JSONObject, share: Boolean, includeAddressContact: Boolean): String {
     val value = item.getJSONObject("fields")
-    if (!share && item.getString("type") != "address") return value.getString("number")
-    return fields.getValue(item.getString("type")).mapNotNull { value.optString(it).takeIf(String::isNotBlank) }.joinToString("\n")
+    val type = item.getString("type")
+    val selectedFields = when {
+      type == "address" && (!share || !includeAddressContact) -> listOf("address")
+      !share -> listOf("number")
+      else -> fields.getValue(type)
+    }
+    return selectedFields.mapNotNull { value.optString(it).takeIf(String::isNotBlank) }.joinToString("\n")
   }
   private fun copySensitive(text: String) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -248,20 +260,19 @@ class PrivateVaultModule(private val context: ReactApplicationContext) : ReactCo
       promise.resolve(statusValue(read(scope), secure))
     } catch (_: Exception) { promise.reject("E_VAULT", "本机资料库暂时不可读取；不会覆盖已有资料") } }
   }
+  /** Bind authenticated vault actions to the visible page and cancel them when it closes. */
   @ReactMethod fun setProtected(scope: String, enabled: Boolean, promise: Promise) = main.post {
     try {
       if (enabled) {
-        val window = context.currentActivity?.window ?: error("请在应用前台打开私密资料")
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        protectedWindow = window; protectedScope = scope
+        checkNotNull(context.currentActivity) { "请在应用前台打开私密资料" }
+        protectedScope = scope
       } else if (protectedScope == scope) {
         protectedScope = null; generation++; prompt?.cancel(); pendingCredential = null; credentialRequestCode = -1
         finishError("资料页面已关闭")
-        protectedWindow?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE); protectedWindow = null
       }
       promise.resolve(null)
     } catch (_: Exception) {
-      promise.reject("E_VAULT_SCREEN", "无法启用资料页面保护，请在应用前台重试")
+      promise.reject("E_VAULT_SCREEN", "无法打开资料页面，请在应用前台重试")
     }
   }.let { Unit }
 
@@ -292,7 +303,7 @@ class PrivateVaultModule(private val context: ReactApplicationContext) : ReactCo
 
   @ReactMethod fun operate(scope: String, operation: String, payload: String, promise: Promise) = main.post {
     try {
-      require(operation in listOf("list", "save", "delete", "reveal", "copy", "share", "recovery", "copyRecovery", "configure", "restore", "authorizeDelete"))
+      require(operation in listOf("list", "save", "linkPhone", "delete", "reveal", "copy", "share", "recovery", "copyRecovery", "configure", "restore", "authorizeDelete"))
       require(payload.length <= 400000)
       identifier(scope)
       check(protectedScope == scope) { "请在私密资料页面操作" }
@@ -335,6 +346,19 @@ class PrivateVaultModule(private val context: ReactApplicationContext) : ReactCo
                   require(next.length() < 100) { "最多保存 100 份资料" }; next.put(item); doc.put("items", next)
                   saveDocument(scope, outer, key, doc); result = summaries(doc)
                 }
+                "linkPhone" -> {
+                  val phone = find(doc, input.getString("phone_id"))
+                  val address = find(doc, input.getString("address_id"))
+                  require(phone.getString("type") == "phone" && address.getString("type") == "address") { "请选择手机号和地址资料" }
+                  val number = phone.getJSONObject("fields").getString("number")
+                  val values = address.getJSONObject("fields")
+                  val previous = values.optString("phone")
+                  require(previous.isBlank() || previous == number) { "该地址已填写联系电话，请到私密资料中编辑" }
+                  if (previous.isBlank()) {
+                    values.put("phone", number)
+                    saveDocument(scope, outer, key, doc)
+                  }
+                }
                 "delete" -> {
                   val id = input.getString("id"); find(doc, id)
                   val next = JSONArray()
@@ -342,7 +366,7 @@ class PrivateVaultModule(private val context: ReactApplicationContext) : ReactCo
                   doc.put("items", next); saveDocument(scope, outer, key, doc); result = summaries(doc)
                 }
                 "copy", "share" -> {
-                  val text = secretText(find(doc, input.getString("id")), operation == "share")
+                  val text = secretText(find(doc, input.getString("id")), operation == "share", input.opt("include_address_contact") == true)
                   main.post {
                     if (protectedScope == scope && generation == epoch) {
                       try {

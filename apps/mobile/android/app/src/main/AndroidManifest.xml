@@ -14,6 +14,8 @@
     <!-- User-initiated, read-only phone setup. Restricted SMS may remain unavailable on some installers/devices. -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <!-- Requested when the user chooses to add an event from chat. -->
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
@@ -25,7 +27,10 @@
     <uses-permission android:name="android.permission.health.READ_EXERCISE" />
     <uses-permission android:name="android.permission.health.READ_WEIGHT" />
 
-    <!-- Fixed integration targets only; no broad installed-app visibility. -->
+    <!-- Used only for a user-initiated, on-device review of app permissions. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <!-- Fixed integration targets used by the app launchers. -->
     <queries>
       <intent><action android:name="android.intent.action.SHOW_ALARMS" /></intent>
       <intent><action android:name="android.intent.action.SET_ALARM" /></intent>

@@ -19,24 +19,61 @@ impl Fixture {
     fn new() -> Self { Self { mode: AtomicUsize::new(0), calls: AtomicUsize::new(0), started: Notify::new(), release: Notify::new() } }
 }
 impl McpTransport for Fixture {
-    fn discover<'a>(&'a self, _: &'a str, credentials: &'a Credentials) -> BoxResult<'a, Vec<Value>> {
+    fn discover<'a>(&'a self, provider: &'a str, credentials: &'a Credentials) -> BoxResult<'a, Vec<Value>> {
         Box::pin(async move {
             if self.mode.load(Ordering::SeqCst) == 5 {
                 return Err(crate::ConnectorError::new(StatusCode::BAD_GATEWAY, "fixture_failure", "测试上游拒绝凭证"));
             }
             let description = if self.mode.load(Ordering::SeqCst) == 4 { credentials.token.as_str() } else { "fixture tool" };
-            Ok(["taxi_create_order", "taxi_query_order", "unknown_read_claim"].into_iter().map(|name|
+            if provider == "ima" {
+                return Ok(vec![json!({"name":"ima_list_knowledge_bases","inputSchema":{"type":"object"}})]);
+            }
+            Ok(["taxi_create_order", "taxi_query_order", "taxi_get_driver_location", "unknown_read_claim"].into_iter().map(|name|
                 json!({"name":name,"description":description,"inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}})).collect())
         })
     }
-    fn call<'a>(&'a self, _: &'a str, credentials: &'a Credentials, _: &'a str, _: Value) -> BoxResult<'a, Value> {
+    fn call<'a>(&'a self, provider: &'a str, credentials: &'a Credentials, tool: &'a str, arguments: Value) -> BoxResult<'a, Value> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.notify_one();
+            if provider == "ima" {
+                assert_eq!(tool, "ima_create_note");
+                assert_eq!(arguments, json!({"title":"会后总结","content":"确认下一步"}));
+                return Ok(json!({"structuredContent":{"data":{"note_id":"new-note"}}}));
+            }
             match self.mode.load(Ordering::SeqCst) {
                 1 => Ok(json!({"isError":true,"content":[{"type":"text","text":"account has no permission"}]})),
                 2 => { self.release.notified().await; Ok(json!({"content":[{"type":"text","text":"done"}]})) },
                 3 => Ok(json!({"content":[{"type":"text","text":credentials.token}]})),
+                mode @ (6 | 7 | 8 | 9) => {
+                    if tool != "taxi_create_order" { assert_eq!(arguments["order_id"], "fixture-ride"); }
+                    if mode == 7 && tool != "taxi_create_order" {
+                        let text = match tool {
+                            "taxi_query_order" => "系统已为您匹配到司机。\n• 车牌：测试牌照\n约需03分钟到达。",
+                            "taxi_get_driver_location" => "【司机位置】\n纬度：31.15\n经度：121.17\n",
+                            _ => panic!("unexpected ride tool {tool}"),
+                        };
+                        return Ok(json!({"content":[{"type":"text","text":text}]}));
+                    }
+                    let result = match tool {
+                        "taxi_create_order" => {
+                            if mode == 8 {
+                                assert_eq!(arguments, json!({"estimate_trace_id":"fixture-trace","product_category":"1"}));
+                            }
+                            if mode == 9 {
+                                json!({"orderId":"fixture-ride","to":{"name":"目的地","longitude":121.45,"latitude":31.20}})
+                            } else {
+                                json!({"orderId":"fixture-ride"})
+                            }
+                        }
+                        "taxi_query_order" if matches!(mode, 8 | 9) =>
+                            json!({"statusCode":4,"map":{"eta":"12","distanceKm":"6.3"}}),
+                        "taxi_query_order" => json!({"statusCode":1,"driver":{"carPlate":"测试牌照"},"map":{"eta":3}}),
+                        "taxi_get_driver_location" => json!({"longitude":121.17,"latitude":31.15}),
+                        _ => panic!("unexpected ride tool {tool}"),
+                    };
+                    Ok(json!({"content":[],"structuredContent":result}))
+                }
                 _ => Ok(json!({"content":[{"type":"text","text":"done"}]})),
             }
         })
@@ -52,6 +89,109 @@ async fn fixture() -> (PersonalMcpState, Repository, String, Arc<Fixture>) {
     (state, repo, user.id, transport)
 }
 fn action_id(value: &Value) -> String { value["action"]["id"].as_str().unwrap().into() }
+
+#[tokio::test]
+async fn ima_existing_connections_get_create_note_but_only_explicit_confirmation_executes_it() {
+    let (state, _, user, transport) = fixture().await;
+    state.connect(&user, "ima", Credentials {
+        token: "ima-fixture-token".into(), environment: "production".into(), server_url: None,
+        account: None, client_id: Some("ima-fixture-client".into()),
+    }).await.unwrap();
+    let tools = state.tools(&user, "ima").await.unwrap();
+    assert!(tools["items"].as_array().unwrap().iter().any(|t| t["name"] == "ima_create_note" && t["requires_confirmation"] == true));
+    let pending = state.invoke(&user, "ima", "ima_create_note", json!({"title":"会后总结","content":"确认下一步"})).await.unwrap();
+    assert_eq!(pending["status"], "confirmation_required");
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    let id = action_id(&pending);
+    let confirmed = state.confirm(&user, &id).await.unwrap();
+    assert_eq!(confirmed["status"], "completed");
+    assert_eq!(confirmed["result"]["structuredContent"]["data"]["note_id"], "new-note");
+    assert_eq!(state.confirm(&user, &id).await.unwrap()["status"], "completed");
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn ride_status_only_fetches_driver_position_on_request() {
+    assert_ride_status(6).await;
+}
+
+#[tokio::test]
+async fn ride_status_understands_official_sandbox_text_results() {
+    assert_ride_status(7).await;
+}
+
+async fn assert_ride_status(fixture_mode: usize) {
+    let (state, repo, user, transport) = fixture().await;
+    transport.mode.store(fixture_mode, Ordering::SeqCst);
+    let pending = state.invoke(&user, "didi", "taxi_create_order", json!({"from_name":"A"})).await.unwrap();
+    let id = action_id(&pending);
+    assert_eq!(state.confirm(&user, &id).await.unwrap()["status"], "completed");
+    let session = repo.create_session(&user).await.unwrap();
+    let router = super::router(state);
+    for (query, expected_calls) in [("", 2), ("?include_vehicle=true", 4)] {
+        let request = Request::builder().uri(format!("/v1/personal-mcp/actions/{id}/ride-status{query}"))
+            .header("authorization", format!("Bearer {session}")).body(Body::empty()).unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["plate"], "测试牌照");
+        assert_eq!(value["eta"].as_f64(), Some(3.0));
+        assert_eq!(value["vehicle"], if query.is_empty() { Value::Null } else { json!({"longitude":121.17,"latitude":31.15}) });
+        assert_eq!(transport.calls.load(Ordering::SeqCst), expected_calls);
+    }
+}
+
+#[tokio::test]
+async fn ride_status_reads_the_dropoff_from_an_existing_order() {
+    let (state, repo, user, transport) = fixture().await;
+    transport.mode.store(9, Ordering::SeqCst);
+    let pending = state.invoke(&user, "didi", "taxi_create_order",
+        json!({"estimate_trace_id":"fixture-trace","product_category":"1"})).await.unwrap();
+    let id = action_id(&pending);
+    assert_eq!(state.confirm(&user, &id).await.unwrap()["status"], "completed");
+    let session = repo.create_session(&user).await.unwrap();
+    let request = Request::builder().uri(format!("/v1/personal-mcp/actions/{id}/ride-status?include_vehicle=true"))
+        .header("authorization", format!("Bearer {session}")).body(Body::empty()).unwrap();
+    let response = super::router(state).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["status"], 4);
+    assert_eq!(value["destination"], json!({"longitude":121.45,"latitude":31.20}));
+    assert_eq!(value["vehicle"], json!({"longitude":121.17,"latitude":31.15}));
+}
+
+#[tokio::test]
+async fn ride_status_uses_the_destination_bound_to_the_confirmed_order() {
+    let (state, repo, user, transport) = fixture().await;
+    transport.mode.store(8, Ordering::SeqCst);
+    let (_, generation) = state.personal_form_catalog(&user, "didi").await.unwrap();
+    let arguments = json!({"estimate_trace_id":"fixture-trace","product_category":"1"});
+    let pending = state.prepare_didi_order(&user, arguments.clone(), "ride-test", generation,
+        Some([121.45, 31.20])).await.unwrap();
+    let id = action_id(&pending);
+    assert_eq!(pending["action"]["arguments"], arguments);
+    let completed = state.confirm(&user, &id).await.unwrap();
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["arguments"], arguments);
+
+    let session = repo.create_session(&user).await.unwrap();
+    let router = super::router(state);
+    for (query, destination) in [("", Value::Null),
+        ("?include_vehicle=true", json!({"longitude":121.45,"latitude":31.20}))] {
+        let request = Request::builder().uri(format!("/v1/personal-mcp/actions/{id}/ride-status{query}"))
+            .header("authorization", format!("Bearer {session}")).body(Body::empty()).unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["status"], 4);
+        assert_eq!(value["distance_km"], 6.3);
+        assert_eq!(value["eta"], 12.0);
+        assert_eq!(value["destination"], destination);
+    }
+}
 
 #[tokio::test]
 async fn business_tool_error_is_failed_and_cannot_be_executed_twice() {

@@ -117,10 +117,61 @@ async fn tool(
     Json(input): Json<ToolInput>,
 ) -> Result<Json<Value>> {
     let token = credentials(&state, &headers)?;
-    let (user_id, _scope) = state.repository.agent_authority(&id, &token).await?;
+    let (user_id, scope) = state.repository.agent_authority(&id, &token).await?;
+    let simulated = state.personal_mcp.as_ref().is_some_and(|mcp| mcp.uses_tencent_docs_fixture(&user_id));
+    if simulated && (scope != "chat" ||
+        !matches!(input.name.as_str(), "list_mcp_connections" | "list_mcp_tools" | "call_mcp_tool" | "ask_user_choice" | "recent_chat_tool_receipts") ||
+        matches!(input.name.as_str(), "list_mcp_tools" | "call_mcp_tool") && input.arguments["provider"] != "tencent_docs") {
+        return Err(DomainError::Forbidden.into());
+    }
+    if input.name == "read_github_repository" {
+        if scope != "chat" { return Err(DomainError::Forbidden.into()); }
+        let result = tomorrow_connectors::github::read_public(id.clone(), input.arguments)
+            .await.map_err(tomorrow_connectors::ConnectorError::into_domain)?;
+        state.repository.agent_authority(&id, &token).await?;
+        return Ok(Json(result));
+    }
+    if input.name == tomorrow_domain::agent::AKSHARE_TOOL {
+        if scope != "chat" { return Err(DomainError::Forbidden.into()); }
+        let akshare = state.akshare.as_ref().ok_or(DomainError::Forbidden)?;
+        let result = akshare.query(input.arguments)
+            .await.map_err(tomorrow_connectors::ConnectorError::into_domain)?;
+        state.repository.agent_authority(&id, &token).await?;
+        return Ok(Json(result));
+    }
+    if input.name == "prepare_personal_tool" {
+        if scope != "chat" { return Err(DomainError::Forbidden.into()); }
+        let operation = input.operation_index.filter(|n| *n > 0 && *n <= 100)
+            .ok_or_else(|| DomainError::Validation("资料操作需要有效的执行编号".into()))?;
+        return Ok(Json(super::personal_autofill::execute(&state, &id, &token, &user_id, operation, input.arguments).await?));
+    }
+    if scope == "chat" && matches!(input.name.as_str(), "request_location" | "ask_user_choice") {
+        return super::chat_interaction::tool(&state, &id, &token, &user_id, &input.name, input.arguments).await;
+    }
+    if input.name == tomorrow_domain::agent::APP_PERMISSION_TOOL {
+        if scope != "chat" { return Err(DomainError::Forbidden.into()); }
+        let input: super::app_permission_intent::InspectionRequest = serde_json::from_value(input.arguments)
+            .map_err(|_| DomainError::Validation("应用权限检查参数无效".into()))?;
+        return Ok(Json(super::chat_interaction::inspect_app_permissions(&state, &id, &token, &user_id, input).await?));
+    }
+    if input.name == tomorrow_domain::agent::SYSTEM_SETTINGS_TOOL {
+        if scope != "chat" { return Err(DomainError::Forbidden.into()); }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SettingsInput { destination: super::app_permission_intent::SettingsDestination }
+        let input: SettingsInput = serde_json::from_value(input.arguments)
+            .map_err(|_| DomainError::Validation("系统设置入口无效".into()))?;
+        return Ok(Json(super::chat_interaction::open_system_settings(&state, &id, &token, &user_id, input.destination).await?));
+    }
     if crate::wallet_tools::is_wallet_tool(&input.name) {
+        if scope == "chat" && input.name == "prepare_alipay_payment" && !state.interactions.supports_action_confirmation(&id, &user_id) {
+            return Ok(Json(json!({"status":"unavailable","message":"本次对话无法显示付款确认卡，尚未提交付款。"})));
+        }
         let wallet=state.personal_wallet.as_ref().ok_or_else(||DomainError::Validation("支付宝钱包接入尚未配置".into()))?;
-        let result=crate::wallet_tools::execute(wallet,&user_id,&id,input.operation_index.unwrap_or(0),&input.name,&input.arguments).await?;
+        let mut result=crate::wallet_tools::execute(wallet,&user_id,&id,input.operation_index.unwrap_or(0),&input.name,&input.arguments).await?;
+        if scope == "chat" && input.name == "prepare_alipay_payment" {
+            result = super::chat_confirmation::wallet_payment(&state, &id, &token, &user_id, wallet, result).await?;
+        }
         state.repository.agent_authority(&id,&token).await?;
         return Ok(Json(result));
     }
@@ -187,8 +238,36 @@ async fn tool(
                     arguments["_client_info"] = json!({"os":std::env::consts::OS,"agent":"Tada","model":model});
                 }
                 let operation_key = format!("{id}:mcp:{}", input.operation_index.unwrap_or(0));
-                mcp.invoke_scoped(&user_id, text("provider")?, text("tool")?, arguments, &operation_key).await
-                    .map_err(tomorrow_connectors::ConnectorError::into_domain)?
+                let (provider, tool) = (text("provider")?, text("tool")?);
+                if provider == "didi" && state.interactions.supports_didi_order(&id, &user_id) && tool == "taxi_estimate" {
+                    let (quote, generation, sandbox) = mcp.didi_quote(&user_id, arguments.clone(), &operation_key)
+                        .await.map_err(tomorrow_connectors::ConnectorError::into_domain)?;
+                    state.interactions.remember_didi_quote(&id, &user_id,
+                        super::didi_order::Quote::read(&arguments, &quote, generation, sandbox));
+                    quote
+                } else if provider == "didi" && state.interactions.supports_didi_order(&id, &user_id) && tool == "taxi_create_order" {
+                    super::didi_order::confirm_in_chat(&state, &id, &token, &user_id, arguments, &operation_key).await?
+                } else if scope == "chat" && provider == "mcdonalds" && tool == "delivery-query-addresses" {
+                    super::personal_autofill::query_delivery_addresses(&state, &id, &token, &user_id, arguments, &operation_key).await?
+                } else {
+                    let didi_cancel = scope == "chat" && provider == "didi" && tool == "taxi_cancel_order";
+                    if didi_cancel && !state.interactions.claim_didi_cancellation(&id, &user_id) {
+                        return Ok(Json(json!({"status":"unavailable","message":"本轮无法发起新的取消确认。原订单状态未核实，不要重新叫车。"})));
+                    }
+                    if scope == "chat" && tomorrow_connectors::personal_mcp::PersonalMcpState::requires_confirmation(provider, tool)
+                        && !state.interactions.supports_action_confirmation(&id, &user_id) {
+                        return Ok(Json(json!({"status":"unavailable","message":"本次对话无法显示操作确认卡，操作未执行。"})));
+                    }
+                    let draft = mcp.invoke_scoped(&user_id, provider, tool, arguments, &operation_key).await
+                        .map_err(tomorrow_connectors::ConnectorError::into_domain)?;
+                    if scope == "chat" {
+                        let outcome = super::chat_confirmation::mcp_action(&state, &id, &token, &user_id, mcp, draft, didi_cancel).await?;
+                        if didi_cancel && outcome["status"] == "completed" {
+                            state.interactions.record_didi_cancellation(&id, &user_id);
+                        }
+                        outcome
+                    } else { draft }
+                }
             }
         };
         state.repository.agent_authority(&id, &token).await?;

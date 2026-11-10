@@ -61,14 +61,17 @@ function createReadingState(offset: number) {
   };
 }
 
+function appendsText(previous: Message, next: Message) {
+  return next.content.length > previous.content.length && next.content.startsWith(previous.content);
+}
+
 function rememberHeight(viewport: MessageViewport, item: Message, height: number) {
   const key = messageRowKey(item);
   const cached = viewport.heights.get(key);
   // A data render can precede the native text remeasurement. Keep the last
-  // measured content/height pair until append growth actually changes height.
+  // measured pair until new text or the completed reply controls reflow.
   if (cached && height === cached.height && item.role === 'assistant' &&
-    item.content.length > cached.message.content.length &&
-    item.content.startsWith(cached.message.content)) return;
+    (appendsText(cached.message, item) || (isReadingStream(cached.message) && !isReadingStream(item)))) return;
   viewport.heights.set(key, { message: item, height });
 }
 
@@ -124,6 +127,9 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
   const target = useRef<Destination | null>(initial ? { anchor: initial } : { latest: true });
   const followTail = useRef(!initial);
   const interacting = useRef(false);
+  // A native offset at zero after a live drag can be an incidental layout or
+  // completion event. Only a fresh send opens another auto-follow window.
+  const pausedByLiveDrag = useRef(false);
   const metrics = useRef({ width: 0, height: 0, contentHeight: 0 });
   // Only real scroll callbacks establish native arrival. Engine offsets can be
   // projected during layout and are useful for capture, never acknowledgment.
@@ -211,7 +217,8 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
 
   const capture = useCallback((y: number, preferred?: string) => {
     viewport.y = y;
-    viewport.followTail = followTail.current = y <= 2 && current.current.streamIndex < 0;
+    viewport.followTail = followTail.current = y <= 2 && !interacting.current &&
+      !pausedByLiveDrag.current && current.current.streamIndex < 0;
     const anchor = measuredAnchor(y, preferred);
     observedAnchor.current = anchor;
     if (anchor) {
@@ -267,6 +274,34 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     }
   }, [destinationOffset, messages.length, valid]);
 
+  const reconcileReadingHeight = useCallback((rememberUnchanged: boolean) => {
+    if (interacting.current || followTail.current) return false;
+    const destination = target.current;
+    if (destination && !('anchor' in destination)) return false;
+    const anchor = destination?.anchor ?? viewport.anchor;
+    if (!anchor) return false;
+    const index = messages.findIndex(item => messageRowKey(item) === anchor.id);
+    const row = index >= 0 ? list.current?.getLayout(index) : undefined;
+    if (!row?.isHeightMeasured) return false;
+    const item = messages[index];
+    const cached = viewport.heights.get(anchor.id);
+    // FlashList preserves positions between rows. For the anchored reply
+    // itself we must also compensate for changes inside the inverted row.
+    const changed = cached && item.role === 'assistant' && row.height !== cached.height &&
+      (isReadingStream(cached.message) || isReadingStream(item) || appendsText(cached.message, item));
+    if (changed) {
+      const adjusted = { id: anchor.id, offset: anchor.offset + row.height - cached.height };
+      viewport.anchor = adjusted;
+      viewport.pendingAppendAnchor = adjusted;
+      target.current = { anchor: adjusted };
+      command.current = null;
+      observed.current = null;
+      observedAnchor.current = null;
+    }
+    if (changed || rememberUnchanged) rememberHeight(viewport, item, row.height);
+    return Boolean(changed);
+  }, [messages, viewport]);
+
   const commitLayout = useCallback(() => {
     if (!valid()) return;
     // Initial/send positioning is a one-time intent. As soon as a streamed row
@@ -287,33 +322,11 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
         }
       }
     }
-    const anchor = target.current && ('latest' in target.current || 'offset' in target.current) ? null
-      : target.current && 'anchor' in target.current ? target.current.anchor : viewport.anchor;
-    const index = anchor ? messages.findIndex(item => messageRowKey(item) === anchor.id) : -1;
-    const row = index >= 0 ? list.current?.getLayout(index) : undefined;
-    const item = messages[index];
-    if (anchor && item && row?.isHeightMeasured) {
-      const cached = viewport.heights.get(anchor.id);
-      // Inverted row growth moves the visual start of old text. Adjust only a
-      // genuine appended assistant fragment, never estimates or unrelated rows.
-      if (!followTail.current && !interacting.current && cached &&
-        item.role === 'assistant' && row.height !== cached.height &&
-        item.content.length > cached.message.content.length &&
-        item.content.startsWith(cached.message.content)) {
-        const adjusted = { id: anchor.id, offset: anchor.offset + row.height - cached.height };
-        viewport.anchor = adjusted;
-        viewport.pendingAppendAnchor = adjusted;
-        target.current = { anchor: adjusted };
-        command.current = null;
-        observed.current = null;
-        observedAnchor.current = null;
-      }
-      rememberHeight(viewport, item, row.height);
-    }
+    reconcileReadingHeight(true);
     if (followTail.current && !interacting.current) target.current = { latest: true };
     restore();
     refreshReading();
-  }, [messages, refreshReading, restore, valid, viewport]);
+  }, [messages, reconcileReadingHeight, refreshReading, restore, valid, viewport]);
 
   const scroll = useCallback((event: ScrollPacket) => {
     if (!valid()) return;
@@ -323,6 +336,10 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     if (bounds && (Math.abs(bounds.width - metrics.current.width) > 1 ||
       Math.abs(bounds.height - metrics.current.height) > 1)) return;
     const contentHeight = event.nativeEvent.contentSize?.height;
+    // The native scroll packet can beat the layout callback. Translate the
+    // existing reading position before capture can record the new row height
+    // against an offset that still belongs to the old geometry.
+    if (pausedByLiveDrag.current && reconcileReadingHeight(false)) restore();
     // FlashList's progressive total size and RN's content-size callback are
     // independent of a real user's measured visible row. A lagging callback
     // must not freeze reading capture at an older message. Size agreement is
@@ -347,7 +364,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
       command.current = null;
       capture(y, anchor?.id);
     } else capture(y, preferred);
-  }, [capture, destinationOffset, measuredAnchor, valid, viewport]);
+  }, [capture, destinationOffset, measuredAnchor, reconcileReadingHeight, restore, valid, viewport]);
 
   const takeControl = useCallback((event?: ScrollPacket) => {
     if (!valid()) return;
@@ -355,6 +372,7 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     viewport.pendingAppendAnchor = null;
     command.current = null;
     interacting.current = true;
+    if (current.current.streamIndex >= 0) pausedByLiveDrag.current = true;
     // A gesture without a packet still cancels pending tail/restore work.
     followTail.current = viewport.followTail = false;
     if (event?.nativeEvent?.contentOffset) scroll(event);
@@ -365,7 +383,8 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
     interacting.current = false;
     if (observed.current !== null) {
       viewport.y = observed.current;
-      viewport.followTail = followTail.current = observed.current <= 2 && current.current.streamIndex < 0;
+      viewport.followTail = followTail.current = observed.current <= 2 &&
+        !pausedByLiveDrag.current && current.current.streamIndex < 0;
       if (observedAnchor.current) viewport.anchor = { ...observedAnchor.current };
     }
   }, [takeControl, valid, viewport]);
@@ -383,7 +402,8 @@ function MessageWindow({ messages, viewport, latestVersion, renderItem, header,
       if (isCurrent() && !viewport.pendingAppendAnchor &&
         observed.current !== null && observedAnchor.current) {
         viewport.y = observed.current;
-        viewport.followTail = followTail.current = observed.current <= 2 && current.current.streamIndex < 0;
+        viewport.followTail = followTail.current = observed.current <= 2 &&
+          !pausedByLiveDrag.current && current.current.streamIndex < 0;
         viewport.anchor = { ...observedAnchor.current };
       }
       active.current = false;

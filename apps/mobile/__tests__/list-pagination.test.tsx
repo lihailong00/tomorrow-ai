@@ -152,9 +152,6 @@ it('discards a late memory page after refreshing the compact memory view', async
     );
   });
   await act(async () => {
-    tree.root.findAll(node => node.props.accessibilityLabel === '查看全部记忆' && typeof node.props.onPress === 'function').pop()!.props.onPress();
-  });
-  await act(async () => {
     tree.root.findAll(node => node.props.accessibilityLabel === '加载更多记忆' && typeof node.props.onPress === 'function').pop()!.props.onPress();
   });
   expect(memories).toHaveBeenLastCalledWith(undefined, { offset: 50, limit: 50 });

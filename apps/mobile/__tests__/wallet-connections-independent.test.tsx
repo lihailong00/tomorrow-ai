@@ -3,6 +3,7 @@ import { Text, TextInput } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { AppProvider, type AppContextValue } from '../src/app/context';
 import { PersonalMcpConnections } from '../src/features/personal-mcp/PersonalMcpConnections';
+import { McpConnectionRow } from '../src/features/personal-mcp/McpConnectionCard';
 import type { ApiClient } from '../src/api/client';
 import type { PersonalMcpConnection } from '../src/features/personal-mcp/types';
 import { Button } from '../src/ui/components';
@@ -42,10 +43,9 @@ async function setup(walletResult: unknown = wallet) {
   };
 }
 
-it('an old server wallet404 stays unknown while independent note connections remain usable', async()=>{
+it('an old server wallet404 is not advertised while independent note connections remain usable', async()=>{
   const view=await setup(new Error('接口不存在（404）'));
-  expect(view.text()).toContain('状态未知');
-  expect(view.text()).toContain('确认服务器已升级');
+  expect(view.text()).not.toContain('支付宝');
   expect(view.tree.root.findAllByType(TextInput)).toHaveLength(0);
   expect(view.tree.root.findAllByType(Button).some(item=>item.props.accessibilityLabel==='连接印象笔记账号')).toBe(true);
   expect(view.request.mock.calls.every(call=>call[1]===undefined||call[1]==='GET')).toBe(true);
@@ -58,7 +58,7 @@ it('administrator disabling Baidu closes an open credential form and clears its 
   await act(async()=>{view.tree.root.findByType(TextInput).props.onChangeText('fixture-personal-baidu-token');});
   view.setBaidu({...baidu,status:'not_configured',unavailable_reason:'管理员已关闭个人体验'});
   await act(async()=>{jest.advanceTimersByTime(15000);});
-  expect(view.text()).toContain('管理员已关闭个人体验');
+  expect(view.text()).not.toContain('百度网盘');
   expect(view.tree.root.findAllByType(TextInput)).toHaveLength(0);
   expect(view.tree.root.findAllByType(Button).some(item=>item.props.accessibilityLabel==='校验并连接百度网盘（个人体验）')).toBe(false);
   expect(view.request.mock.calls.some(call=>call[1]==='POST')).toBe(false);
@@ -70,7 +70,11 @@ it('administrator disabling Baidu closes an open credential form and clears its 
 });
 
 it('a held wallet help callback cannot act after the authenticated owner changes', async()=>{
-  const view=await setup();
+  const view=await setup({...wallet,status:'needs_reconnect',binding_available:true,payment_available:true,
+    protocol_version:1,runtime_mode:'dedicated_single_user'});
+  await act(async () => {
+    view.tree.root.findAllByType(McpConnectionRow).find(item => item.props.label === '授权范围与帮助')!.props.onPress();
+  });
   const oldButton=view.tree.root.findAllByType(Button).find(item=>item.props.accessibilityLabel==='支付宝官方钱包说明')!;
   const oldOnPress=oldButton.props.onPress;
   await view.switchAccount();

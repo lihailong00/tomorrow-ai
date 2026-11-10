@@ -77,7 +77,11 @@ fn push(out: &mut String, value: &str) -> Result<(), AttachmentError> {
 }
 
 pub(super) fn extract(upload: &Upload, bytes: &[u8]) -> Result<String, AttachmentError> {
-    let format = extension(&upload.name).ok_or_else(invalid)?;
+    extract_named(&upload.name, &upload.mime_type, bytes)
+}
+
+pub(super) fn extract_named(name: &str, mime_type: &str, bytes: &[u8]) -> Result<String, AttachmentError> {
+    let format = extension(name).ok_or_else(invalid)?;
     let mime = match format.as_str() {
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -89,7 +93,7 @@ pub(super) fn extract(upload: &Upload, bytes: &[u8]) -> Result<String, Attachmen
         "application/zip",
         "application/x-zip-compressed",
     ]
-    .contains(&upload.mime_type.as_str())
+    .contains(&mime_type)
     {
         return Err(error("invalid_office_mime", "文档扩展名与文件类型不一致"));
     }

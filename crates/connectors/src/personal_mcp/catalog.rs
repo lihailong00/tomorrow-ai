@@ -18,6 +18,16 @@ pub struct Provider {
 
 const PROVIDERS: &[Provider] = &[
     Provider {
+        id: "github",
+        name: "GitHub",
+        description: "连接 GitHub 后可只读检索和分析已授权的仓库、代码和拉取请求。公开仓库可直接在聊天中发送链接，无需连接。",
+        help_url: "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens",
+        credential_label: "GitHub 个人访问令牌（PAT）",
+        transport: "streamable_http",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
         id: "dida365",
         name: "滴答清单",
         description: "连接自己的滴答清单，读取和管理授权任务；修改操作需要本人确认。",
@@ -113,6 +123,16 @@ const PROVIDERS: &[Provider] = &[
         description: "连接你自己的麦当劳账号，查询活动、营养与账号开放的服务；点餐、兑换等操作需单独确认。",
         help_url: "https://open.mcd.cn/mcp",
         credential_label: "个人 MCP Token",
+        transport: "streamable_http",
+        supported: true,
+        unsupported_reason: None,
+    },
+    Provider {
+        id: "liepin",
+        name: "猎聘",
+        description: "使用个人授权搜索职位、筛选城市和薪资，打开猎聘职位详情。",
+        help_url: "https://www.liepin.com/mcp/auth#config",
+        credential_label: "个人 User Token",
         transport: "streamable_http",
         supported: true,
         unsupported_reason: None,
@@ -252,12 +272,54 @@ pub fn runtime_available(id: &str) -> bool {
 /// annotations claim to be read-only, require an explicit user confirmation.
 pub fn is_read_only(provider: &str, tool: &str) -> bool {
     match provider {
+        "github" => GITHUB_READ_TOOLS.split(',').any(|name| name == tool),
+        "dida365" => matches!(
+            tool,
+            "search_task"
+                | "get_task_by_id"
+                | "list_undone_tasks_by_time_query"
+                | "list_undone_tasks_by_date"
+                | "list_completed_tasks_by_date"
+                | "filter_tasks"
+                | "list_projects"
+                | "get_project_by_id"
+                | "get_project_with_undone_tasks"
+                | "get_task_in_project"
+                | "list_columns"
+                | "list_project_groups"
+                | "get_comment"
+                | "project_member"
+                | "list_tags"
+                | "list_habits"
+                | "list_habit_sections"
+                | "get_habit"
+                | "get_habit_checkins"
+                | "get_focuses_by_time"
+                | "get_focus"
+                | "list_countdowns"
+        ),
+        "liepin" => tool == "user-search-job",
         "fliggy" => super::fliggy::is_read_only(tool),
         "jianguoyun" => super::jianguoyun::is_read_only(tool),
         "ima" => super::ima::is_read_only(tool),
         "weread" => super::weread::is_read_only(tool),
         "qq_music" => super::qq_music::is_read_only(tool),
-        "weiyun" => matches!(tool, "weiyun.list" | "weiyun.list_by_category"),
+        "weiyun" => matches!(
+            tool,
+            "weiyun.list" | "weiyun.list_by_category" | "weiyun.recent_list" | "weiyun.search"
+        ),
+        "tencent_docs" => matches!(
+            tool,
+            "get_user_info"
+                | "get_content"
+                | "manage.search_file"
+                | "manage.query_file_info"
+                | "manage.folder_list"
+                | "manage.query_folder_meta"
+                | "manage.recent_online_file"
+                | "query_space_list"
+                | "query_space_node"
+        ),
         "mcdonalds" => matches!(
             tool,
             "list-nutrition-foods"
@@ -291,6 +353,7 @@ pub fn is_read_only(provider: &str, tool: &str) -> bool {
             "taxi_estimate"
                 | "taxi_query_order"
                 | "taxi_get_driver_location"
+                | "taxi_generate_ride_app_link"
                 | "maps_textsearch"
                 | "maps_regeocode"
                 | "maps_place_around"
@@ -360,5 +423,33 @@ pub fn is_read_only(provider: &str, tool: &str) -> bool {
         // The other official services publish account-dependent tool catalogs.
         // No unsupported guess about a tool's side effects is made here.
         _ => false,
+    }
+}
+
+pub(super) const GITHUB_READ_TOOLS: &str =
+    "get_me,get_file_contents,search_code,search_repositories,list_branches,list_commits,get_commit,pull_request_read,list_pull_requests,search_pull_requests";
+
+#[cfg(test)]
+#[test]
+fn github_catalog_only_allows_explicit_read_tools() {
+    assert!(is_read_only("github", "get_file_contents"));
+    assert!(is_read_only("github", "pull_request_read"));
+    for name in ["create_pull_request", "push_files", "update_issue", "future_read_tool"] {
+        assert!(!is_read_only("github", name));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn reviewed_mcp_queries_can_run_without_approving_a_write() {
+    for (provider, read, write) in [
+        ("tencent_docs", "manage.search_file", "manage.create_file"),
+        ("tencent_docs", "get_content", "manage.set_privilege"),
+        ("weiyun", "weiyun.search", "weiyun.gen_share_link"),
+        ("dida365", "list_projects", "complete_task"),
+        ("didi", "taxi_generate_ride_app_link", "taxi_create_order"),
+    ] {
+        assert!(is_read_only(provider, read));
+        assert!(!is_read_only(provider, write));
     }
 }

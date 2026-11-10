@@ -145,6 +145,60 @@ pub(crate) async fn calendar_events(
     Ok(Json(json!({"items":items,"next_page_token":next})))
 }
 
+impl ConnectorState {
+    /// Read only the connected primary calendar, with the same authorization as the app.
+    pub async fn calendar_agenda(
+        &self,
+        user: &str,
+        start: &str,
+        end_exclusive: &str,
+    ) -> Result<Option<Value>> {
+        if self.inner.config.is_none()
+            || self
+                .account(user, Service::Calendar)
+                .await?
+                .is_none_or(|a| a.ciphertext.is_empty())
+        {
+            return Ok(None);
+        }
+        let params = [
+            ("maxResults".into(), "20".into()),
+            ("singleEvents".into(), "true".into()),
+            ("showDeleted".into(), "false".into()),
+            ("orderBy".into(), "startTime".into()),
+            ("timeMin".into(), start.into()),
+            ("timeMax".into(), end_exclusive.into()),
+            (
+                "fields".into(),
+                "nextPageToken,items(id,summary,start,end,htmlLink,status)".into(),
+            ),
+        ];
+        let result = self
+            .google_get(
+                user,
+                Service::Calendar,
+                &self.config()?.endpoints.calendar,
+                &params,
+            )
+            .await?;
+        let items: Vec<_> = result["items"].as_array().into_iter().flatten()
+            .filter(|event| event["status"] != "cancelled")
+            .take(20)
+            .map(|event| json!({
+                "title": text(string(event, "summary").unwrap_or("（无标题日程）"), 200),
+                "start": event["start"].get("dateTime").or_else(|| event["start"].get("date")).and_then(Value::as_str),
+                "end_exclusive": event["end"].get("dateTime").or_else(|| event["end"].get("date")).and_then(Value::as_str),
+                "status": event["status"].as_str(),
+                "source_link": safe_link(string(event, "htmlLink"), &["www.google.com", "calendar.google.com"]),
+            }))
+            .collect();
+        Ok(Some(json!({
+            "items": items,
+            "truncated": result["nextPageToken"].as_str().is_some(),
+        })))
+    }
+}
+
 pub(crate) async fn drive_files(
     State(state): State<ConnectorState>,
     auth: Auth,

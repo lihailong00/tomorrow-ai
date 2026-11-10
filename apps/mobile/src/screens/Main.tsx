@@ -1,14 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
+  Modal,
   Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Text } from '../ui/Text';
-import { useAction, useApp, useResource } from '../app/context';
+import { useAction, useApp, useResource, type Route } from '../app/context';
 import {
   chineseDayLabel,
   frequencies,
@@ -18,12 +20,14 @@ import {
   taskStatuses,
 } from '../domain/types';
 import { Button, ErrorNotice, Loading, Notice } from '../ui/components';
-import { colors } from '../ui/theme';
+import { colors, styles as s } from '../ui/theme';
 import { AssistantOrb, Icon } from '../ui/visuals';
 import { platform } from '../platform/ports';
 import { MemoryHome } from '../features/memory/MemoryHome';
+import { DailyNewsCard } from '../features/news/DailyNewsCard';
 import { ResultText } from '../ui/ResultText';
-import { briefingPreview } from '../ui/briefingPreview';
+import { listTodos } from '../features/todos/api';
+import { localDue } from '../features/todos/model';
 
 type IconName = React.ComponentProps<typeof Icon>['name'];
 const accent = colors.accent;
@@ -304,13 +308,18 @@ export function TaskCard({
   );
 }
 
-export function HomeScreen({ onTasks }: { onTasks: () => void }) {
+export function HomeScreen({ onTasks, pendingInputs = 0 }: { onTasks: () => void; pendingInputs?: number }) {
   const { api, user, navigate, revision, invalidate } = useApp();
   const data = useResource(() => api.today(), [api, revision]);
+  const todos = useResource(() => listTodos(api, { filter: 'active', scope: 'today', offset: 0, limit: 50 }), [api, revision]);
   const action = useAction();
-  const [briefExpanded, setBriefExpanded] = useState(false);
-  const briefPreview = useMemo(() => briefingPreview(data.value?.briefing ?? ''), [data.value?.briefing]);
-  const refreshHome = data.refresh;
+  const [briefOpen, setBriefOpen] = useState(false);
+  const { refresh: refreshToday } = data;
+  const { refresh: refreshTodos } = todos;
+  const refreshHome = useCallback(() => {
+    refreshToday();
+    refreshTodos();
+  }, [refreshToday, refreshTodos]);
   // A foreground identity check may cancel the initial read. Let all synchronous
   // guard invalidation listeners run before queuing another guarded GET.
   useEffect(() => {
@@ -342,14 +351,48 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
     const timer = setInterval(data.refresh, 8000);
     return () => clearInterval(timer);
   }, [hasActiveTasks, data.refresh]);
-  const date = chineseDayLabel(new Date(), user?.timezone ?? 'Asia/Shanghai');
+  const now = new Date();
+  const timezone = user?.timezone ?? 'Asia/Shanghai';
+  const date = chineseDayLabel(now, timezone);
+  const localTime = (value?: string | null) => {
+    if (!value || !Number.isFinite(Date.parse(value))) return '';
+    try { return localDue(value, timezone); } catch { return ''; }
+  };
+  const day = localTime(now.toISOString()).slice(0, 10);
+  const nextSchedule = data.value?.schedules
+    .filter(item => item.enabled && Date.parse(item.next_run_at) >= now.getTime() &&
+      localTime(item.next_run_at).startsWith(day + ' '))
+    .sort((a, b) => Date.parse(a.next_run_at) - Date.parse(b.next_run_at))[0];
+  const due = (todos.value?.items ?? [])
+    .filter(item => localTime(item.due_at).startsWith(day + ' '))
+    .sort((a, b) => Date.parse(a.due_at!) - Date.parse(b.due_at!))[0];
+  const approval = data.value?.tasks.find(task => task.status === 'waiting_approval');
+  const rows: Array<{ title: string; detail: string; icon: IconName; tint: string; route: Route }> = [];
+  if (nextSchedule) rows.push({
+    title: nextSchedule.title, detail: localTime(nextSchedule.next_run_at).slice(11) + ' · 计划',
+    icon: 'calendar', tint: tint.blue, route: { name: 'schedule', schedule: nextSchedule },
+  });
+  if (due) rows.push({
+    title: due.title, detail: '今天到期 · 事项', icon: 'tasks', tint: '#EAF4EE', route: { name: 'todo', id: due.id },
+  });
+  if (approval) rows.push({
+    title: approval.title, detail: '待你确认 · 助手执行', icon: 'bell', tint: tint.peach, route: { name: 'task', id: approval.id },
+  });
+  else if (pendingInputs > 0) rows.push({
+    title: '手机分享资料', detail: `${pendingInputs} 条待你接收`, icon: 'file', tint: tint.peach, route: { name: 'integrations' },
+  });
+  const briefing = data.value?.briefing.trim() ?? '';
+  const hasBriefing = Boolean(briefing) &&
+    !(briefing.startsWith('你有 ') && briefing.includes('点击生成简报，后台会依据已保存的资料整理。'));
+  const loadingToday = (data.loading && !data.value) || (todos.loading && !todos.value);
   return (
     <ScrollView
       showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
       refreshControl={
         <RefreshControl
-          refreshing={data.loading && Boolean(data.value)}
-          onRefresh={data.refresh}
+          refreshing={(data.loading && Boolean(data.value)) || (todos.loading && Boolean(todos.value))}
+          onRefresh={refreshHome}
           tintColor={accent}
         />
       }
@@ -361,7 +404,6 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
           <Text style={v.greeting}>
             {user?.name ? '你好，' + user.name : '你好'}
           </Text>
-          <Text style={v.greetingSubtitle}>有什么需要我帮忙的吗？</Text>
         </View>
         <Pressable
           accessibilityRole="button"
@@ -375,161 +417,71 @@ export function HomeScreen({ onTasks }: { onTasks: () => void }) {
           )}
         </Pressable>
       </View>
-      <ErrorNotice message={data.loading ? null : data.error} retry={data.refresh} />
-      {data.loading && !data.value && <Loading label="正在查看今天的安排…" />}
-      {data.value && (
-        <>
-          <View style={v.briefCard}>
-            <View pointerEvents="none" style={v.briefDecoration}>
-              <AssistantOrb size={112} />
+      <View style={v.todayCard}>
+        <View style={v.todayHeader}>
+          <Text style={v.sectionTitle}>今天</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="查看简报" onPress={() => setBriefOpen(true)} style={v.refreshButton}>
+            <Text style={v.primaryText}>查看简报</Text>
+            <Icon name="arrowRight" size={13} color={accent} />
+          </Pressable>
+        </View>
+        {rows.map(row => (
+          <Pressable
+            key={row.detail}
+            accessibilityRole="button"
+            accessibilityLabel={`${row.title}，${row.detail}`}
+            onPress={() => navigate(row.route)}
+            style={({ pressed }) => [v.todayRow, pressed && v.pressed]}
+          >
+            <View style={[v.todayIcon, { backgroundColor: row.tint }]}><Icon name={row.icon} size={19} color={accent} /></View>
+            <View style={v.flex}>
+              <Text style={v.todayTitle} numberOfLines={2}>{row.title}</Text>
+              <Text style={v.todayDetail}>{row.detail}</Text>
             </View>
-            <View style={v.briefHeader}>
-              <View style={v.inline}>
-                <View style={v.briefIcon}>
-                  <Icon name="sparkles" size={17} color={accent} />
-                </View>
-                <Text style={v.sectionTitle}>今日简报</Text>
-              </View>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="更新今日简报"
-                disabled={action.busy}
-                onPress={() =>
-                  action.run(async () => {
-                    const task = await api.briefing();
-                    invalidate();
-                    navigate({ name: 'task', id: task.id });
-                  })
-                }
-                style={v.refreshButton}
-              >
-                <Text style={v.actionText}>
-                  {action.busy ? '提交中' : '更新'}
-                </Text>
-                <Icon name="arrowRight" size={13} color={secondary} />
-              </Pressable>
-            </View>
-            {data.value.briefing.trim() ? (
-              briefExpanded ? (
-                <View testID="home-briefing-markdown">
-                  <ResultText content={data.value.briefing} textStyle={v.briefText} />
-                </View>
-              ) : (
-                <Text testID="home-briefing-preview" selectable style={v.briefText} numberOfLines={5}>
-                  {briefPreview}
-                </Text>
-              )
-            ) : (
-              <Text style={v.briefText}>
-                还没有生成简报。添加任务或记忆后，可以在这里整理今天的重点。
+            <Icon name="chevronRight" size={17} color={secondary} />
+          </Pressable>
+        ))}
+        <ErrorNotice message={data.loading ? null : data.error} retry={refreshHome} />
+        {!rows.length && !(data.error && !data.loading) && (
+          loadingToday ? <Loading label="正在查看今天的安排…" /> :
+            <Pressable accessibilityRole="button" onPress={onTasks} style={v.todayRow}>
+              <Text style={[v.todayDetail, v.flex]}>
+                {todos.error || todos.value?.next_offset != null ? '查看我的事项' : '今天暂无到期事项或待确认内容'}
               </Text>
-            )}
-            {Boolean(data.value.briefing.trim()) && (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={briefExpanded ? '收起今日简报' : '展开今日简报'}
-                accessibilityState={{ expanded: briefExpanded }}
-                testID="home-briefing-toggle"
-                onPress={() => setBriefExpanded(old => !old)}
-                style={v.expandBrief}
-              >
-                <Text style={v.primaryText}>
-                  {briefExpanded ? '收起' : '展开简报'}
-                </Text>
-              </Pressable>
-            )}
-            <View style={v.briefSource}>
-              <Icon name="file" size={12} color="#97A0B0" />
-              <Text style={v.sourceText}>来自助手执行、计划与记忆</Text>
-              {data.value.runtime.model_mode === 'local' && (
-                <Text style={v.localTag}>本地生成</Text>
-              )}
-            </View>
-          </View>
-          <ErrorNotice message={action.error} />
-          <View style={v.statsRow}>
-            <Text style={v.statText}>
-              <Text style={v.statNumber}>
-                {data.value.stats.tasks_completed}
-              </Text>{' '}
-              次执行完成
-            </Text>
-            <View style={v.statDivider} />
-            <Text style={v.statText}>
-              <Text style={v.statNumber}>
-                {data.value.stats.active_routines}
-              </Text>{' '}
-              个计划
-            </Text>
-            <View style={v.statDivider} />
-            <Text style={v.statText}>
-              <Text style={v.statNumber}>{data.value.stats.memory_count}</Text>{' '}
-              条记忆
-            </Text>
-          </View>
-          <SectionTitle action="全部" onAction={() => navigate({ name: 'assistantTasks' })}>
-            助手执行进展
-          </SectionTitle>
-          {data.value.tasks.length ? (
-            data.value.tasks
-              .slice(0, 2)
-              .map(task => <TaskCard key={task.id} task={task} compact />)
-          ) : (
-            <Pressable
-              accessibilityRole="button"
-              onPress={onTasks}
-              style={v.noTaskRow}
-            >
-              <View style={v.noTaskIcon}>
-                <Icon name="tasks" size={20} color="#9CA6BA" />
-              </View>
-              <View style={v.flex}>
-                <Text style={v.noTaskTitle}>还没有助手执行</Text>
-                <Text style={v.noTaskBody}>先记件事，需要时请妥啦准备</Text>
-              </View>
-              <Icon name="plus" size={19} color={accent} />
+              <Icon name="chevronRight" size={17} color={secondary} />
             </Pressable>
-          )}
-          <SectionTitle>试着这样问</SectionTitle>
-          <View style={v.suggestions}>
-            {[
-              ['梳理今天的重点', 'today'],
-              ['拆解一个目标', 'sparkles'],
-            ].map(([prompt, icon]) => (
-              <Pressable
-                accessibilityRole="button"
-                key={prompt}
-                onPress={() => navigate({ name: 'chat', prompt })}
-                style={({ pressed }) => [v.suggestion, pressed && v.pressed]}
-              >
-                <Icon name={icon as IconName} size={20} color="#8C91B8" />
-                <Text style={v.suggestionText}>{prompt}</Text>
-                <Icon name="arrowUp" size={14} color="#A0A7B7" />
-              </Pressable>
-            ))}
-          </View>
-          <ModeNotice runtime={data.value.runtime} />
-        </>
-      )}
-      <View style={v.historyLinks}>
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => navigate({ name: 'conversations' })}
-          style={v.historyLink}
-        >
-          <Icon name="history" size={15} color={secondary} />
-          <Text style={v.linkLabel}>对话记录</Text>
-        </Pressable>
-        <View style={v.linkDivider} />
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => navigate({ name: 'artifacts' })}
-          style={v.historyLink}
-        >
-          <Icon name="file" size={15} color={secondary} />
-          <Text style={v.linkLabel}>我的成果</Text>
-        </Pressable>
+        )}
       </View>
+      {briefOpen && (
+        <Modal transparent animationType="slide" onRequestClose={() => setBriefOpen(false)}>
+          <View style={hasBriefing ? v.flex : v.briefOverlay}>
+          <SafeAreaView style={hasBriefing ? s.screen : v.briefSheet} edges={hasBriefing ? ['top', 'bottom'] : ['bottom']}>
+            <ScrollView bounces={hasBriefing} contentContainerStyle={hasBriefing ? v.homeContent : v.briefSheetContent}>
+              <View style={v.todayHeader}>
+                <Text accessibilityRole="header" style={hasBriefing ? s.title : v.briefSheetTitle}>今日简报</Text>
+                <Pressable accessibilityRole="button" accessibilityLabel="关闭简报" onPress={() => setBriefOpen(false)} style={v.notificationButton}>
+                  <Icon name="close" size={22} color={secondary} />
+                </Pressable>
+              </View>
+              {hasBriefing ? (
+                <>
+                  <Text style={s.small}>最近一次简报</Text>
+                  <ResultText content={briefing} textStyle={v.briefText} />
+                </>
+              ) : <Text style={s.small}>还没有生成简报。生成后可查看今天的待办和已保存资料摘要。</Text>}
+              <ErrorNotice message={action.error} />
+              <Button accessibilityLabel="更新今日简报" loading={action.busy} onPress={() => action.run(async ({ isCurrent }) => {
+                const task = await api.briefing();
+                if (!isCurrent()) return;
+                setBriefOpen(false);
+                invalidate();
+                navigate({ name: 'task', id: task.id });
+              })}>生成今天的简报</Button>
+            </ScrollView>
+          </SafeAreaView>
+          </View>
+        </Modal>
+      )}
     </ScrollView>
   );
 }
@@ -592,6 +544,7 @@ export function TasksScreen({ initialView = 'tasks' }: { initialView?: 'tasks' |
           </Pressable>
         ))}
       </View>
+      {view === 'schedules' && <DailyNewsCard />}
       {view === 'tasks' && (
         <View style={v.filters}>
           {[
@@ -1101,8 +1054,11 @@ function ConnectorContents({ id }: { id: string }) {
 }
 
 const v = StyleSheet.create({
+  briefOverlay: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(27,37,59,0.30)' },
+  briefSheet: { maxHeight: '85%', backgroundColor: colors.surface, borderTopLeftRadius: 26, borderTopRightRadius: 26 },
+  briefSheetContent: { paddingHorizontal: 22, paddingTop: 13, paddingBottom: 18, gap: 10 },
+  briefSheetTitle: { fontSize: 22, fontWeight: '600', color: colors.ink },
   flex: { flex: 1 },
-  inline: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   pressed: { opacity: 0.7 },
   disabled: { opacity: 0.4 },
   pageContent: { paddingHorizontal: 22, paddingTop: 12, paddingBottom: 32 },
@@ -1172,12 +1128,6 @@ const v = StyleSheet.create({
     fontWeight: '500',
     color: '#303849',
   },
-  greetingSubtitle: {
-    fontSize: 14,
-    lineHeight: 23,
-    color: secondary,
-    marginTop: 5,
-  },
   notificationButton: {
     width: 44,
     height: 44,
@@ -1196,37 +1146,40 @@ const v = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'white',
   },
-  briefCard: {
-    position: 'relative',
+  todayCard: {
     borderRadius: 24,
     paddingHorizontal: 19,
-    paddingTop: 12,
-    paddingBottom: 15,
+    paddingTop: 7,
+    paddingBottom: 6,
     backgroundColor: 'rgba(255,255,255,0.83)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.96)',
-    overflow: 'hidden',
   },
-  briefDecoration: {
-    position: 'absolute',
-    right: -43,
-    top: -56,
-    opacity: 0.15,
-  },
-  briefHeader: {
+  todayHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 7,
+    gap: 10,
+    minHeight: 47,
   },
-  briefIcon: {
-    width: 27,
-    height: 27,
-    borderRadius: 10,
-    backgroundColor: '#EFF3FD',
+  todayRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 11,
+    minHeight: 58,
+    paddingVertical: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderColor: '#E5E9F1',
+  },
+  todayIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 13,
     alignItems: 'center',
     justifyContent: 'center',
   },
+  todayTitle: { fontSize: 15, lineHeight: 22, color: colors.ink, fontWeight: '500' },
+  todayDetail: { fontSize: 12, lineHeight: 18, color: secondary },
   refreshButton: {
     minWidth: 52,
     minHeight: 44,
@@ -1241,72 +1194,7 @@ const v = StyleSheet.create({
     color: '#626B7C',
     paddingBottom: 2,
   },
-  expandBrief: {
-    alignSelf: 'flex-start',
-    minHeight: 44,
-    justifyContent: 'center',
-    marginTop: 4,
-  },
-  briefSource: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 5,
-    marginTop: 15,
-    paddingTop: 11,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderColor: '#E8ECF2',
-  },
   sourceText: { fontSize: 10, lineHeight: 17, color: '#9BA3B2' },
-  localTag: {
-    fontSize: 10,
-    lineHeight: 17,
-    color: '#A49BB8',
-    marginLeft: 'auto',
-  },
-  statsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-around',
-    paddingTop: 19,
-    paddingBottom: 2,
-  },
-  statText: { fontSize: 12, lineHeight: 20, color: '#9BA3B1' },
-  statNumber: { fontSize: 14, fontWeight: '500', color: '#687388' },
-  statDivider: { height: 10, width: 1, backgroundColor: '#E0E5EE' },
-  noTaskRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingVertical: 16,
-    paddingHorizontal: 15,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,255,255,0.5)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.75)',
-  },
-  noTaskIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 13,
-    backgroundColor: '#EFF2F8',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  noTaskTitle: { fontSize: 13, lineHeight: 22, color: '#7D879A' },
-  noTaskBody: { fontSize: 11, lineHeight: 18, color: '#ABB1BD' },
-  suggestions: { flexDirection: 'row', gap: 10 },
-  suggestion: {
-    flex: 1,
-    minHeight: 102,
-    borderRadius: 20,
-    backgroundColor: 'rgba(239,237,248,0.66)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.84)',
-    padding: 14,
-    gap: 9,
-  },
-  suggestionText: { fontSize: 12, lineHeight: 19, color: '#737D91' },
   modeNotice: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -1329,21 +1217,6 @@ const v = StyleSheet.create({
     color: '#8792A6',
     marginTop: 2,
   },
-  historyLinks: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 21,
-    gap: 16,
-  },
-  historyLink: {
-    minHeight: 44,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  linkLabel: { fontSize: 12, color: '#929AAB' },
-  linkDivider: { width: 1, height: 12, backgroundColor: '#E1E5ED' },
   taskCard: {
     padding: 16,
     backgroundColor: 'rgba(255,255,255,0.78)',

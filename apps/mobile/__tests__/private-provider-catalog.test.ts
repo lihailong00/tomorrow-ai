@@ -60,25 +60,21 @@ const connection = (
   ...extra,
 });
 
-test('all nineteen choices remain discoverable before catalog loading and without saved credentials', () => {
+test('missing server catalogs do not advertise any of the nineteen built-in services', () => {
   const rows = connectionRows(empty, []);
   for (const id of requested)
     expect(rows.some(row => 'id' in row.target && row.target.id === id)).toBe(
-      true,
+      false,
     );
   expect(rows.some(row => row.added || row.usable)).toBe(false);
 });
 
 test.each(added)(
-  'an older server keeps %s visible and truthfully unavailable',
+  'an older server hides %s when it does not offer the connection',
   id => {
     const rows = connectionRows({ ...empty, mcp: [connection('didi')] }, []);
     const row = rows.find(item => item.key === 'mcp:' + id)!;
-    expect(row).toBeDefined();
-    expect(row.status).toBe('当前服务器尚未提供');
-    expect(row.unavailable).toBe(true);
-    expect(row.added).toBe(false);
-    expect(row.usable).toBe(false);
+    expect(row).toBeUndefined();
   },
 );
 
@@ -106,9 +102,20 @@ test('removed catalog entries cannot be resurrected as connected by an earlier u
     [],
   );
   const row = rows.find(item => item.key === 'mcp:fliggy')!;
-  expect(row.unavailable).toBe(true);
-  expect(row.added).toBe(false);
-  expect(row.usable).toBe(false);
+  expect(row).toBeUndefined();
+});
+
+test('disabled services are hidden while saved credentials retain a management entry', () => {
+  const rows = connectionRows({ ...empty, mcp: [
+    connection('feishu', { status: 'not_configured' }),
+    connection('baidu_netdisk', { status: 'not_configured' }),
+    connection('weiyun', { status: 'not_configured', has_credentials: true }),
+    connection('luckin'),
+  ] }, []);
+  expect(rows.some(row => row.key === 'mcp:feishu' || row.key === 'mcp:baidu_netdisk')).toBe(false);
+  const saved = rows.find(row => row.key === 'mcp:weiyun')!;
+  expect(saved.added).toBe(true); expect(saved.usable).toBe(false);
+  expect(rows.some(row => row.key === 'mcp:luckin')).toBe(true);
 });
 
 test('new server-provided providers are retained alongside the built-in choices', () => {

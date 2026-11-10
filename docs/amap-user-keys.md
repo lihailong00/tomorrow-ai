@@ -15,7 +15,7 @@
 所有接口使用当前会话确定用户，客户端不能指定凭据所有者：
 
 - `POST /v1/integrations/amap/connect`，请求体 `{ "web_api_key": "用户的 Key" }`。实际搜索接口校验成功后，再加密保存。
-- `POST /v1/integrations/amap/read`，支持 `search`、`route`、`weather`。只解密并使用当前用户的 Key。
+- `POST /v1/integrations/amap/read`，支持 `search`、`nearby`、`route`、`weather`。只解密并使用当前用户的 Key。`nearby` 接受关键词和一个搜索中心（GCJ-02 `location` 或用户提供的 `address`），返回直线距离和导航链接。
 - `DELETE /v1/integrations/amap`，清除当前用户保存的凭据并终止后续读取。
 
 复用 `integration_accounts`，主键为 `(user_id, provider)`。凭据用现有 `CONNECTOR_ENCRYPTION_KEY` 加密，认证数据绑定用户和服务，不能将一个用户的密文挪给另一个用户使用。状态接口仅返回连接状态，不返回 Key 或密文。

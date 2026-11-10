@@ -5,7 +5,7 @@ param(
     [switch]$S3,
     [switch]$NoBuild,
     [int]$Port = 8080,
-    [ValidateSet('pi','direct')][string]$AgentMode = 'pi',
+    [ValidateSet('dsh','pi','direct')][string]$AgentMode = 'pi',
     [int]$AgentPort = 8090
 )
 $ErrorActionPreference = 'Stop'
@@ -33,8 +33,8 @@ try {
     if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
         throw "Port $Port is already in use. Choose -Port or stop its owning application."
     }
-    if ($AgentMode -eq 'pi' -and (Get-NetTCPConnection -LocalPort $AgentPort -State Listen -ErrorAction SilentlyContinue)) {
-        throw "Pi port $AgentPort is already in use. Choose -AgentPort or stop its owning application."
+    if ($AgentMode -in @('pi','dsh') -and (Get-NetTCPConnection -LocalPort $AgentPort -State Listen -ErrorAction SilentlyContinue)) {
+        throw "Agent port $AgentPort is already in use. Choose -AgentPort or stop its owning application."
     }
     if ($Postgres -or $Mode -eq 'temporal') {
         & docker compose up -d
@@ -87,7 +87,7 @@ try {
         }
     }
     $modelValue = $null
-    if ($AgentMode -eq 'pi') {
+    if ($AgentMode -in @('pi','dsh')) {
         . (Join-Path $PSScriptRoot 'Node-Tools.ps1')
         $nodeTools = Get-TomorrowNodeTools
         $agentDirectory = Join-Path $projectRoot 'services/agent'
@@ -99,7 +99,7 @@ try {
             } finally { Pop-Location }
         }
         $agentEntry = Join-Path $agentDirectory 'dist/server.js'
-        if (-not (Test-Path -LiteralPath $agentEntry)) { throw 'Pi service is not built. Retry without -NoBuild.' }
+        if (-not (Test-Path -LiteralPath $agentEntry)) { throw 'Agent service is not built. Retry without -NoBuild.' }
         $tokenBytes = [byte[]]::new(32)
         [Security.Cryptography.RandomNumberGenerator]::Fill($tokenBytes)
         $env:AGENT_SERVICE_TOKEN = [Convert]::ToHexString($tokenBytes).ToLowerInvariant()
@@ -113,10 +113,10 @@ try {
         $agentHealth = $null
         for ($attempt=0; $attempt -lt 60; $attempt++) {
             try { $agentHealth=Invoke-RestMethod -Uri "$env:AGENT_URL/health" -TimeoutSec 2; if ($agentHealth.ok) {break} } catch {}
-            if (-not (Get-Process -Id $agentProcess.Id -ErrorAction SilentlyContinue)) { throw 'Pi startup failed. See artifacts/logs/agent-error.log.' }
+            if (-not (Get-Process -Id $agentProcess.Id -ErrorAction SilentlyContinue)) { throw 'Agent startup failed. See artifacts/logs/agent-error.log.' }
             Start-Sleep -Milliseconds 250
         }
-        if (-not $agentHealth.ok -or $agentHealth.harness -ne 'pi') { throw 'Pi service did not become ready.' }
+        if (-not $agentHealth.ok -or $agentHealth.harness -ne $AgentMode) { throw 'Agent service did not become ready.' }
         $env:AGENT_MODEL_NAME = $agentHealth.model_name
     }
     $runDirectory = Join-Path $projectRoot ('artifacts/runtime/' + [Guid]::NewGuid().ToString('N'))
@@ -128,7 +128,7 @@ try {
         Copy-Item -LiteralPath $binary -Destination $runtimeBinary
         $savedModelKeys=@{}
         try {
-            if ($AgentMode -eq 'pi') {
+            if ($AgentMode -in @('pi','dsh')) {
                 foreach ($keyName in @('MODEL_API_KEY','DEEPSEEK_API_KEY')) {
                     $savedModelKeys[$keyName]=[Environment]::GetEnvironmentVariable($keyName,'Process')
                     # Present-but-empty also prevents dotenv from loading the model key into Rust.

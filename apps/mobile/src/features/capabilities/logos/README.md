@@ -1,0 +1,47 @@
+# Capability logos
+
+Bundled icons identify the corresponding services. Each mark belongs to its respective owner. The source artwork is cropped to its visible bounds and resized to fit within 96 pixels.
+
+- alipay.png <https://mdn.alipayobjects.com/rms/afts/file/A*7EyORZxdNDkAAAAAAAAAAAAAARQnAQ>
+- amap.png <https://a.amap.com/pc/static/favicon.ico>
+- baidu_maps.png <https://map.baidu.com/favicon.ico>
+- baidu_netdisk.png <https://nd-static.bdstatic.com/m-static/wp-brand/favicon.ico>
+- bilibili.png <https://www.bilibili.com/favicon.ico>
+- dida365.png <https://cncdn.dida365.com/web/static/img/favicon.ico>
+- didi.png <https://website.didiglobal.com/DDlogo.ico>
+- dingtalk.png <https://gw.alicdn.com/imgextra/i3/O1CN014ZbI6ZTEhdC0ttN2_!!6000000003783-2-tps-444-444.png>
+- douyin.png <https://www.douyin.com/favicon.ico>
+- feishu.png <https://www.feishu.cn/favicon.ico>
+- fliggy.png <https://img.alicdn.com/imgextra/i1/O1CN01XslwqW1rp2BOz0lt4_!!6000000005679-73-tps-64-64.ico>
+- github.png <https://github.githubassets.com/favicons/favicon.png>
+- gmail.png <https://ssl.gstatic.com/ui/v1/icons/mail/rfr/gmail.ico>
+- google_calendar.png <https://ssl.gstatic.com/calendar/images/dynamiclogo_2020q4/calendar_31_2x.png>
+- google_drive.png <https://ssl.gstatic.com/docs/doclist/images/drive_2022q3_32dp.png>
+- huawei.png <https://consumer.huawei.com/content/dam/huawei-cbg-site/common/huawei-logo.png>
+- ima.png <https://fe-static.ima.myqcloud.com/ima/assets/chat/favicon.svg>
+- jd.png <https://storage.360buyimg.com/retail-mall/mall-common-component/favicon.ico>
+- jianguoyun.png <https://www.jianguoyun.com/favicon.ico>
+- liepin.png <https://concat.lietou-static.com/fe-www-pc/v6/static/images/favicon.371e30de.ico>
+- luckin.png <https://www.lkcoffee.com/favicon.ico>
+- mcdonalds.png <https://open.mcd.cn/favicon.ico>
+- meituan.png <https://s3plus.meituan.net/v1/mss_e2821d7f0cfe4ac1bf9202ecf9590e67/cdn-prod/file:1040877d/favicon-mt.ico>
+- memos.png <https://usememos.com/brand/apple-touch-icon.png?v=celadon>
+- netease163.png <https://mail.163.com/favicon.ico>
+- notion.png <https://www.notion.com/front-static/logo-ios.png>
+- qq.png <https://im.qq.com/favicon.ico>
+- qq_mail.png <https://res.wx.qq.com/t/webmail/webmail/res/images/qqmail_favicon_96h.8d124a7.png>
+- qq_music.png <https://y.qq.com/favicon.ico?max_age=2592000>
+- slack.png <https://a.slack-edge.com/9cc0056/img/icons/favicon-32.png>
+- taobao.png <https://img.alicdn.com/tps/i3/T1OjaVFl4dXXa.JOZB-114-114.png>
+- tencent_docs.png <https://docs.idqqimg.com/tim/docs/desktop/favicon.ico>
+- tencent_meeting.png <https://cdn.meeting.tencent.com/assets/next-website/logo128.png>
+- wechat.png <https://res.wx.qq.com/a/wx_fed/assets/res/NTI4MWU5.ico>
+- wecom.png <https://wwcdn.weixin.qq.com/node/wwnl/wwnl/style/images/independent/favicon/favicon_48h$c976bd14.png>
+- weiyun.png <https://img.weiyun.com/vipstyle/nr/box/img/favicon.ico?max_age=31536000>
+- weread.png <https://rescdn.qqmail.com/node/wr/wrpage/style/images/independent/favicon/favicon_48h.png>
+- wps.png <https://www.wps.cn/>
+- xiaohongshu.png <https://picasso-static.xiaohongshu.com/fe-platform/f43dc4a8baf03678996c62d8db6ebc01a82256ff.png>
+- xiaomi.png <https://www.mi.com/favicon.ico>
+- yinxiang.png <https://www.yinxiang.com/assets/favicon-CXSibozi.png>
+- yuque.png <https://mdn.alipayobjects.com/huamei_0prmtq/afts/img/A*vMxOQIh4KBMAAAAAAAAAAAAADvuFAQ/original>
+- zhihu.png <https://static.zhihu.com/heifetz/favicon.ico>

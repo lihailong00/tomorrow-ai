@@ -9,9 +9,16 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "test": "tsc -p tsconfig.json && node --test dist/runtime.test.js dist/config.test.js dist/web.test.js dist/research.test.js dist/runtime-settings.test.js dist/server.test.js dist/usage.test.js dist/connected-tools.test.js dist/tool-media.test.js dist/tool-search.test.js"
+    "bench:product": "tsc -p tsconfig.json && node benchmarks/query-rewrite.mjs --regression",
+    "test": "tsc -p tsconfig.json && node --test dist/runtime.test.js dist/config.test.js dist/web.test.js dist/research.test.js dist/runtime-settings.test.js dist/server.test.js dist/usage.test.js dist/connected-tools.test.js dist/tool-media.test.js dist/tool-search.test.js dist/query-rewrite.test.js dist/travel-guard.test.js dist/dsh/runtime.test.js dist/dsh/e2e.test.js benchmarks/fliggy-fixtures.test.mjs",
+    "test:dsh:e2e": "tsc -p tsconfig.json && node --test dist/dsh/e2e.test.js"
   },
   "dependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm-pi-ai": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-sdk-client": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.5",
     "@earendil-works/pi-agent-core": "1.4.0",
     "@earendil-works/pi-ai": "1.4.0",
     "@fly-ai/flyai-cli": "1.0.16",

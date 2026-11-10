@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" fill="none" role="img" aria-labelledby="title desc">
+<title id="title">妥啦的日常：今日安排、自然对话与个人记忆</title>
+<desc id="desc">三幅产品场景示意，使用虚构内容。左侧是简报与紧凑待办，中间是整理客户要求和准备草稿，右侧是个人记忆与服务选择。</desc>
+<defs><linearGradient id="screen" x1="0" y1="1" x2="1" y2="0"><stop stop-color="#fff6f0"/><stop offset=".5" stop-color="#f5f7ff"/><stop offset="1" stop-color="#e8f0ff"/></linearGradient><radialGradient id="orb" cx=".3" cy=".2" r=".9"><stop stop-color="white"/><stop offset=".28" stop-color="#dcecff"/><stop offset=".58" stop-color="#b4bafa"/><stop offset=".85" stop-color="#c6abe3"/><stop offset="1" stop-color="#efd3e3"/></radialGradient></defs>
+<rect width="1200" height="760" rx="24" fill="#fbfcff"/>
+<g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
+<text x="205" y="34" font-size="19" fill="#414d68" font-weight="600" text-anchor="middle">一眼看清今天</text>
+<rect x="40" y="60" width="330" height="650" rx="30" fill="url(#screen)" stroke="#e0e5f1"/>
+<text x="62" y="89" font-size="11" fill="#6b7690" font-weight="600">9:41</text>
+<rect x="324" y="78" width="22" height="9" rx="3" fill="none" stroke="#99a3b7"/>
+<rect x="326" y="80" width="16" height="5" rx="1" fill="#99a3b7"/>
+<circle cx="70" cy="127" r="13" fill="url(#orb)" stroke="#ced9f6"/>
+<path d="M61.16 130.9q7.8 13.65 18.2 0" stroke="white" stroke-opacity=".7" stroke-width="1.6" stroke-linecap="round"/>
+<text x="94" y="134" font-size="20" fill="#354057" font-weight="600">妥啦</text>
+<rect x="320" y="109" width="34" height="34" rx="17" fill="#ffffff"/>
+<text x="337" y="132" font-size="17" fill="#697895" font-weight="600" text-anchor="middle">···</text>
+<text x="62" y="189" font-size="28" fill="#354057" font-weight="650">你好，朋友</text>
+<text x="62" y="218" font-size="15" fill="#788399" font-weight="400">今天，从几件小事开始。</text>
+<rect x="60" y="244" width="290" height="120" rx="18" fill="white"/>
+<text x="78" y="276" font-size="17" fill="#495570" font-weight="600">✧ 今日简报</text>
+<text x="78" y="306" font-size="14" fill="#788399" font-weight="400">客户的新要求已经整理，</text>
+<text x="78" y="330" font-size="14" fill="#788399" font-weight="400">下午还有一场项目同步。</text>
+<text x="62" y="399" font-size="16" fill="#495570" font-weight="600">今天的下一步</text>
+<rect x="60" y="417" width="290" height="59" rx="16" fill="white"/>
+<rect x="72" y="429" width="34" height="34" rx="12" fill="#eaf3f1"/>
+<text x="89" y="452" font-size="18" fill="#7984a2" font-weight="500" text-anchor="middle">↗</text>
+<text x="118" y="442" font-size="15" fill="#4e5970" font-weight="550">确认客户的新要求</text>
+<text x="118" y="462" font-size="11" fill="#788399" font-weight="400">邮件 · 准备回复</text>
+<rect x="60" y="484" width="290" height="59" rx="16" fill="white"/>
+<rect x="72" y="496" width="34" height="34" rx="12" fill="#efedff"/>
+<text x="89" y="519" font-size="18" fill="#7984a2" font-weight="500" text-anchor="middle">⌁</text>
+<text x="118" y="509" font-size="15" fill="#4e5970" font-weight="550">学一点 Rust</text>
+<text x="118" y="529" font-size="11" fill="#788399" font-weight="400">每日成长 · 15 分钟</text>
+<rect x="60" y="551" width="290" height="59" rx="16" fill="white"/>
+<rect x="72" y="563" width="34" height="34" rx="12" fill="#fff0e5"/>
+<text x="89" y="586" font-size="18" fill="#7984a2" font-weight="500" text-anchor="middle">✓</text>
+<text x="118" y="576" font-size="15" fill="#4e5970" font-weight="550">出门走一走</text>
+<text x="118" y="596" font-size="11" fill="#788399" font-weight="400">生活 · 让身体动起来</text>
+<rect x="41" y="645" width="328" height="64" rx="28" fill="#ffffff"/>
+<rect x="54" y="652" width="58" height="46" rx="18" fill="#edf2ff"/>
+<text x="83" y="683" font-size="13" fill="#5e7bc5" font-weight="500" text-anchor="middle">今日</text>
+<text x="164" y="683" font-size="13" fill="#8892a6" font-weight="500" text-anchor="middle">事项</text>
+<text x="245" y="683" font-size="13" fill="#8892a6" font-weight="500" text-anchor="middle">记忆</text>
+<text x="326" y="683" font-size="13" fill="#8892a6" font-weight="500" text-anchor="middle">能力</text>
+<text x="600" y="34" font-size="19" fill="#414d68" font-weight="600" text-anchor="middle">一句话，接着往下做</text>
+<rect x="435" y="60" width="330" height="650" rx="30" fill="url(#screen)" stroke="#e0e5f1"/>
+<text x="457" y="89" font-size="11" fill="#6b7690" font-weight="600">9:41</text>
+<rect x="719" y="78" width="22" height="9" rx="3" fill="none" stroke="#99a3b7"/>
+<rect x="721" y="80" width="16" height="5" rx="1" fill="#99a3b7"/>
+<circle cx="465" cy="127" r="13" fill="url(#orb)" stroke="#ced9f6"/>
+<path d="M456.16 130.9q7.8 13.65 18.2 0" stroke="white" stroke-opacity=".7" stroke-width="1.6" stroke-linecap="round"/>
+<text x="489" y="134" font-size="20" fill="#354057" font-weight="600">妥啦</text>
+<rect x="715" y="109" width="34" height="34" rx="17" fill="#ffffff"/>
+<text x="732" y="132" font-size="17" fill="#697895" font-weight="600" text-anchor="middle">···</text>
+<rect x="503" y="169" width="242" height="83" rx="20" fill="#5272c5"/>
+<text x="518" y="199" font-size="14" fill="white" font-weight="400">把客户的新要求整理一下，</text>
+<text x="518" y="224" font-size="14" fill="white" font-weight="400">帮我准备一份回复草稿。</text>
+<text x="457" y="292" font-size="15" fill="#495570" font-weight="400">整理好了。对方主要希望：</text>
+<text x="460" y="325" font-size="14" fill="#5c6780" font-weight="400">• 缩短交付周期</text>
+<text x="460" y="352" font-size="14" fill="#5c6780" font-weight="400">• 补充移动端适配说明</text>
+<rect x="455" y="377" width="290" height="39" rx="13" fill="#eaf0fc"/>
+<circle cx="474" cy="396" r="9" fill="#eaf1ff"/><path d="m470 396 3 3 5-6" stroke="#6b86ce" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="491" y="401" font-size="12" fill="#6a80b6" font-weight="400">腾讯文档 · 读取资料</text>
+<rect x="455" y="435" width="290" height="131" rx="18" fill="white"/>
+<text x="472" y="466" font-size="15" fill="#505c77" font-weight="600">建议回复</text>
+<text x="472" y="496" font-size="13" fill="#788399" font-weight="400">新要求已收到，我会先梳理</text>
+<text x="472" y="519" font-size="13" fill="#788399" font-weight="400">影响范围，再和你确认更新</text>
+<text x="472" y="542" font-size="13" fill="#788399" font-weight="400">后的交付时间。</text>
+<text x="457" y="597" font-size="12" fill="#8490aa" font-weight="400">草稿备好，由你决定如何发送。</text>
+<rect x="451" y="645" width="298" height="48" rx="24" fill="white"/>
+<text x="468" y="675" font-size="22" fill="#8692aa" font-weight="400">＋</text>
+<text x="504" y="674" font-size="15" fill="#a1a9ba" font-weight="400">发消息…</text>
+<text x="720" y="674" font-size="23" fill="#6384cf" font-weight="400" text-anchor="middle">↑</text>
+<text x="995" y="34" font-size="19" fill="#414d68" font-weight="600" text-anchor="middle">越用，越懂你</text>
+<rect x="830" y="60" width="330" height="650" rx="30" fill="url(#screen)" stroke="#e0e5f1"/>
+<text x="852" y="89" font-size="11" fill="#6b7690" font-weight="600">9:41</text>
+<rect x="1114" y="78" width="22" height="9" rx="3" fill="none" stroke="#99a3b7"/>
+<rect x="1116" y="80" width="16" height="5" rx="1" fill="#99a3b7"/>
+<circle cx="860" cy="127" r="13" fill="url(#orb)" stroke="#ced9f6"/>
+<path d="M851.16 130.9q7.8 13.65 18.2 0" stroke="white" stroke-opacity=".7" stroke-width="1.6" stroke-linecap="round"/>
+<text x="884" y="134" font-size="20" fill="#354057" font-weight="600">妥啦</text>
+<rect x="1110" y="109" width="34" height="34" rx="17" fill="#ffffff"/>
+<text x="1127" y="132" font-size="17" fill="#697895" font-weight="600" text-anchor="middle">···</text>
+<text x="852" y="187" font-size="24" fill="#354057" font-weight="600">让妥啦慢慢懂你</text>
+<rect x="850" y="211" width="59" height="33" rx="16" fill="#6477bd"/>
+<text x="879.5" y="233" font-size="12" fill="white" font-weight="400" text-anchor="middle">全部</text>
+<rect x="916" y="211" width="59" height="33" rx="16" fill="#f0f2fa"/>
+<text x="945.5" y="233" font-size="12" fill="#8b94aa" font-weight="400" text-anchor="middle">偏好</text>
+<rect x="982" y="211" width="59" height="33" rx="16" fill="#f0f2fa"/>
+<text x="1011.5" y="233" font-size="12" fill="#8b94aa" font-weight="400" text-anchor="middle">目标</text>
+<rect x="1048" y="211" width="59" height="33" rx="16" fill="#f0f2fa"/>
+<text x="1077.5" y="233" font-size="12" fill="#8b94aa" font-weight="400" text-anchor="middle">事实</text>
+<rect x="850" y="264" width="290" height="87" rx="18" fill="white"/>
+<rect x="863" y="277" width="45" height="23" rx="8" fill="#eef2ff"/>
+<text x="885.5" y="293" font-size="10" fill="#8790a6" font-weight="400" text-anchor="middle">偏好</text>
+<text x="864" y="319" font-size="16" fill="#505c77" font-weight="550">喜欢简洁的回答</text>
+<text x="864" y="339" font-size="11" fill="#788399" font-weight="400">来自你主动说过的话</text>
+<rect x="850" y="365" width="290" height="87" rx="18" fill="white"/>
+<rect x="863" y="378" width="45" height="23" rx="8" fill="#f0edff"/>
+<text x="885.5" y="394" font-size="10" fill="#8790a6" font-weight="400" text-anchor="middle">目标</text>
+<text x="864" y="420" font-size="16" fill="#505c77" font-weight="550">每天学一点 Rust</text>
+<text x="864" y="440" font-size="11" fill="#788399" font-weight="400">目标可以随时调整</text>
+<rect x="850" y="466" width="290" height="87" rx="18" fill="white"/>
+<rect x="863" y="479" width="45" height="23" rx="8" fill="#eaf4f0"/>
+<text x="885.5" y="495" font-size="10" fill="#8790a6" font-weight="400" text-anchor="middle">习惯</text>
+<text x="864" y="521" font-size="16" fill="#505c77" font-weight="550">日常出行习惯</text>
+<text x="864" y="541" font-size="11" fill="#788399" font-weight="400">短途优先地铁，时间紧时打车</text>
+<rect x="850" y="578" width="290" height="95" rx="18" fill="#edf1fc"/>
+<text x="866" y="605" font-size="15" fill="#6075b4" font-weight="600">你的服务，你来选择</text>
+<text x="866" y="632" font-size="12" fill="#7c88a4" font-weight="400">官方服务</text>
+<text x="980" y="632" font-size="12" fill="#7c88a4" font-weight="400">开箱即用</text>
+<text x="866" y="654" font-size="12" fill="#7c88a4" font-weight="400">自建服务</text>
+<text x="980" y="654" font-size="12" fill="#7c88a4" font-weight="400">连接自己的服务器</text>
+<text x="600" y="740" font-size="12" fill="#9aa4b9" font-weight="400" text-anchor="middle">产品场景示意 · 全部使用虚构内容 · 各平台与连接的实际能力以文档为准</text>
+</g></svg>

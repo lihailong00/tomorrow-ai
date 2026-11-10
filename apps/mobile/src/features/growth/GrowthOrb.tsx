@@ -66,6 +66,7 @@ export function GrowthOrb({
           ]}
         />
       )}
+      {halo === 'starlight' && <View style={[orbStyles.halo, { width: size * 0.94, height: size * 0.94, borderRadius: size, borderColor: '#9B96D7', borderWidth: 2, backgroundColor: '#EDEAFF66', transform: [{ rotate: '25deg' }, { scaleY: 0.7 }] }]} />}
       <AssistantOrb size={size} />
     </Animated.View>
   );

@@ -12,7 +12,7 @@ export type GrowthPreferences = {
   paused_today: boolean;
   timezone: string;
   version: number;
-  halo: 'classic' | 'sunrise';
+  halo: 'classic' | 'sunrise' | 'starlight';
 };
 export type UpdateGrowthPreferences = Partial<
   Pick<
@@ -114,3 +114,48 @@ export type DailyPlan = {
   can_retry?: boolean;
 };
 export type AcceptDailyPlanItem = { item: DailyPlanItem; todo: Todo };
+export type JourneyStep = {
+  id: string;
+  title: string;
+  description: string;
+  criterion: string;
+  estimated_minutes: number;
+  status: 'locked' | 'current' | 'completed' | 'skipped' | 'deleted';
+  todo: Todo | null;
+  difficulty: 'too_hard' | 'just_right' | 'too_easy' | null;
+  version: number;
+};
+export type GrowthJourney = {
+  id: string;
+  goal: string;
+  kind: GrowthGoal['kind'];
+  daily_minutes: number;
+  status:
+    | 'queued'
+    | 'generating'
+    | 'ready'
+    | 'failed'
+    | 'completed'
+    | 'archived';
+  error: string | null;
+  can_retry: boolean;
+  version: number;
+  steps: JourneyStep[];
+  completed_steps: number;
+  skipped_steps: number;
+};
+export type GrowthJourneys = {
+  active: GrowthJourney | null;
+  past: GrowthJourney[];
+};
+export type GrowthPeriod = 'week' | 'month' | 'all';
+export type GrowthHistory = {
+  period: GrowthPeriod;
+  action_count: number;
+  active_days: number;
+  learning_actions: number;
+  exercise_minutes: number;
+  total_xp: number;
+  records: Array<{ reward: GrowthReward; note: string | null }>;
+  next_offset: number | null;
+};

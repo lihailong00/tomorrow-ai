@@ -34,6 +34,18 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments) {
   if ($LASTEXITCODE -ne 0) { throw ('Command failed with exit {0}: {1}' -f $LASTEXITCODE, $Program) }
 }
 
+function Commit-DesktopFile([string]$Source, [string]$Destination) {
+  # The staging directory is on the destination volume. File.Replace handles an
+  # existing Windows file atomically; Move-Item -Force can fail with ERROR_ALREADY_EXISTS.
+  if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+    # Keep the replaced bytes inside this invocation's staging directory too.
+    # PowerShell can coerce $null to an empty backup path for this .NET overload.
+    [IO.File]::Replace($Source, $Destination, ($Source + '.replaced'))
+  } else {
+    [IO.File]::Move($Source, $Destination)
+  }
+}
+
 function Publish-DesktopBinary([string]$Candidate, [string]$Directory, [string]$Version) {
   Assert-TadaPlainPath $Directory
   $latest = Join-Path $Directory 'tada-desktop-latest.exe'
@@ -57,12 +69,12 @@ function Publish-DesktopBinary([string]$Candidate, [string]$Directory, [string]$
     }
     if ($oldHash -and $oldHash -ne $newHash) {
       Copy-Item -LiteralPath $latest -Destination (Join-Path $stage 'rollback.next')
-      Move-Item -LiteralPath (Join-Path $stage 'rollback.next') -Destination $rollback -Force
+      Commit-DesktopFile (Join-Path $stage 'rollback.next') $rollback
       $changed.Add($rollback)
       if ((Get-FileHash -LiteralPath $rollback -Algorithm SHA256).Hash.ToLowerInvariant() -ne $oldHash) { throw 'Rollback verification failed.' }
     }
     Copy-Item -LiteralPath $Candidate -Destination (Join-Path $stage 'latest.next')
-    Move-Item -LiteralPath (Join-Path $stage 'latest.next') -Destination $latest -Force
+    Commit-DesktopFile (Join-Path $stage 'latest.next') $latest
     $changed.Add($latest)
     if ((Get-FileHash -LiteralPath $latest -Algorithm SHA256).Hash.ToLowerInvariant() -ne $newHash) { throw 'Latest verification failed.' }
     $record = [ordered]@{
@@ -72,7 +84,7 @@ function Publish-DesktopBinary([string]$Candidate, [string]$Directory, [string]$
       code_signed=$false; source_commit=(& git -C $repoPath rev-parse HEAD)
     }
     [IO.File]::WriteAllText((Join-Path $stage 'metadata.next'), ($record | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath (Join-Path $stage 'metadata.next') -Destination $metadata -Force
+    Commit-DesktopFile (Join-Path $stage 'metadata.next') $metadata
     $changed.Add($metadata)
     $committed = $true
     return [pscustomobject]$record
@@ -87,7 +99,14 @@ function Publish-DesktopBinary([string]$Candidate, [string]$Directory, [string]$
     $fullStage = Get-TadaFullPath $stage
     if ((Test-TadaPathInside $fullStage $Directory) -and ([IO.Path]::GetFileName($fullStage) -like '.desktop-publish-*')) {
       Assert-TadaPlainPath $fullStage
-      Remove-Item -LiteralPath $fullStage -Recurse -Force
+      try {
+        Remove-Item -LiteralPath $fullStage -Recurse -Force -ErrorAction Stop
+      } catch {
+        # Windows can keep the replaced image mapped while an older app is
+        # running. A committed latest/rollback must not be reported as failed
+        # just because that old image cannot yet be removed.
+        Write-Warning ('Desktop staging backup is still in use; retained for later cleanup: ' + $fullStage)
+      }
     }
   }
 }

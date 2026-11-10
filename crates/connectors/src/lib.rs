@@ -2,7 +2,9 @@
 mod config;
 mod crypto;
 mod reads;
+pub mod akshare;
 pub mod domestic;
+pub mod github;
 pub mod personal_mcp;
 pub mod personal_wallet;
 pub mod health;

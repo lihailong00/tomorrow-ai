@@ -9,6 +9,18 @@ import java.time.format.ResolverStyle
 
 /** Wall time is resolved once, on this phone; never guess a date or repeat day. */
 internal object PhoneAlarmPolicy {
+  fun nextSystemTarget(date: String, time: String, now: Long, zone: ZoneId = ZoneId.systemDefault()): LocalTime {
+    val at = target(date, time, now, zone)
+    val current = java.time.Instant.ofEpochMilli(now).atZone(zone)
+    val clockTime = LocalTime.parse(time)
+    val today = current.toLocalDate().atTime(clockTime)
+    val next = if (today.isAfter(current.toLocalDateTime())) today else today.plusDays(1)
+    require(next.atZone(zone).toInstant().toEpochMilli() == at) {
+      "系统闹钟只能直接设置下一次响铃，请打开系统闹钟核对日期"
+    }
+    return clockTime
+  }
+
   fun target(date: String, time: String, now: Long, zone: ZoneId = ZoneId.systemDefault()): Long {
     require(Regex("\\d{4}-\\d{2}-\\d{2}").matches(date)) { "请填写 YYYY-MM-DD 日期" }
     require(Regex("([01]\\d|2[0-3]):[0-5]\\d").matches(time)) { "请填写 HH:mm 时间" }

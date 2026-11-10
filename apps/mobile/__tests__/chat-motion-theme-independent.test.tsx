@@ -102,9 +102,10 @@ function luminance(hex: string) {
   const c = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(x => x <= .04045 ? x / 12.92 : ((x + .055) / 1.055) ** 2.4);
   return c[0] * .2126 + c[1] * .7152 + c[2] * .0722;
 }
-test('actual chat uses the unified brand bubble and legible white content including failure and attachment metadata', async () => {
+test('actual chat keeps the brand bubble legible and places reply recovery outside it', async () => {
   const api = { capabilities: jest.fn().mockResolvedValue({ runtime: { model_mode: 'pi' } }), messages: jest.fn().mockResolvedValue({ items: [
     { id: 'brand-user', role: 'user', content: 'Brand message', conversation_id: 'saved', created_at: '', delivery: 'failed', stream_error: 'Retryable failure', attachments: [{ upload_id: 'file', name: 'example.txt' }] },
+    { id: 'brand-answer', role: 'assistant', content: '', conversation_id: 'saved', created_at: '', stream_error: 'Retryable failure' },
   ], next_offset: null }) };
   const tree = await mount(<AppProvider value={{ api, formatDate: () => '', navigate: jest.fn(), invalidate: jest.fn() } as unknown as AppContextValue}><ChatScreen conversationId="saved" /></AppProvider>);
   const row = tree.root.findAllByType(View).find(n => n.props.testID === 'chat-message-brand-user')!;
@@ -116,12 +117,13 @@ test('actual chat uses the unified brand bubble and legible white content includ
   const text = row.findAllByType(Text);
   const content = text.map(n => Array.isArray(n.props.children) ? n.props.children.flat(Infinity).join('') : String(n.props.children)).join(' ');
   expect(content).toContain('Brand message');
-  expect(content).toContain('Retryable failure');
+  expect(content).not.toContain('Retryable failure');
+  expect(tree.root.findAllByType(Text).some(node => node.props.children === 'Retryable failure')).toBe(true);
   expect(content).toContain('example.txt');
   for (const node of text) {
     const foreground = StyleSheet.flatten(node.props.style).color;
     const children = Array.isArray(node.props.children) ? node.props.children.flat(Infinity).join('') : String(node.props.children);
-    if (['Brand message', 'Retryable failure', 'example.txt'].some(value => children.includes(value))) {
+    if (['Brand message', 'example.txt'].some(value => children.includes(value))) {
       expect(foreground).toBe('#FFFFFF');
     }
     if (typeof foreground !== 'string' || !/^#[0-9a-f]{6}$/i.test(foreground)) continue;

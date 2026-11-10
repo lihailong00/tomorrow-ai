@@ -1,0 +1,27 @@
+[
+  {
+    "name": "inspect_app_permissions",
+    "description": "检查当前手机已获授权的应用权限，适用于怀疑有跟踪、监听软件，或询问哪些 App 有某项权限。结合上一轮理解‘那你看一下哪些 App’，已有相关本机报告时 mode=reuse，由手机展示详情；用户明确要求重查、回来核对是否已撤销时 mode=refresh。仅当用户明确指向本机已选中的 App 时用 scope=selected_app，工具不会接收应用名称或包名。只返回检查状态和数量，应用名单留在手机。权限线索不能证明正在监控，检查为空也不能证明没有监控。谁曾用过麦克风、相机或定位应改用 open_system_settings 的 privacy 入口。只问排查方法、翻译、引用、检查他人设备或明确拒绝检查时不调用。取消或超时后不重复请求。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "inspection": { "type": "string", "enum": ["permissions"] },
+        "permission": { "type": "string", "enum": ["microphone", "camera", "location", "contacts", "sms", "accessibility", "notification_access"], "description": "用户询问具体权限时填写。省略表示综合核查。" },
+        "scope": { "type": "string", "enum": ["visible_apps", "selected_app"], "description": "省略时查系统可见第三方 App。selected_app 由用户在手机上选择。" },
+        "mode": { "type": "string", "enum": ["check", "reuse", "refresh"], "description": "check 检查，reuse 展示匹配的近期报告，refresh 重新读取。没有匹配报告时手机可提示确认检查。" }
+      },
+      "required": ["inspection"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "open_system_settings",
+    "description": "在对话里给用户可点击的系统设置入口。询问哪些 App 实际使用过麦克风、相机或位置时使用 privacy，让用户在系统隐私中心查看历史；工具无法读取历史记录。关闭、撤销或修改所选 App 的权限时使用 selected_app，由用户在系统页面操作。无障碍设置用 accessibility，通知使用权设置用 notification_access。只在用户要求查看、打开或处理相应设置时调用。只有回执 opened 才表示已发起目标页面，fallback 表示已打开系统设置首页，均不能当作权限已修改。",
+    "parameters": {
+      "type": "object",
+      "properties": { "destination": { "type": "string", "enum": ["selected_app", "privacy", "accessibility", "notification_access"] } },
+      "required": ["destination"],
+      "additionalProperties": false
+    }
+  }
+]

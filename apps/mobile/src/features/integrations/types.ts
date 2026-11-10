@@ -9,6 +9,7 @@ export interface Integration {
   notification_supported?: boolean;
   required_configuration?: string[];
   credential_scope?: 'user';
+  workspace_name?: string;
 }
 
 export interface ImportedContent {

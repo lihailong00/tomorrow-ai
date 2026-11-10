@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, View } from 'react-native';
+import { Alert, Pressable, ScrollView, Switch, View } from 'react-native';
 import { Text } from '../ui/Text';
 import { ApiError } from '../api/client';
 import { useAction, useApp } from '../app/context';
@@ -17,6 +17,7 @@ import { AssistantOrb, Icon } from '../ui/visuals';
 import { normalizePhoneNumber } from '../domain/phone';
 import { validatePassword } from '../domain/password';
 import { PhotoIndexSettings } from '../features/photo-index/PhotoIndexSettings';
+import { ContinuationSettings } from '../features/conversation-continuation/ContinuationSettings';
 import { PhoneSourcesEntry } from '../features/phone-sources/PhoneSourcesEntry';
 import { EmailAuthScreen } from '../features/instances/EmailAuthScreen';
 import { InstanceConnectionCard } from '../features/instances/InstanceConnectionCard';
@@ -535,6 +536,26 @@ function PhoneAuthScreen({
   );
 }
 
+function VoiceTranscriptSettings() {
+  const app = useApp();
+  const latest = useRef(app);
+  latest.current = app;
+  const action = useAction();
+  return <Card>
+    <View style={s.row}>
+      <View style={s.fill}>
+        <Text style={s.cardTitle}>转写后先编辑</Text>
+        <Text style={s.small}>松手后把识别文字放入输入框，确认后再发送。</Text>
+      </View>
+      <Switch accessibilityLabel="转写后先编辑" value={app.preferences.reviewVoiceTranscript === true}
+        disabled={action.busy} onValueChange={enabled => action.run(async ({ isCurrent }) => {
+          if (isCurrent()) await latest.current.savePreferences({ ...latest.current.preferences, reviewVoiceTranscript: enabled });
+        })} />
+    </View>
+    <ErrorNotice message={action.error} />
+  </Card>;
+}
+
 export function SettingsScreen({ initialSection }: { initialSection?: 'account' | 'server' } = {}) {
   const {
     api,
@@ -632,6 +653,9 @@ export function SettingsScreen({ initialSection }: { initialSection?: 'account' 
             </Pressable>
           </Card>
           <PhotoIndexSettings key={api.baseUrl + user.id} />
+          <Section title="聊天偏好" />
+          <ContinuationSettings />
+          <VoiceTranscriptSettings />
           <Section title="我的资料" />
           <Card>
             <Text style={s.cardTitle}>已上传的文件与录音</Text>

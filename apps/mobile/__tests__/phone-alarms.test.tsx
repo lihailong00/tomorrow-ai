@@ -1,7 +1,7 @@
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { TextInput } from 'react-native';
-import { alarmProposal, isAlarmRequest } from '../src/features/phone-alarms/alarmProposal';
+import { alarmProposal, directAlarmProposal, isAlarmRequest } from '../src/features/phone-alarms/alarmProposal';
 import { PhoneAlarmCard, PhoneAlarmEditor } from '../src/features/phone-alarms/PhoneAlarmCard';
 import { phoneAlarms, type PhoneAlarm } from '../src/platform/phoneAlarms';
 import { Button } from '../src/ui/components';
@@ -47,8 +47,24 @@ async function mount(element = <PhoneAlarmEditor initial={initial} initialId="al
   const text = () => JSON.stringify(tree.toJSON());
   return { tree, button, press, text, close: async () => { await act(async () => tree.unmount()); } };
 }
-test('rendering a request does not schedule; explicit confirmation uses a stable ID and exact date', async () => {
-  const app = await mount(<PhoneAlarmCard text="明天中午12点设闹钟，提醒我女朋友写简历。" createdAt={anchor} messageId="message-one" />);
+test('chat history opens the clock without recreating an alarm or showing an editor', async () => {
+  const app = await mount(<PhoneAlarmCard text="明天中午12点设闹钟" />);
+  expect(app.tree.root.findAllByType(TextInput)).toHaveLength(0);
+  expect(mock.openSystemClock).not.toHaveBeenCalled();
+  await app.press('打开系统闹钟');
+  expect(mock.openSystemClock).toHaveBeenCalledTimes(1);
+  expect(mock.schedule).not.toHaveBeenCalled();
+  await app.close();
+});
+test('standalone sleep command resolves eight hours across midnight while quoted commands stay inert', () => {
+  const sent = new Date(2026, 10, 3, 22, 31).toISOString();
+  const command = '我要睡了，给我定个八个小时后的闹铃吧。';
+  expect(directAlarmProposal(command, sent)).toMatchObject({ date: '2026-11-04', time: '06:31' });
+  expect(directAlarmProposal('不要' + command, sent)).toBeNull();
+  expect(directAlarmProposal('> ' + command, sent)).toBeNull();
+});
+test('manual alarm management retains stable IDs and exact dates', async () => {
+  const app = await mount();
   expect(mock.schedule).not.toHaveBeenCalled();
   expect(app.tree.root.findAllByType(TextInput)[0].props.value).toBe('2026-11-04');
   await app.press('确认设置本机闹铃');

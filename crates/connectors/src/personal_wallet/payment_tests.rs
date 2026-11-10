@@ -239,15 +239,17 @@ async fn credentials_records_and_authorization_remain_owner_scoped_and_encrypted
     ] {
         assert!(!encrypted.contains(value));
     }
-    provider.push(json!({"code":500,"message":"钱包未开通"}));
+    let unopened = json!({"code":500,"message":"未开通","status":"unbound","neverCreated":true});
+    provider.push(unopened.clone());
+    assert_eq!(state.test(&owner).await.unwrap()["status"], "not_connected");
+    provider.push(unopened.clone());
     provider.push(json!({"code":200,"message":"已申请开通，等待授权","access_url":"https://render.alipay.com/wallet?fixture=auth"}));
     let auth = state.authorize(&owner).await.unwrap();
     assert_eq!(auth["status"], "awaiting_authorization");
-    provider.push(json!({"code":200,"message":"已申请开通，等待授权"}));
-    assert_eq!(
-        state.test(&owner).await.unwrap()["status"],
-        "awaiting_authorization"
-    );
+    provider.push(unopened);
+    let checked = state.test(&owner).await.unwrap();
+    assert_eq!(checked["status"], "awaiting_authorization");
+    assert_eq!(checked["authorization_url"], auth["authorization_url"]);
     provider.push(json!({"code":200,"message":"开启成功"}));
     assert_eq!(
         state.bind(&owner, "654321".into()).await.unwrap()["status"],
@@ -263,7 +265,7 @@ async fn credentials_records_and_authorization_remain_owner_scoped_and_encrypted
         .contains("654321"));
     assert_eq!(
         &*provider.calls.lock().unwrap(),
-        &["check", "apply", "check", "bind"]
+        &["check", "check", "apply", "check", "bind"]
     );
 }
 

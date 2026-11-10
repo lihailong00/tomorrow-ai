@@ -22,6 +22,7 @@ use crate::{ConnectorError, Result};
 mod baidu_sse;
 
 const MAX_BYTES: usize = 256 * 1024;
+pub(super) const MCDONALDS_MENU_BYTES: usize = 1024 * 1024;
 const MAX_TOOLS: usize = 128;
 const MAX_PAGES: usize = 8;
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -198,6 +199,32 @@ pub async fn discover(provider: &str, credentials: &Credentials) -> Result<Vec<V
                         .is_some_and(super::memos::enabled_tool)
                 });
             }
+            if provider == "github" {
+                tools.retain(|tool| tool["name"].as_str()
+                    .is_some_and(|name| super::catalog::is_read_only(provider, name)));
+                if !tools.iter().any(|tool| tool["name"] == "get_me")
+                    || !tools.iter().any(|tool| tool["name"] == "get_file_contents") {
+                    return Err(protocol_error());
+                }
+                let identity = connection.rpc("tools/call", json!({"name":"get_me","arguments":{}})).await?;
+                if identity["isError"] == true || !identity["content"].as_array().is_some_and(|content| !content.is_empty()) {
+                    return Err(unauthorized());
+                }
+                tools.retain(|tool| tool["name"] != "get_me");
+            }
+            if provider == "liepin" {
+                tools.retain(|tool| tool["name"] == "user-search-job");
+                if tools.is_empty() { return Err(protocol_error()); }
+                // The unauthenticated catalog is public. A harmless search
+                // proves that the supplied account token actually works.
+                let probe = connection.rpc("tools/call", json!({
+                    "name":"user-search-job",
+                    "arguments":{"jobName":"Tada连接验证QZ7W493X","page":0}
+                })).await?;
+                if probe["isError"] == true { return Err(unauthorized()); }
+                liepin_jobs(&probe)?;
+                tools[0]["description"] = json!("按职位、城市、学历、经验或公司搜索猎聘。page 从 0 开始；月薪范围用人民币元的数字字符串，如 30000。公司名和关键词可能是宽松匹配，展示前核对。职位链接见 jobDetailUrl。");
+            }
             // The official stdio server can list its tools entirely offline.
             // A real account read is therefore required before claiming that a
             // personal Yuque token has been validated.
@@ -273,7 +300,8 @@ pub async fn call(
     arguments: Value,
 ) -> Result<Value> {
     credentials.validate(provider)?;
-    if tool.is_empty()
+    if (provider == "github" && (tool == "get_me" || !super::catalog::is_read_only(provider, tool)))
+        || tool.is_empty()
         || tool.len() > 128
         || !tool
             .bytes()
@@ -283,7 +311,12 @@ pub async fn call(
     {
         return Err(invalid());
     }
-    let arguments = call_arguments(provider, arguments);
+    validate_tool_arguments(provider, tool, &arguments)?;
+    let arguments = call_arguments(provider, tool, arguments);
+    let liepin_page = if provider == "liepin" {
+        if tool != "user-search-job" { return Err(invalid()); }
+        Some(liepin_page(&arguments)?)
+    } else { None };
     if provider == "fliggy" {
         return timeout(DEADLINE, super::fliggy::call(credentials, tool, arguments))
             .await
@@ -331,17 +364,141 @@ pub async fn call(
     timeout(DEADLINE, async {
         let mut connection = Connection::open(provider, credentials).await?;
         // Never retry a tools/call: the provider may already have committed it.
-        let result = connection
-            .rpc("tools/call", json!({"name":tool,"arguments":arguments}))
-            .await;
+        let params = json!({"name":tool,"arguments":arguments});
+        let result = match &mut connection {
+            Connection::Http(http) if provider == "mcdonalds" && tool == "query-meals" => {
+                http.rpc_limited("tools/call", params, MCDONALDS_MENU_BYTES).await
+            }
+            _ => connection.rpc("tools/call", params).await,
+        };
         connection.close().await;
-        result
+        let result = result?;
+        if let Some(page) = liepin_page {
+            return normalize_liepin(&result, page);
+        }
+        Ok(normalize_tool_result(provider, result))
     })
     .await
     .map_err(|_| timed_out())?
 }
 
-fn call_arguments(provider: &str, mut arguments: Value) -> Value {
+fn normalize_tool_result(provider: &str, mut result: Value) -> Value {
+    let payload = result.get("structuredContent").filter(|value| value.is_object());
+    // Some providers return a JSON-RPC error as the successful outer result.
+    let nested_rpc_error = result["jsonrpc"] == "2.0" && result["error"].is_object();
+    let business_error = match provider {
+        "mcdonalds" => payload.is_some_and(|value| value["success"] == false),
+        "tencent_docs" | "weiyun" => payload.is_some_and(|value| {
+            let error = &value["error"];
+            match error {
+                Value::String(text) => !matches!(text.trim(), "" | "0"),
+                Value::Object(fields) => {
+                    !fields.is_empty() && error["code"] != 0 && error["code"] != "0"
+                }
+                Value::Number(number) => number.as_f64().is_some_and(|code| code != 0.0),
+                Value::Bool(failed) => *failed,
+                _ => false,
+            }
+        }),
+        _ => false,
+    };
+    if nested_rpc_error || business_error {
+        result["isError"] = json!(true);
+    }
+    result
+}
+
+fn liepin_page(arguments: &Value) -> Result<u64> {
+    match arguments.get("page") {
+        None => Ok(0),
+        Some(value) => value.as_u64().filter(|page| *page <= 100).ok_or_else(invalid),
+    }
+}
+
+fn liepin_jobs(result: &Value) -> Result<Vec<Value>> {
+    let text = result["content"].as_array().into_iter().flatten()
+        .find_map(|part| part["text"].as_str()).ok_or_else(protocol_error)?;
+    let mut decoded: Value = serde_json::from_str(text).map_err(|_| protocol_error())?;
+    if decoded["code"] != 0 && decoded["code"] != "0" { return Err(protocol_error()); }
+    decoded["data"]["list"].as_array_mut().map(std::mem::take).ok_or_else(protocol_error)
+}
+
+fn normalize_liepin(result: &Value, page: u64) -> Result<Value> {
+    if result["isError"] == true {
+        return Err(ConnectorError::new(StatusCode::BAD_GATEWAY, "liepin_query_failed",
+            "猎聘查询失败，请检查授权或稍后重试"));
+    }
+    let mut jobs = liepin_jobs(result)?;
+    let next_page = (jobs.len() >= 20 && page < 100).then_some(page + 1);
+    jobs.truncate(20);
+    for job in &mut jobs {
+        let Some(fields) = job.as_object_mut() else { return Err(protocol_error()); };
+        fields.retain(|key, value| {
+            if key == "jobDetailUrl" {
+                return value.as_str().and_then(|url| Url::parse(url).ok()).is_some_and(|url|
+                    url.scheme() == "https" && url.host_str() == Some("www.liepin.com") &&
+                    url.username().is_empty() && url.password().is_none() && url.port().is_none());
+            }
+            matches!(key.as_str(), "jobId" | "jobType" | "jobName" | "company" | "location" |
+                "salary" | "education" | "workYears" | "industry") &&
+                (value.is_number() || value.as_str().is_some_and(|text| text.chars().count() <= 240))
+        });
+    }
+    Ok(json!({"isError":false,"structuredContent":{"jobs":jobs,"page":page,"next_page":next_page}}))
+}
+
+#[cfg(test)]
+mod liepin_tests {
+    use super::*;
+
+    #[test]
+    fn liepin_rejects_business_errors_and_unsafe_pagination() {
+        let error = json!({"isError":false,"content":[{"text":"{\"code\":-1}"}]});
+        assert!(normalize_liepin(&error, 0).is_err());
+        assert!(liepin_page(&json!({"page":-1})).is_err());
+        assert!(liepin_page(&json!({"page":"1"})).is_err());
+    }
+
+    #[test]
+    fn liepin_search_keeps_official_links_and_ignores_unknown_fields() {
+        let job = json!({"jobId":42,"jobName":"测试职位","companyLogo":"https://example.test/logo",
+            "jobDetailUrl":"https://www.liepin.com/job/42.shtml"});
+        let body = json!({"code":0,"data":{"list":vec![job; 20]}});
+        let result = normalize_liepin(&json!({"content":[{"text":body.to_string()}]}), 1).unwrap();
+        let page = &result["structuredContent"];
+        assert_eq!(page["next_page"], 2);
+        assert_eq!(page["jobs"][0]["jobDetailUrl"], "https://www.liepin.com/job/42.shtml");
+        assert!(page["jobs"][0].get("companyLogo").is_none());
+    }
+}
+
+fn validate_tool_arguments(provider: &str, tool: &str, arguments: &Value) -> Result<()> {
+    let has_text = |field: &str| arguments[field].as_str().is_some_and(|value| !value.trim().is_empty());
+    let message = match (provider, tool) {
+        ("tencent_meeting", "get_records_list")
+            if !(has_text("meeting_id") || has_text("meeting_code")
+                || has_text("start_time") && has_text("end_time")) =>
+        {
+            "查询腾讯会议录制需要会议号或会议 ID；按时间查询时，请提供 ISO 8601 格式的开始和结束时间。"
+        }
+        ("weiyun", "weiyun.list_by_category")
+            if ["category_id", "lib_id", "suffix_list"].iter().all(|field| arguments[*field].is_null()) =>
+        {
+            "请指定微云分类或文件库。查询全部分类时可使用 category_id=4095。"
+        }
+        _ => return Ok(()),
+    };
+    Err(ConnectorError::new(StatusCode::BAD_REQUEST, "invalid_request", message))
+}
+
+fn call_arguments(provider: &str, tool: &str, mut arguments: Value) -> Value {
+    if (provider, tool) == ("tencent_docs", "manage.recent_online_file")
+        && let Some(arguments) = arguments.as_object_mut()
+    {
+        // The upstream requires a page size even when the schema marks it optional.
+        arguments.entry("num").or_insert(json!(1));
+        arguments.entry("count").or_insert(json!(20));
+    }
     if provider == "tencent_meeting" {
         let model = arguments
             .get("_client_info")
@@ -418,6 +575,22 @@ enum Connection {
     Http(HttpConnection),
     Stdio(StdioConnection),
     Baidu(baidu_sse::LegacySse),
+}
+
+pub(crate) async fn call_managed_http(
+    client: Client,
+    url: Url,
+    headers: HeaderMap,
+    name: &str,
+    arguments: Value,
+) -> Result<Value> {
+    let mut connection = Connection::Http(HttpConnection::with_client(client, url, headers));
+    let result = timeout(DEADLINE, async {
+        connection.initialize().await?;
+        connection.rpc("tools/call", json!({"name":name,"arguments":arguments})).await
+    }).await.map_err(|_| timed_out()).and_then(|result| result);
+    connection.close().await;
+    result
 }
 
 impl Connection {
@@ -516,6 +689,13 @@ impl HttpConnection {
     fn official(provider: &str, credentials: &Credentials) -> Result<Self> {
         let mut headers = HeaderMap::new();
         let address = match provider {
+            "github" => {
+                headers.insert(AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {}", credentials.token))
+                        .map_err(|_| invalid())?);
+                headers.insert("X-MCP-Tools", HeaderValue::from_static(super::catalog::GITHUB_READ_TOOLS));
+                "https://api.githubcopilot.com/mcp/readonly"
+            }
             "dida365" => {
                 headers.insert(
                     AUTHORIZATION,
@@ -548,6 +728,11 @@ impl HttpConnection {
                         .map_err(|_| invalid())?,
                 );
                 "https://mcp.mcd.cn"
+            }
+            "liepin" => {
+                headers.insert("x-user-token",
+                    HeaderValue::from_str(&credentials.token).map_err(|_| invalid())?);
+                "https://open-agent.liepin.com/mcp/user"
             }
             "didi" => {
                 if credentials.environment == "sandbox" {
@@ -582,7 +767,7 @@ impl HttpConnection {
         if provider == "baidu_maps" {
             url.query_pairs_mut().append_pair("ak", &credentials.token);
         }
-        for header in ["authorization", "wyheader", "x-tencent-meeting-token"] {
+        for header in ["authorization", "wyheader", "x-tencent-meeting-token", "x-user-token"] {
             if let Some(value) = headers.get_mut(header) {
                 value.set_sensitive(true);
             }
@@ -598,7 +783,10 @@ impl HttpConnection {
             .timeout(Duration::from_secs(15))
             .build()
             .map_err(|_| unavailable())?;
-        Ok(Self {
+        Ok(Self::with_client(client, url, headers))
+    }
+    fn with_client(client: Client, url: Url, headers: HeaderMap) -> Self {
+        Self {
             client,
             url,
             headers,
@@ -606,7 +794,7 @@ impl HttpConnection {
             version: PROTOCOL.into(),
             next_id: 1,
             tools_response_bytes: MAX_BYTES,
-        })
+        }
     }
     fn request(&self) -> reqwest::RequestBuilder {
         let mut request = self
@@ -622,6 +810,14 @@ impl HttpConnection {
         request
     }
     async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
+        let limit = if method == "tools/list" {
+            self.tools_response_bytes
+        } else {
+            MAX_BYTES
+        };
+        self.rpc_limited(method, params, limit).await
+    }
+    async fn rpc_limited(&mut self, method: &str, params: Value, limit: usize) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
         let response = self
@@ -655,11 +851,7 @@ impl HttpConnection {
             }
             self.session = Some(session.clone());
         }
-        if method == "tools/list" {
-            read_http_response_limited(response, id, self.tools_response_bytes).await
-        } else {
-            read_http_response(response, id).await
-        }
+        read_http_response_limited(response, id, limit).await
     }
     async fn notify(&mut self, method: &str) -> Result<()> {
         let response = self
@@ -698,10 +890,6 @@ fn rpc_result(value: Value, id: u64) -> Result<Value> {
         return Err(upstream());
     }
     value.get("result").cloned().ok_or_else(protocol_error)
-}
-
-async fn read_http_response(response: reqwest::Response, id: u64) -> Result<Value> {
-    read_http_response_limited(response, id, MAX_BYTES).await
 }
 
 async fn read_http_response_limited(

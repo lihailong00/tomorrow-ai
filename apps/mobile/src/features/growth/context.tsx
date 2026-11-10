@@ -261,11 +261,13 @@ export function GrowthProvider({ children }: { children: React.ReactNode }) {
             ? `成长 Lv.${summary.level} · 又向前走了一步`
             : `+${reward.xp} 成长 · 今天已前进 ${summary.today.action_count} 步`,
           detail:
-            upgraded && summary.available_halos.includes('sunrise')
+            summary.level >= 5 && observation.before.level < 5
+              ? '星光光环已经解锁，可以在我的成长里使用。'
+              : summary.level >= 3 && observation.before.level < 3
               ? '晨光光环已经解锁，可以在我的成长里使用。'
               : reward.kind === 'communication'
               ? '你确认的这一步已记录，等待反馈的事项会继续保留。'
-              : '已按你的确认记入成长；准备内容本身不会计为完成。',
+              : '又一件真实做成的事，留下了自己的记录。',
           halo: summary.halo,
         });
       } catch {

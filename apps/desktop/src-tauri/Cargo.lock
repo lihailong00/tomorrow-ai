@@ -3849,8 +3849,10 @@ dependencies = [
 
 [[package]]
 name = "tada-desktop"
-version = "0.1.2"
+version = "0.1.6"
 dependencies = [
+ "base64 0.22.1",
+ "chrono",
  "futures-util",
  "keyring",
  "open",
@@ -3862,6 +3864,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "windows",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

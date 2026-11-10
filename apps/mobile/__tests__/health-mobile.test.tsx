@@ -1,5 +1,5 @@
 import React from 'react';
-import { Alert, NativeModules, Text } from 'react-native';
+import { Alert, NativeModules, Platform, Text } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import type { ApiClient } from '../src/api/client';
 import { AppProvider, type AppContextValue } from '../src/app/context';
@@ -12,8 +12,10 @@ import {
 } from '../src/features/health/storage';
 import {
   parseHealthRead,
+  providerLabels,
   type HealthBucket,
   type HealthConnection,
+  type HealthProvider,
   type HealthReceipt,
 } from '../src/features/health/types';
 import { platform } from '../src/platform/ports';
@@ -143,30 +145,48 @@ async function setup(item = connection(), initialReceipt?: HealthReceipt) {
     if (!found) throw new Error('Missing button: ' + label);
     return found;
   };
+  const control = (label: string | RegExp) =>
+    tree.root.findAll(node => {
+      const value = node.props.accessibilityLabel;
+      return (
+        typeof value === 'string' &&
+        typeof node.props.onPress === 'function' &&
+        (typeof label === 'string' ? value === label : label.test(value))
+      );
+    })[0];
+  const pressControl = async (label: string | RegExp) => {
+    const found = control(label);
+    if (!found) throw new Error('Missing control: ' + label);
+    await act(async () => {
+      found.props.onPress();
+    });
+  };
+  const openSource = async (provider: HealthProvider) => {
+    if (control('关闭')) await pressControl('关闭');
+    await pressControl(/^(选择健康来源|切换数据来源，当前)/);
+    await pressControl('设置' + providerLabels[provider]);
+  };
   return {
     tree,
     request,
     text,
     button,
+    control,
+    pressControl,
+    openSource,
+    async openReceipt() {
+      if (!control('使用一次性连接确认码')) await openSource('xiaomi');
+      if (!control('使用一次性连接确认码').props.accessibilityState.expanded) {
+        await pressControl('使用一次性连接确认码');
+      }
+    },
     receiptInput: () =>
       tree.root.findAll(
         node =>
           node.props.accessibilityLabel === '一次性连接确认码' &&
           typeof node.props.onChangeText === 'function',
       )[0],
-    async enterReceipt(
-      value: string,
-      provider: 'huawei' | 'xiaomi' = 'xiaomi',
-    ) {
-      await act(async () => {
-        tree.root
-          .findAll(
-            node =>
-              node.props.accessibilityLabel === '确认码来源' + provider &&
-              typeof node.props.onPress === 'function',
-          )[0]
-          .props.onPress();
-      });
+    async enterReceipt(value: string) {
       await act(async () => {
         tree.root
           .findAll(
@@ -214,6 +234,7 @@ async function setup(item = connection(), initialReceipt?: HealthReceipt) {
 
 it('checks availability and connection metadata without reading health data or automatically uploading', async () => {
   const view = await setup();
+  await view.openSource('xiaomi');
   expect(view.text()).toContain('待配置');
   expect(view.text()).toContain('暂无健康记录');
   expect(NativeModules.TadaHealth.readRecords).not.toHaveBeenCalled();
@@ -221,7 +242,7 @@ it('checks availability and connection metadata without reading health data or a
     NativeModules.TadaHealth.requestReadPermissions,
   ).not.toHaveBeenCalled();
   expect(view.request.mock.calls.every(call => call[1] === 'GET')).toBe(true);
-  expect(view.button('连接xiaomi').props.disabled).toBe(true);
+  expect(view.control('连接xiaomi')).toBeUndefined();
   await view.close();
 });
 
@@ -229,13 +250,18 @@ it('works without a native bridge or encrypted storage and does not offer unavai
   delete NativeModules.TadaHealth;
   delete NativeModules.TomorrowPlatform;
   const view = await setup();
-  expect(view.button('授权并读取本机健康记录').props.disabled).toBe(true);
+  await view.openSource(
+    Platform.OS === 'ios' ? 'apple_health' : 'health_connect',
+  );
+  expect(view.control('授权并读取本机健康记录')).toBeUndefined();
+  await view.pressControl('数据与权限说明');
   expect(view.text()).toContain('仅在当前页面内存保留');
   await view.close();
 });
 
 it('requests only selected read types and stores resulting data through secure storage only', async () => {
   const view = await setup();
+  await view.openSource('health_connect');
   await view.press('授权并读取本机健康记录');
   expect(NativeModules.TadaHealth.requestReadPermissions).toHaveBeenCalledWith([
     'steps',
@@ -245,6 +271,7 @@ it('requests only selected read types and stores resulting data through secure s
     days: 7,
   });
   expect(NativeModules.TomorrowPlatform.setSecureItem).toHaveBeenCalled();
+  await view.press('查看当前来源记录明细');
   expect(view.text()).toContain('com.example.health');
   expect(view.text()).toContain('My watch');
   expect(view.text()).toContain('单条步数／睡眠记录不代表全天总量');
@@ -269,7 +296,9 @@ it('keeps unselected metrics out of encrypted records, preserving partial and tr
     unavailable_metrics: ['sleep'],
   });
   const view = await setup();
+  await view.openSource('health_connect');
   await view.press('授权并读取本机健康记录');
+  await view.press('查看当前来源记录明细');
   expect(view.text()).toContain('本次仅包含部分数据');
   expect(view.text()).toContain('本次未能读取');
   expect([...memory.values()].join('')).not.toContain('private-heart');
@@ -285,6 +314,7 @@ it('does not imply a denied permission or zero health measurements when iOS-styl
     requested: ['steps'],
   });
   const view = await setup();
+  await view.openSource('health_connect');
   await view.press('授权并读取本机健康记录');
   expect(view.text()).toContain('不会将空记录视为零');
   expect(view.text()).not.toContain('已获得全部权限');
@@ -295,6 +325,7 @@ it('does not persist data after user changes while a native query is pending', a
   const pending = deferred<ReturnType<typeof read>>();
   NativeModules.TadaHealth.readRecords.mockReturnValue(pending.promise);
   const view = await setup();
+  await view.openSource('health_connect');
   await view.press('授权并读取本机健康记录');
   await view.changeUser('user2');
   await act(async () => {
@@ -309,6 +340,7 @@ it('suppresses duplicate native reads while one operation is active', async () =
   const pending = deferred<ReturnType<typeof read>>();
   NativeModules.TadaHealth.readRecords.mockReturnValue(pending.promise);
   const view = await setup();
+  await view.openSource('health_connect');
   await view.press('授权并读取本机健康记录');
   await view.press('授权并读取本机健康记录');
   expect(NativeModules.TadaHealth.readRecords).toHaveBeenCalledTimes(1);
@@ -320,6 +352,7 @@ it('suppresses duplicate native reads while one operation is active', async () =
 
 it('requires cloud-data consent and opens only the official provider authorization URL', async () => {
   const view = await setup(connection('available'));
+  await view.openSource('xiaomi');
   await view.press('连接xiaomi');
   expect(Alert.alert).toHaveBeenCalledWith(
     '连接小米运动健康',
@@ -343,6 +376,7 @@ it('requires cloud-data consent and opens only the official provider authorizati
 
 it('rejects expired confirmation callbacks after a switch to another server identity', async () => {
   const view = await setup(connection('available'));
+  await view.openSource('xiaomi');
   await view.press('连接xiaomi');
   await view.changeUser('user1', 'different-instance');
   await view.confirm();
@@ -355,6 +389,7 @@ it('rejects expired confirmation callbacks after a switch to another server iden
 
 it('allows a connected account to adjust its read authorization instead of forcing disconnection', async () => {
   const view = await setup(connection('connected'));
+  await view.openSource('xiaomi');
   await view.press('调整xiaomi授权');
   await view.confirm();
   expect(view.request).toHaveBeenCalledWith(
@@ -371,6 +406,7 @@ it('reads the granted subset after a partial cloud authorization', async () => {
     ...connection('connected'),
     granted_metrics: ['steps'],
   });
+  await view.openSource('xiaomi');
   const heart = view.tree.root.findAll(
     node =>
       node.props.accessibilityLabel === '读取心率' &&
@@ -387,13 +423,17 @@ it('reads the granted subset after a partial cloud authorization', async () => {
     { metrics: ['steps'], days: 7 },
     expect.anything(),
   );
+  await view.openSource('xiaomi');
   expect(view.text()).toContain('读取仅包含已授权的所选项目');
   await view.close();
 });
 
 it('clears the selected account local health data without deleting provider records', async () => {
   const view = await setup();
+  await view.openSource('health_connect');
   await view.press('授权并读取本机健康记录');
+  await view.pressControl('连接与权限');
+  await view.pressControl('数据与权限说明');
   await view.press('清除本机健康记录');
   await view.confirm('清除');
   expect(memory.size).toBe(0);
@@ -406,6 +446,7 @@ it('clears the selected account local health data without deleting provider reco
 
 it('does not report revocation at the provider after only server credentials were removed', async () => {
   const view = await setup(connection('connected'));
+  await view.openSource('xiaomi');
   await view.press('断开xiaomi');
   await view.confirm('断开并清除');
   expect(view.text()).toContain('请在厂商账号中检查并撤销授权');
@@ -491,6 +532,8 @@ it('only prefills a deep-link receipt and never finalizes it or reads data autom
 
 it('validates missing and malformed receipts without calling finalize', async () => {
   const view = await setup(connection('available'));
+  expect(view.receiptInput()).toBeUndefined();
+  await view.openReceipt();
   expect(view.button('完成健康账号连接').props.disabled).toBe(true);
   await view.press('完成健康账号连接');
   await view.enterReceipt('bad-receipt');
@@ -505,6 +548,7 @@ it('validates missing and malformed receipts without calling finalize', async ()
 
 it('requires in-app confirmation to finalize a manually entered receipt and clears it after success', async () => {
   const view = await setup(connection('available'));
+  await view.openReceipt();
   const code = 'B'.repeat(43);
   await view.enterReceipt(code);
   await view.press('完成健康账号连接');
@@ -543,6 +587,7 @@ it('rejects the old confirmation and clears the receipt when the current account
   await view.press('完成健康账号连接');
   await view.changeUser('another-user');
   await view.confirm('确认连接');
+  await view.openReceipt();
   expect(view.receiptInput().props.value).toBe('');
   expect(
     view.request.mock.calls.some(call => call[0].endsWith('/finalize')),
@@ -558,6 +603,7 @@ it('clears a prefilled receipt on an instance identity change and ignores the pr
   await view.press('完成健康账号连接');
   await view.changeUser('user1', 'another-instance');
   await view.confirm('确认连接');
+  await view.openReceipt();
   expect(view.receiptInput().props.value).toBe('');
   expect(
     view.request.mock.calls.some(call => call[0].endsWith('/finalize')),
@@ -595,6 +641,7 @@ it('does not finalize a receipt for an unconfigured provider', async () => {
 
 it('shows a failed or expired receipt response without claiming connection success', async () => {
   const view = await setup(connection('available'));
+  await view.openReceipt();
   await view.enterReceipt('E'.repeat(43));
   view.request.mockImplementationOnce(async () => {
     throw new Error('确认码已过期，请重新授权');

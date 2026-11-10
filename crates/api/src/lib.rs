@@ -18,15 +18,23 @@ use tomorrow_domain::*;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use utoipa::{OpenApi, ToSchema};
 mod agent_api;
+mod debug_fixture;
 mod wallet_tools;
 mod chat_stream;
+mod chat_interaction;
+mod chat_confirmation;
+mod didi_order;
 mod client_context;
+mod app_permission_intent;
+mod personal_context;
+mod personal_autofill;
 mod knowledge_api;
 mod memory_api;
 mod private_vault_api;
 mod phone_api;
 mod todo_api;
 mod growth_api;
+mod growth_journey_api;
 mod usage;
 mod usage_internal;
 pub mod admin;
@@ -35,6 +43,7 @@ use tomorrow_domain::agent::AgentClient;
 
 #[derive(Clone)]
 pub struct AppState {
+    interactions: chat_interaction::Interactions,
     pub repository: Repository,
     pub provider: ModelProvider,
     pub storage_mode: String,
@@ -43,6 +52,7 @@ pub struct AppState {
     pub connectors: Option<ConnectorState>,
     pub integrations: Option<IntegrationState>,
     pub personal_mcp: Option<PersonalMcpState>,
+    pub akshare: Option<tomorrow_connectors::akshare::Akshare>,
     pub personal_wallet: Option<PersonalWalletState>,
     pub health: Option<HealthState>,
     pub agent: Option<AgentClient>,
@@ -53,6 +63,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(repository: Repository, provider: ModelProvider, database_url: &str) -> Self {
         Self {
+            interactions: Default::default(),
             repository,
             provider,
             storage_mode: if database_url.starts_with("postgres") {
@@ -66,6 +77,7 @@ impl AppState {
             connectors: None,
             integrations: None,
             personal_mcp: None,
+            akshare: None,
             personal_wallet: None,
             health: None,
             agent: None,
@@ -91,7 +103,7 @@ impl AppState {
                 .as_ref()
                 .map(|a| a.model_name().to_owned())
                 .or_else(|| self.provider.model_name().map(str::to_owned)),
-            agent_harness: if self.agent.is_some() { "pi" } else { "direct" }.into(),
+            agent_harness: self.agent.as_ref().map(|agent| agent.harness()).unwrap_or("direct").into(),
             storage_mode: self.storage_mode.clone(),
             scheduler_mode: self.scheduler_mode.clone(),
         }
@@ -117,7 +129,9 @@ pub async fn serve() -> anyhow::Result<()> {
     let connectors = ConnectorState::new(repository.clone()).await?;
     let integrations = IntegrationState::new(repository.clone()).await?;
     let personal_mcp = PersonalMcpState::new(repository.clone()).await?;
-    let personal_wallet = PersonalWalletState::new(repository.clone()).await?;
+    let personal_wallet = PersonalWalletState::with_configuration(
+        repository.clone(), &settings.effective_values().await?,
+    ).await?;
     let health = HealthState::new(repository.clone()).await?;
     let mut state = AppState::new(repository, ModelProvider::from_env(), &database);
     state.attachments = Some(attachments);
@@ -126,7 +140,15 @@ pub async fn serve() -> anyhow::Result<()> {
     state.personal_mcp = Some(personal_mcp);
     state.personal_wallet = Some(personal_wallet);
     state.health = Some(health);
-    state.agent = AgentClient::from_env()?;
+    state.akshare = tomorrow_connectors::akshare::Akshare::from_env().unwrap_or_else(|error| {
+        tracing::warn!(%error, "AKShare is disabled because its configuration is invalid");
+        None
+    });
+    let akshare_enabled = state.akshare.is_some();
+    state.agent = AgentClient::from_env()?.map(|agent| agent.with_akshare(akshare_enabled));
+    if let Some(owner) = debug_fixture::owner(&state.repository, &database, state.agent.is_some()).await? {
+        state.personal_mcp = state.personal_mcp.take().map(|mcp| mcp.with_tencent_docs_fixture(owner));
+    }
     state.phone_auth = phone::PhoneAuth::from_env().unwrap_or_else(|error| {
         tracing::warn!(error=%error,"SMS authentication disabled because configuration is unavailable");
         phone::PhoneAuth::disabled()
@@ -188,6 +210,8 @@ pub fn app(state: AppState) -> Router {
         .route("/me", get(me).patch(update_me))
         .route("/today", get(today))
         .route("/briefing", post(briefing))
+        .route("/daily-news", get(daily_news).put(save_daily_news))
+        .route("/daily-news/notification", get(daily_news_notification))
         .route("/memories", get(memories).post(create_memory))
         .route("/memory/preferences", get(memory_api::preferences).patch(memory_api::update_preferences))
         .route("/memory/receipts/{reply}", get(memory_api::receipts))
@@ -204,6 +228,11 @@ pub fn app(state: AppState) -> Router {
         .route("/todos/{id}/actions", get(growth_api::actions).post(growth_api::confirm_action))
         .route("/growth/preferences", get(growth_api::preferences).patch(growth_api::update_preferences))
         .route("/growth/summary", get(growth_api::summary))
+        .route("/growth/journeys", get(growth_journey_api::list).post(growth_journey_api::create))
+        .route("/growth/journeys/{id}/commands", post(growth_journey_api::command))
+        .route("/growth/journeys/{id}/steps/{step}/start", post(growth_journey_api::start))
+        .route("/growth/journeys/{id}/steps/{step}/commands", post(growth_journey_api::feedback))
+        .route("/growth/history", get(growth_journey_api::history))
         .route("/growth/todos/{id}", get(growth_api::reward))
         .route("/daily-plan", get(growth_api::plan))
         .route("/daily-plan/ensure", post(growth_api::ensure))
@@ -223,6 +252,7 @@ pub fn app(state: AppState) -> Router {
         .route("/conversations/{id}/messages/{message_id}", axum::routing::delete(delete_message))
         .route("/chat", post(chat))
         .route("/chat/stream", post(chat_stream::chat_stream))
+        .route("/chat/interactions/{run_id}/{id}", post(chat_interaction::answer))
         .route("/capabilities", get(capabilities))
         .route("/notifications", get(notifications))
         .route("/notifications/{id}/read", post(read_notification))
@@ -482,6 +512,24 @@ async fn today(State(state): State<Arc<AppState>>, auth: Auth) -> Result<Json<To
 async fn briefing(State(state): State<Arc<AppState>>, auth: Auth) -> Result<Json<Task>> {
     Ok(Json(state.repository.create_task(&auth.user_id,CreateTask{instruction:"根据我当前保存的记忆和任务生成今日简报；明确哪些信息尚未连接，不虚构外部数据。".into(),title:Some("今日简报".into()),kind:Some("briefing".into()),approval_required:Some(false),client_request_id:None}).await?))
 }
+
+async fn daily_news(State(state): State<Arc<AppState>>, auth: Auth)
+    -> Result<Json<Option<tomorrow_domain::daily_news::NewsSubscription>>> {
+    Ok(Json(state.repository.daily_news(&auth.user_id).await?))
+}
+
+async fn save_daily_news(State(state): State<Arc<AppState>>, auth: Auth,
+    Json(input): Json<tomorrow_domain::daily_news::NewsSettings>)
+    -> Result<Json<tomorrow_domain::daily_news::NewsSubscription>> {
+    if input.enabled && state.agent.is_none() {
+        return Err(DomainError::Validation("当前服务器尚未配置 Agent，请联系服务器管理员".into()).into());
+    }
+    Ok(Json(state.repository.save_daily_news(&auth.user_id, input).await?))
+}
+
+async fn daily_news_notification(State(state): State<Arc<AppState>>, auth: Auth) -> Result<Json<Value>> {
+    Ok(Json(json!({"id":state.repository.daily_news_notification(&auth.user_id).await?})))
+}
 #[derive(Deserialize)]
 struct MemoryFilter {
     kind: Option<String>,
@@ -721,6 +769,33 @@ struct ChatInput {
     reasoning_effort: tomorrow_domain::model::ReasoningEffort,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_context: Option<client_context::ClientContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interaction_mode: Option<InteractionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    personal_details_supported: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    didi_order_confirmation_supported: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action_confirmation_supported: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app_permission_inspection_supported: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app_permission_tool_supported: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device_settings_supported: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    device_inspection_context: Option<DeviceInspectionContext>,
+}
+
+#[derive(Clone, Copy, serde::Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct DeviceInspectionContext { has_report: bool, has_selected_app: bool }
+
+#[derive(Clone, Copy, serde::Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+enum InteractionMode {
+    Enabled,
+    LocationDecided,
 }
 #[derive(serde::Serialize, serde::Deserialize, ToSchema)]
 struct ChatResponse {
@@ -792,7 +867,19 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
     let user = state.repository.user(user_id).await?;
     let runtime_context = client_context::RuntimeContext::capture(input.client_context.as_ref(), &user.timezone, chrono::Utc::now());
     if let Some(request)=&input.client_request_id {state.repository.ensure_chat_request_visible(user_id,request).await?;}
-    let content = validate_text(&input.message, "消息", 20000)?;
+    let simulated = state.personal_mcp.as_ref().is_some_and(|mcp| mcp.uses_tencent_docs_fixture(user_id));
+    if simulated && (input.remember == Some(true) || !input.upload_ids.is_empty()) {
+        return Err(DomainError::Validation("调试对话仅接受文字，不保存到记忆".into()).into());
+    }
+    let permission_inspection = (!simulated && stream.is_some() && input.upload_ids.is_empty()
+        && input.app_permission_inspection_supported == Some(true))
+        .then(|| app_permission_intent::detect(&input.message)).flatten();
+    let (message_text, query_rewrite) = if simulated {
+        debug_fixture::message_mode(&input.message)
+    } else {
+        (input.message.as_str(), None)
+    };
+    let content = validate_text(message_text, "消息", 20000)?;
     let fingerprint = serde_json::to_string(&input)
         .map_err(|_| DomainError::Validation("消息格式无效".into()))?;
     if input.replace_message_id.is_some() && (input.conversation_id.is_none() || input.client_request_id.is_none()) {
@@ -815,7 +902,7 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
     let (mut conversation, mut context) = if let Some(id) = conversation_id {
         (
             state.repository.conversation(user_id, &id).await?,
-            state.repository.messages_page(user_id, &id,0,40,None).await?.0,
+            state.repository.chat_context_messages(user_id, &id, 40).await?,
         )
     } else {
         (
@@ -837,7 +924,7 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
         Some(replacement)
     }else{None};
     let recent_start = context.len().saturating_sub(39);
-    let attachment_context = if let Some(attachments) = &state.attachments {
+    let attachment_context = if let Some(attachments) = state.attachments.as_ref().filter(|_| !simulated && permission_inspection.is_none()) {
         attachments
             .conversation_chat_context(user_id, &input.upload_ids, &context[recent_start..])
             .await
@@ -845,7 +932,7 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
     } else {
         String::new()
     };
-    let ticket = if state.agent.is_some() {
+    let ticket = if state.agent.is_some() || permission_inspection.is_some() {
         let key = format!(
             "chat:{}",
             input
@@ -892,7 +979,16 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
     if context.len() > 40 {
         context = context.split_off(context.len() - 40);
     }
-    let memories = state.repository.recall_memories(user_id, &input.message).await?;
+    let travel = ["打车", "叫车", "网约车", "地铁", "通勤", "乘车", "路线", "车费", "换乘"]
+        .iter().any(|word| input.message.contains(*word));
+    let personal_place = ["回家", "到家", "我家", "家里", "家庭地址", "从家", "去公司", "上班", "下班", "通勤"];
+    let include_travel_addresses = travel && context.iter().rev().filter(|m| m.role == "user").take(2)
+        .any(|m| personal_place.iter().any(|word| m.content.contains(*word)));
+    let (memories, address_memories) = if simulated || permission_inspection.is_some() {
+        (Vec::new(), Vec::new())
+    } else {
+        state.repository.recall_chat_memories(user_id, &input.message, include_travel_addresses).await?
+    };
     if !attachment_context.is_empty() {
         context.push(Message {
             id: new_id(),
@@ -941,6 +1037,22 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
         state.repository.accept_chat_stream_replacing(stream,user_id,&conversation,&user_message,&assistant_id,&assistant_created_at,ticket.as_ref().map(|t|t.id.as_str()),replacement.as_ref()).await?;
     }
     if let Some(request)=&input.client_request_id {state.repository.ensure_chat_request_visible(user_id,request).await?;}
+    let personal_context = if simulated || permission_inspection.is_some() {
+        None
+    } else {
+        personal_context::for_chat(state, user_id, &user_message, &runtime_context.timezone).await
+    };
+    if let Some(content) = personal_context {
+        context.insert(0, Message {
+            id: new_id(),
+            conversation_id: conversation.id.clone(),
+            role: "system".into(),
+            content,
+            created_at: timestamp(now()),
+            model_mode: None,
+            attachments: Vec::new(),
+        });
+    }
     let provider = state.provider.with_usage(tomorrow_domain::model::UsageContext::new(
         state.repository.clone(), user_id, "chat", format!("chat:{}:{}", conversation.id, assistant_id),
     ));
@@ -950,15 +1062,118 @@ async fn run_chat_inner(state: &AppState, user_id: &str, input: ChatInput, attem
         context.insert(0, Message { id: new_id(), conversation_id: conversation.id.clone(), role: "system".into(),
             content: runtime_context.prompt()?, created_at: timestamp(now()), model_mode: None, attachments: Vec::new() });
     }
-    let runtime_payload = serde_json::to_value(&runtime_context)
+    if matches!(input.interaction_mode, Some(InteractionMode::LocationDecided)) && input.client_context.as_ref().is_some_and(|context| context.location.is_none()) {
+        context.insert(0, Message { id: new_id(), conversation_id: conversation.id.clone(), role: "system".into(),
+            content: "用户这次已选择暂不提供位置。请继续能完成的部分；需要位置的部分说明暂无法查询，不重复索取位置。".into(),
+            created_at: timestamp(now()), model_mode: None, attachments: Vec::new() });
+    }
+    let mut runtime_payload = serde_json::to_value(&runtime_context)
         .map_err(|_| DomainError::Internal("本轮上下文格式无效".into()))?;
-    let reply = if let (Some(agent), Some(ticket)) = (&state.agent, &ticket) {
-        ModelReply {
-            content: agent
-                .execute_with_context(&state.repository, ticket, &context, "chat", input.reasoning_effort, Some(&runtime_payload))
-                .await?,
-            mode: "llm".into(),
-            provider: Some("pi".into()),
+    if simulated {
+        runtime_payload = serde_json::to_value(client_context::RuntimeContext::capture(None, &user.timezone, chrono::Utc::now()))
+            .map_err(|_| DomainError::Internal("调试上下文格式无效".into()))?;
+        runtime_payload["debug_fixture"] = json!({"scenario":"tencent-docs-qinghe-v1","query_rewrite":query_rewrite});
+        context.insert(0, Message {
+            id:new_id(), conversation_id:conversation.id.clone(), role:"system".into(),
+            content:"本对话是「青禾周会」模拟测试，唯一接入为腾讯文档模拟连接。实际按工具回执回答，文件名相同也要保留团队和文档编号。未要求读正文时只查目录；要求读取时用搜索回执的真实编号。没有结果时如实说明。".into(),
+            created_at:timestamp(now()), model_mode:None, attachments:Vec::new(),
+        });
+    }
+    if include_travel_addresses {
+        let places = personal_autofill::travel_addresses(&address_memories);
+        if !places.is_empty() {
+            runtime_payload["travel_places"] = Value::Object(places);
+        }
+    }
+    let reply = if let (Some(inspection), Some(ticket)) = (permission_inspection, &ticket) {
+        let content = if let Some(cached) = &ticket.cached {
+            cached.clone()
+        } else {
+            let _interaction = state.interactions.register(&ticket.id, user_id, false, None, false, None, true);
+            let answer = chat_interaction::inspect_app_permissions(state, &ticket.id, &ticket.token, user_id, inspection.into()).await?;
+            let content = match answer["status"].as_str() {
+                Some("completed" | "partial") => "权限检查已在这台手机上完成，详细结果见本机报告。",
+                Some("timed_out") => "这次未收到手机的检查结果。回到妥啦前台后，可以重新检查。",
+                _ => "这次未能检查手机的应用权限。你可以在系统设置里查看权限和隐私记录。",
+            };
+            let output = tomorrow_domain::agent::AgentOutput { content: content.into(), usage: json!({}) };
+            state.repository.finish_agent_run(ticket, Some(&output), None).await?;
+            output.content
+        };
+        ModelReply { content, mode: "local".into(), provider: None }
+    } else if let (Some(agent), Some(ticket)) = (&state.agent, &ticket) {
+        let location_allowed = !simulated && matches!(input.interaction_mode, Some(InteractionMode::Enabled))
+            && runtime_context.location.is_none();
+        let didi_order_supported = !simulated && input.didi_order_confirmation_supported == Some(true);
+        let action_confirmation_supported = !simulated && input.action_confirmation_supported == Some(true);
+        let permission_tool_supported = !simulated && input.app_permission_tool_supported == Some(true);
+        let device_settings_supported = permission_tool_supported && input.device_settings_supported == Some(true);
+        let _interactions = if stream.is_some() && (input.interaction_mode.is_some() || didi_order_supported || action_confirmation_supported || permission_tool_supported) {
+            if permission_tool_supported {
+                runtime_payload["app_permission_tool"] = json!(true);
+            }
+            if device_settings_supported {
+                runtime_payload["device_settings_tools"] = json!(true);
+                if let Some(context) = input.device_inspection_context {
+                    runtime_payload["device_inspection"] = json!(context);
+                }
+            }
+            if input.interaction_mode.is_some() {
+                runtime_payload["interaction_tools"] = json!(if location_allowed { "all" } else { "choice" });
+            }
+            let previous_user_message = context.iter().rev().find(|message| message.role == "user" && message.id != user_message.id);
+            let delivery_subject = input.personal_details_supported.unwrap_or(false)
+                .then(|| personal_autofill::delivery_subject_for_turn(&input.message,
+                    previous_user_message.map(|message| message.content.as_str()))).flatten();
+            let registration = state.interactions.register(&ticket.id, user_id, location_allowed, delivery_subject,
+                didi_order_supported, runtime_context.location.as_ref(), permission_tool_supported);
+            if action_confirmation_supported { state.interactions.enable_action_confirmation(&ticket.id, user_id); }
+            if didi_order_supported && didi_order::requests_cancel_then_rebook(&input.message) {
+                state.interactions.require_didi_cancellation(&ticket.id, user_id);
+            }
+            if device_settings_supported { state.interactions.enable_system_settings(&ticket.id, user_id); }
+            Some(registration)
+        } else { None };
+        let mut local_reply = None;
+        if !simulated && _interactions.is_some()
+            && ticket.cached.is_none()
+            && input.personal_details_supported == Some(true)
+            && runtime_context.location.is_some()
+            && runtime_payload.pointer("/travel_places/home").is_none()
+            && didi_order::is_home_trip(&input.message)
+        {
+            let answer = didi_order::request_home_destination(state, ticket, user_id).await?;
+            if let Some(address) = answer.pointer("/values/address").and_then(Value::as_str) {
+                runtime_payload["travel_places"]["home"] = json!(address.trim());
+                context.insert(0, Message {
+                    id: new_id(),
+                    conversation_id: conversation.id.clone(),
+                    role: "system".into(),
+                    content: "本轮表单填写的家庭地址仅作这次出行的终点。使用已有起点继续查路线和报价；回复中称为「家」，不复述门牌，不保存到记忆或账号。下单仍须通过确认卡。".into(),
+                    created_at: timestamp(now()),
+                    model_mode: None,
+                    attachments: Vec::new(),
+                });
+            } else {
+                local_reply = Some(match answer["status"].as_str() {
+                    Some("cancelled") => "已取消这次查询。需要时可以再告诉我打车回家。",
+                    Some("timed_out") => "填写目的地已超时。需要时可以再告诉我打车回家。",
+                    _ => "暂时无法打开目的地卡片。你可以直接告诉我这次要去哪里。",
+                });
+            }
+        }
+        if let Some(content) = local_reply {
+            let output = tomorrow_domain::agent::AgentOutput { content: content.into(), usage: json!({}) };
+            state.repository.finish_agent_run(ticket, Some(&output), None).await?;
+            ModelReply { content: output.content, mode: "local".into(), provider: None }
+        } else {
+            ModelReply {
+                content: agent
+                    .execute_with_context(&state.repository, ticket, &context, "chat", input.reasoning_effort, Some(&runtime_payload))
+                    .await?,
+                mode: "llm".into(),
+                provider: Some("pi".into()),
+            }
         }
     } else if let Some(stream) = stream {
         provider.complete_stream_with_reasoning(&context,input.reasoning_effort,|delta| {
@@ -1155,7 +1370,8 @@ async fn capabilities(State(state): State<Arc<AppState>>, auth: Auth) -> Result<
             .into(),
         });
     }
-    Ok(Json(json!({"items":items,"runtime":state.runtime()})))
+    Ok(Json(json!({"items":items,"runtime":state.runtime(),"app_permission_tool":state.agent.is_some(),
+        "device_settings_tools":state.agent.is_some()})))
 }
 #[utoipa::path(get,path="/v1/notifications",params(("offset"=Option<i64>,Query),("limit"=Option<i64>,Query),("read"=Option<bool>,Query)),responses((status=200,body=PagedItems<Notification>)))]
 async fn notifications(
@@ -1255,6 +1471,12 @@ async fn download_artifact(
         growth_api::accept,
         growth_api::skip,
         growth_api::replace,
+        growth_journey_api::list,
+        growth_journey_api::create,
+        growth_journey_api::command,
+        growth_journey_api::start,
+        growth_journey_api::feedback,
+        growth_journey_api::history,
         tasks,
         create_task,
         task,
@@ -1302,6 +1524,13 @@ async fn download_artifact(
         GrowthWeek,
         GrowthMilestone,
         GrowthSummary,
+        GrowthJourneyStep,
+        GrowthJourney,
+        GrowthJourneys,
+        StartGrowthJourney,
+        GrowthJourneyCommand,
+        GrowthOutcome,
+        GrowthHistory,
         TodoActions,
         ConfirmTodoAction,
         TodoActionResult,

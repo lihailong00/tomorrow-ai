@@ -127,6 +127,257 @@ async fn until(response: &mut reqwest::Response, needle: &str) -> String {
     .expect("first real delta did not arrive while final was gated")
 }
 
+#[tokio::test]
+async fn interaction_card_survives_reconnect_and_resumes_the_same_agent_run() {
+    let database = "sqlite::memory:";
+    let repo = Repository::connect(database).await.unwrap();
+    let owner = repo.create_user("interaction@example.test", "unused", "QA", "Asia/Shanghai").await.unwrap();
+    let other = repo.create_user("other-interaction@example.test", "unused", "QA", "Asia/Shanghai").await.unwrap();
+    let token = repo.create_session(&owner.id).await.unwrap();
+    let other_token = repo.create_session(&other.id).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let agent_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let agent_url = format!("http://{}", agent_listener.local_addr().unwrap());
+    let agent_router = Router::new().route("/v1/runs", post(
+        |State(api): State<String>, Json(run): Json<Value>| async move {
+            assert!(run["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "request_location"));
+            let url = format!("{api}/internal/agent/runs/{}/tools", run["run_id"].as_str().unwrap());
+            let client = reqwest::Client::new();
+            let call = |name: &str, arguments: Value| client.post(&url)
+                .header("x-agent-service", SECRET)
+                .bearer_auth(run["run_token"].as_str().unwrap())
+                .json(&json!({"name":name,"arguments":arguments}));
+            let location: Value = call("request_location", json!({})).send().await.unwrap()
+                .error_for_status().unwrap().json().await.unwrap();
+            assert_eq!(location["status"], "answered");
+            assert_eq!(location["location"]["label"], "示例地铁站");
+            let choice: Value = call("ask_user_choice", json!({"question":"选哪种车型？","options":["快车","专车"]}))
+                .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+            assert_eq!(choice["status"], "cancelled");
+            Json(json!({"content":"已收到出发地，车型选择已取消。","usage":{}}))
+        },
+    )).with_state(api.clone());
+    let agent = tokio::spawn(async move { axum::serve(agent_listener, agent_router).await.unwrap() });
+    let mut state = AppState::new(repo, ModelProvider::local(), database);
+    state.agent = Some(AgentClient::new(&agent_url, SECRET.into(), "fixture".into()).unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+    let client = reqwest::Client::new();
+    let input = json!({"message":"估算到机场的车费","client_request_id":"interaction-qa","interaction_mode":"enabled"});
+    let connect = || client.post(format!("{api}/v1/chat/stream")).bearer_auth(&token).json(&input);
+    let mut stream = connect().send().await.unwrap().error_for_status().unwrap();
+    let frames = until(&mut stream, "\"kind\":\"location\"").await;
+    let card = frames.lines().filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|body| serde_json::from_str::<Value>(body).ok())
+        .find_map(|body| body.get("card").or_else(|| body.get("interaction"))
+            .filter(|value| value["kind"] == "location").cloned())
+        .expect("location interaction event");
+    drop(stream);
+    let mut stream = connect().send().await.unwrap().error_for_status().unwrap();
+    let frames = until(&mut stream, "event: snapshot").await;
+    assert!(frames.contains(card["id"].as_str().unwrap()));
+    let answer_url = |card: &Value| format!("{api}/v1/chat/interactions/{}/{}",
+        card["run_id"].as_str().unwrap(), card["id"].as_str().unwrap());
+    let answer = json!({"kind":"location","location":{"source":"manual","label":"示例地铁站",
+        "observed_at":chrono::Utc::now().to_rfc3339()}});
+    let submit = |token: &str| client.post(answer_url(&card)).bearer_auth(token).json(&answer);
+    assert_eq!(submit(&other_token).send().await.unwrap().status(), reqwest::StatusCode::NOT_FOUND);
+    submit(&token).send().await.unwrap().error_for_status().unwrap();
+    submit(&token).send().await.unwrap().error_for_status().unwrap();
+    let frames = until(&mut stream, "选哪种车型").await;
+    let choice = frames.lines().filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|body| serde_json::from_str::<Value>(body).ok())
+        .find_map(|body| body.get("card").filter(|value| value["kind"] == "choice").cloned())
+        .expect("choice interaction event");
+    assert_eq!(choice["run_id"], card["run_id"]);
+    client.post(answer_url(&choice)).bearer_auth(&token).json(&json!({"kind":"cancel"}))
+        .send().await.unwrap().error_for_status().unwrap();
+    let frames = until(&mut stream, "event: done").await;
+    assert!(frames.contains("已收到出发地"));
+    server.abort();
+    agent.abort();
+}
+
+#[tokio::test]
+async fn app_permission_check_reuses_the_pending_request_and_accepts_only_summary() {
+    let database = "sqlite::memory:";
+    let repo = Repository::connect(database).await.unwrap();
+    let owner = repo.create_user("permission-check@example.test", "unused", "QA", "Asia/Shanghai").await.unwrap();
+    let other = repo.create_user("permission-other@example.test", "unused", "QA", "Asia/Shanghai").await.unwrap();
+    let token = repo.create_session(&owner.id).await.unwrap();
+    let other_token = repo.create_session(&other.id).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app(AppState::new(repo, ModelProvider::local(), database))).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    for (i, message) in [
+        "帮我看看手机里有没有软件在监控我",
+        "帮我看看手机里的app哪些权限不合理",
+    ].into_iter().enumerate() {
+        let input = json!({"message":message,"client_request_id":format!("permissions-{i}"),
+            "app_permission_inspection_supported":true});
+        let connect = || client.post(format!("{api}/v1/chat/stream")).bearer_auth(&token).json(&input);
+        let mut stream = connect().send().await.unwrap().error_for_status().unwrap();
+        let frames = until(&mut stream, "\"kind\":\"app_permission_inspection\"").await;
+        let card = frames.lines().filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|body| serde_json::from_str::<Value>(body).ok())
+            .find_map(|body| body.get("card").or_else(|| body.get("interaction"))
+                .filter(|value| value["kind"] == "app_permission_inspection").cloned())
+            .expect("phone interaction");
+        assert_eq!(card["inspection"], "permissions");
+        drop(stream);
+        let mut stream = connect().send().await.unwrap().error_for_status().unwrap();
+        assert!(until(&mut stream, "event: snapshot").await.contains(card["id"].as_str().unwrap()));
+        let answer_url = format!("{api}/v1/chat/interactions/{}/{}",
+            card["run_id"].as_str().unwrap(), card["id"].as_str().unwrap());
+        let submit = |session: &str, result: Value| client.post(&answer_url).bearer_auth(session)
+            .json(&json!({"kind":"app_permission_inspection","result":result}));
+        let summary = json!({"status":"completed","scanned":15,"flagged":1});
+        assert_eq!(submit(&other_token, summary.clone()).send().await.unwrap().status(), reqwest::StatusCode::NOT_FOUND);
+        assert!(!submit(&token, json!({"status":"completed","scanned":15,"flagged":1,"apps":["secret-app"]}))
+            .send().await.unwrap().status().is_success());
+        let result = if i == 0 { summary } else { json!({"status":"unavailable"}) };
+        submit(&token, result).send().await.unwrap().error_for_status().unwrap();
+        let frames = until(&mut stream, "event: done").await;
+        assert!(frames.contains(if i == 0 { "详细结果见本机报告" } else { "未能检查手机的应用权限" }));
+        assert!(!frames.contains("secret-app"));
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn app_permission_tool_is_available_to_the_model_and_returns_only_the_device_summary() {
+    let database = "sqlite::memory:";
+    let repo = Repository::connect(database).await.unwrap();
+    let owner = repo.create_user("model-inspection@example.test", "unused", "QA", "Asia/Shanghai").await.unwrap();
+    let token = repo.create_session(&owner.id).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let agent_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let agent_url = format!("http://{}", agent_listener.local_addr().unwrap());
+    let agent_router = Router::new().route("/v1/runs", post(
+        |State(api): State<String>, Json(run): Json<Value>| async move {
+            let tools = run["tools"].as_array().unwrap();
+            assert!(tools.iter().any(|tool| tool["name"] == "inspect_app_permissions" && tool["parameters"]["properties"].get("mode").is_some()));
+            assert!(tools.iter().any(|tool| tool["name"] == "open_system_settings"));
+            assert_eq!(run["runtime_context"]["device_inspection"], json!({"has_report":true,"has_selected_app":true}));
+            let client = reqwest::Client::new();
+            let call = |name: &str, args: Value| client.post(format!("{api}/internal/agent/runs/{}/tools", run["run_id"].as_str().unwrap()))
+                .header("x-agent-service", SECRET).bearer_auth(run["run_token"].as_str().unwrap())
+                .json(&json!({"name":name,"arguments":args}));
+            let result: Value = call("inspect_app_permissions", json!({"inspection":"permissions","mode":"reuse"}))
+                .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+            assert_eq!(result, json!({"status":"partial","scanned":15,"flagged":1}));
+            assert!(!call("open_system_settings", json!({"destination":"selected_app","package_name":"test.hidden"}))
+                .send().await.unwrap().status().is_success());
+            let settings: Value = call("open_system_settings", json!({"destination":"selected_app"}))
+                .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+            assert_eq!(settings, json!({"status":"fallback"}));
+            Json(json!({"content":"详见本机权限报告。","usage":{}}))
+        },
+    )).with_state(api.clone());
+    let agent = tokio::spawn(async move { axum::serve(agent_listener, agent_router).await.unwrap() });
+    let mut state = AppState::new(repo, ModelProvider::local(), database);
+    state.agent = Some(AgentClient::new(&agent_url, SECRET.into(), "fixture".into()).unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+    let client = reqwest::Client::new();
+    let mut stream = client.post(format!("{api}/v1/chat/stream")).bearer_auth(&token)
+        .json(&json!({"message":"我担心这部设备上有跟踪程序，能替我确认一下吗？",
+            "client_request_id":"model-inspection","app_permission_tool_supported":true,"device_settings_supported":true,
+            "device_inspection_context":{"has_report":true,"has_selected_app":true}}))
+        .send().await.unwrap().error_for_status().unwrap();
+    let frames = until(&mut stream, "\"kind\":\"app_permission_inspection\"").await;
+    let card = frames.lines().filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|body| serde_json::from_str::<Value>(body).ok())
+        .find_map(|body| body.get("card").or_else(|| body.get("interaction"))
+            .filter(|value| value["kind"] == "app_permission_inspection").cloned()).unwrap();
+    let answer = format!("{api}/v1/chat/interactions/{}/{}", card["run_id"].as_str().unwrap(), card["id"].as_str().unwrap());
+    assert_eq!(card["mode"], "reuse");
+    client.post(answer).bearer_auth(&token)
+        .json(&json!({"kind":"app_permission_inspection","result":{"status":"partial","scanned":15,"flagged":1}}))
+        .send().await.unwrap().error_for_status().unwrap();
+    let frames = until(&mut stream, "\"kind\":\"system_settings\"").await;
+    let card = frames.lines().filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|body| serde_json::from_str::<Value>(body).ok())
+        .find_map(|body| body.get("card").or_else(|| body.get("interaction"))
+            .filter(|value| value["kind"] == "system_settings").cloned()).unwrap();
+    assert_eq!(card["destination"], "selected_app");
+    client.post(format!("{api}/v1/chat/interactions/{}/{}", card["run_id"].as_str().unwrap(), card["id"].as_str().unwrap()))
+        .bearer_auth(&token).json(&json!({"kind":"system_settings","status":"fallback"}))
+        .send().await.unwrap().error_for_status().unwrap();
+    assert!(until(&mut stream, "event: done").await.contains("详见本机权限报告"));
+    server.abort();
+    agent.abort();
+}
+
+#[tokio::test]
+async fn home_trip_prompts_for_destination_before_contacting_the_agent() {
+    let database = "sqlite::memory:";
+    let repo = Repository::connect(database).await.unwrap();
+    let owner = repo
+        .create_user("home-trip@example.test", "unused", "QA", "Asia/Shanghai")
+        .await.unwrap();
+    let token = repo.create_session(&owner.id).await.unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent_router = Router::new()
+        .route("/v1/runs", post(
+            |State(calls): State<Arc<AtomicUsize>>, Json(run): Json<Value>| async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(run["runtime_context"]["location"]["label"], "示例上车点");
+                assert_eq!(run["runtime_context"]["travel_places"]["home"], "示例家庭地址");
+                Json(json!({"content":"已收到终点，继续查报价。","usage":{}}))
+            },
+        ))
+        .with_state(calls.clone());
+    let agent_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let agent_url = format!("http://{}", agent_listener.local_addr().unwrap());
+    let agent = tokio::spawn(async move { axum::serve(agent_listener, agent_router).await.unwrap() });
+    let mut state = AppState::new(repo.clone(), ModelProvider::local(), database);
+    state.agent = Some(AgentClient::new(&agent_url, SECRET.into(), "fixture".into()).unwrap());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
+    let client = reqwest::Client::new();
+    for (index, (answer, expected_reply)) in [
+        (json!({"kind":"cancel"}), "已取消这次查询"),
+        (json!({"kind":"personal_details","values":{"address":" 示例家庭地址 "}}), "已收到终点"),
+    ].into_iter().enumerate() {
+        let mut stream = client.post(format!("{api}/v1/chat/stream")).bearer_auth(&token)
+            .json(&json!({
+                "message":"我现在要打车回家了。",
+                "client_request_id":format!("home-trip-{index}"),
+                "interaction_mode":"location_decided",
+                "personal_details_supported":true,
+                "client_context":{"timezone":"Asia/Shanghai","location":{
+                    "source":"manual","label":"示例上车点","observed_at":chrono::Utc::now().to_rfc3339()
+                }},
+            }))
+            .send().await.unwrap().error_for_status().unwrap();
+        let frames = until(&mut stream, "\"kind\":\"personal_details\"").await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "card must precede the agent");
+        let card = frames.lines().filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|body| serde_json::from_str::<Value>(body).ok())
+            .find_map(|body| body.get("card").filter(|value| value["kind"] == "personal_details").cloned())
+            .expect("destination card event");
+        assert_eq!(card["subject"], "home");
+        assert_eq!(card["fields"][0]["label"], "家庭地址");
+        client.post(format!("{api}/v1/chat/interactions/{}/{}",
+            card["run_id"].as_str().unwrap(), card["id"].as_str().unwrap()))
+            .bearer_auth(&token).json(&answer)
+            .send().await.unwrap().error_for_status().unwrap();
+        let frames = until(&mut stream, "event: done").await;
+        assert!(frames.contains(expected_reply));
+        assert!(!frames.contains("示例家庭地址"));
+        assert_eq!(calls.load(Ordering::SeqCst), index);
+    }
+    let (_, addresses) = repo.recall_chat_memories(&owner.id, "打车回家", true).await.unwrap();
+    assert!(addresses.is_empty(), "the trip form must not save a home address");
+    server.abort();
+    agent.abort();
+}
+
 async fn checks(repo: Repository, database: &str, fail_first: bool) {
     checks_with_history(repo, database, fail_first, false).await
 }
@@ -275,6 +526,14 @@ async fn checks_with_history(repo: Repository, database: &str, fail_first: bool,
         let interrupted = repo.chat_stream(&owner.id, &request_id).await.unwrap();
         assert_eq!(interrupted.status, "interrupted");
         assert_eq!(interrupted.content, "第一段");
+        let accepted_turn = interrupted.accepted.as_ref().unwrap();
+        let thread = accepted_turn["conversation_id"].as_str().unwrap();
+        let failed_id = accepted_turn["user_message"]["id"].as_str().unwrap();
+        let displayed = repo.messages_page(&owner.id, thread, 0, 40, None).await.unwrap().0;
+        assert!(displayed.iter().any(|message| message.id == failed_id));
+        let context = repo.chat_context_messages(&owner.id, thread, 40).await.unwrap();
+        assert!(!context.iter().any(|message| message.id == failed_id));
+        assert_eq!(context.last().map(|message| message.content.as_str()), history.then_some("history-1003"));
         assert_eq!(repo.tasks(&owner.id).await.unwrap().len(), 1);
         reconnect = client
             .post(&url)

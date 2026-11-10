@@ -14,6 +14,7 @@ interface NativeAlarms {
   openNotificationSettings(): Promise<boolean>;
   openSystemClock(): Promise<'opened'>;
   createSystemAlarm(hour: number, minute: number, title: string): Promise<'opened'>;
+  setNextSystemAlarm(date: string, time: string, title: string): Promise<'requested'>;
 }
 const native = NativeModules.PhoneAlarms as NativeAlarms | undefined;
 function required(): NativeAlarms {
@@ -22,6 +23,7 @@ function required(): NativeAlarms {
 }
 export const phoneAlarms = {
   supported: Platform.OS === 'android' && typeof native?.schedule === 'function',
+  supportsDirectSystemAlarm: Platform.OS === 'android' && typeof native?.setNextSystemAlarm === 'function',
   availability: () => required().availability(),
   list: () => required().list(),
   schedule: (value: Pick<PhoneAlarm, 'id' | 'date' | 'time' | 'title'>) =>
@@ -31,4 +33,5 @@ export const phoneAlarms = {
   openNotificationSettings: () => required().openNotificationSettings(),
   openSystemClock: () => required().openSystemClock(),
   createSystemAlarm: (hour: number, minute: number, title: string) => required().createSystemAlarm(hour, minute, title),
+  setNextSystemAlarm: (date: string, time: string, title: string) => required().setNextSystemAlarm(date, time, title),
 };

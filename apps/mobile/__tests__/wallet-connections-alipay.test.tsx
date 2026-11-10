@@ -8,6 +8,7 @@ import {
   type WalletConnectionStatus,
 } from '../src/features/personal-mcp/AlipayWalletConnection';
 import { PersonalMcpConnections } from '../src/features/personal-mcp/PersonalMcpConnections';
+import { McpConnectionRow } from '../src/features/personal-mcp/McpConnectionCard';
 import { platform } from '../src/platform/ports';
 import { Button } from '../src/ui/components';
 
@@ -31,6 +32,8 @@ const metadata: WalletConnectionStatus = {
   binding_available: false,
   payment_available: false,
 };
+const availableMetadata: WalletConnectionStatus = { ...metadata, status: 'not_connected',
+  binding_available: true, payment_available: true, protocol_version: 1, runtime_mode: 'dedicated_single_user' };
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(yes => {
@@ -84,7 +87,8 @@ async function setup(value: unknown = metadata, strict = false) {
     async button(label: string) {
       const node = tree.root
         .findAllByType(Button)
-        .find(item => item.props.accessibilityLabel === label);
+        .find(item => item.props.accessibilityLabel === label)
+        ?? tree.root.findAllByType(McpConnectionRow).find(item => (item.props.accessibilityLabel ?? item.props.label) === label);
       if (!node) throw new Error('Missing button:' + label);
       await act(async () => {
         await node.props.onPress();
@@ -102,18 +106,17 @@ async function setup(value: unknown = metadata, strict = false) {
   };
 }
 
-it('shows the pending configuration honestly and never requests a binding code or payment action', async () => {
+it('hides an unconfigured wallet and never requests a binding code or payment action', async () => {
   const view = await setup();
-  expect(view.text()).toContain('待配置');
-  expect(view.text()).toContain(metadata.reason);
+  expect(view.text()).not.toContain('支付宝');
+  expect(view.text()).not.toContain(metadata.reason);
   expect(view.text()).not.toContain('已连接');
   expect(view.tree.root.findAllByType(TextInput)).toHaveLength(0);
   expect(
     view.tree.root
       .findAllByType(Button)
-      .find(button => button.props.accessibilityLabel === '支付宝待配置')!.props
-      .disabled,
-  ).toBe(true);
+      .some(button => button.props.accessibilityLabel === '支付宝待配置'),
+  ).toBe(false);
   expect(view.request).toHaveBeenCalledWith(
     '/personal-wallet/alipay',
     'GET',
@@ -125,7 +128,8 @@ it('shows the pending configuration honestly and never requests a binding code o
 });
 
 it('opens only official documentation and qualification pages', async () => {
-  const view = await setup();
+  const view = await setup(availableMetadata);
+  await view.button('授权范围与帮助');
   await view.button('支付宝官方钱包说明');
   await view.button('支付宝开通要求');
   expect(platform.openUrl).toHaveBeenNthCalledWith(1, metadata.help_url);
@@ -139,10 +143,11 @@ it('opens only official documentation and qualification pages', async () => {
 
 it('withholds untrusted links returned by a misconfigured server', async () => {
   const view = await setup({
-    ...metadata,
+    ...availableMetadata,
     help_url: 'https://evil.example/wallet',
     qualification_url: 'alipays://pay?amount=1',
   });
+  await view.button('授权范围与帮助');
   expect(
     view.tree.root
       .findAllByType(Button)
@@ -163,18 +168,18 @@ it('does not treat an unsupported future connected response as verified binding'
     status: 'connected',
     binding_available: true,
   });
-  expect(view.text()).toContain('状态未知');
-  expect(view.text()).toContain('更新客户端');
+  expect(view.text()).not.toContain('支付宝');
   expect(view.text()).not.toContain('已连接');
   expect(view.tree.root.findAllByType(TextInput)).toHaveLength(0);
   await view.close();
 });
 
 it('refreshes the status with GET and aborts an old response when the server changes', async () => {
-  const view = await setup();
+  const view = await setup(availableMetadata);
   const pending = deferred<unknown>();
   view.request.mockImplementationOnce(() => pending.promise);
-  await view.button('刷新支付宝接入状态');
+  const foreground = (platform.onForeground as jest.Mock).mock.calls[0][0];
+  await act(async () => { foreground(); });
   const signal =
     view.request.mock.calls[view.request.mock.calls.length - 1][3]!;
   const next = jest
@@ -185,7 +190,7 @@ it('refreshes the status with GET and aborts an old response when the server cha
   await act(async () => {
     pending.resolve(metadata);
   });
-  expect(view.text()).toContain('新服务器尚未开通钱包入口');
+  expect(view.text()).not.toContain('支付宝');
   expect(view.text()).not.toContain(metadata.reason);
   expect(next.mock.calls.every(call => call[1] === 'GET')).toBe(true);
   await view.close();
@@ -195,7 +200,7 @@ it('restarts GET safely during StrictMode replay without creating an authorizati
   const view = await setup(metadata, true);
   expect(view.request.mock.calls.length).toBeGreaterThanOrEqual(2);
   expect(view.request.mock.calls[0][3]!.aborted).toBe(true);
-  expect(view.text()).toContain('待配置');
+  expect(view.text()).not.toContain('支付宝');
   expect(view.request.mock.calls.every(call => call[1] === 'GET')).toBe(true);
   await view.close();
 });

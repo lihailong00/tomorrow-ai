@@ -160,6 +160,28 @@ async fn request(
 }
 
 #[tokio::test]
+async fn personal_form_binds_account_generation_and_replays_without_duplicate_writes() {
+    let (state, _, transport, a, _, _, _) = fixture().await;
+    state.connect(&a, "didi", credentials()).await.unwrap();
+    let (_, generation) = state.personal_form_catalog(&a, "didi").await.unwrap();
+    let arguments = json!({"contactName":"测试收件人","phone":"13800000000","address":"测试市测试路1号"});
+    let pending = state.invoke_personal_form(&a,"didi","taxi_create_order",arguments.clone(),"form-test:mcp:personal:1",generation).await.unwrap();
+    assert_eq!(pending["status"],"confirmation_required");
+    assert_eq!(transport.calls.load(Ordering::SeqCst),0);
+    let id = pending["id"].as_str().unwrap();
+    let result = state.confirm(&a,id).await.unwrap();
+    assert_eq!(result["status"],"completed");
+    assert_eq!(result["result"]["arguments"],arguments);
+    state.confirm(&a,id).await.unwrap();
+    let replay = state.invoke_personal_form(&a,"didi","taxi_create_order",arguments.clone(),"form-test:mcp:personal:1",generation).await.unwrap();
+    assert_eq!(replay["status"],"completed");
+    assert_eq!(transport.calls.load(Ordering::SeqCst),1);
+    state.connect(&a, "didi", credentials()).await.unwrap();
+    assert!(state.invoke_personal_form(&a,"didi","taxi_create_order",arguments,"form-test:mcp:personal:2",generation).await.is_err());
+    assert_eq!(transport.calls.load(Ordering::SeqCst),1);
+}
+
+#[tokio::test]
 async fn all_routes_require_a_user_session() {
     let (state, _, transport, _, _, _, _) = fixture().await;
     for (method, path) in [

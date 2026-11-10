@@ -6,12 +6,15 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
+import android.content.ContentResolver
+import android.content.ContentUris
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaRecorder
 import android.os.Build
+import android.os.Bundle
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
@@ -74,40 +77,8 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
         val uri = data?.data
         if (resultCode != Activity.RESULT_OK || uri == null) { promise.resolve(null); return }
         Thread {
-          try {
-            var name = "document"
-            var size = -1L
-            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-              if (cursor.moveToFirst()) {
-                val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
-                if (nameIndex >= 0) name = cursor.getString(nameIndex) ?: name
-                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) size = cursor.getLong(sizeIndex)
-              }
-            }
-            require(size <= MAX_FILE_BYTES) { "所选文件最大 25 MB" }
-            val file = File(attachmentDir, UUID.randomUUID().toString())
-            try {
-              context.contentResolver.openInputStream(uri)?.use { input ->
-                file.outputStream().use { output ->
-                  val buffer = ByteArray(8192)
-                  var total = 0L
-                  while (true) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    total += count
-                    require(total <= MAX_FILE_BYTES) { "所选文件最大 25 MB" }
-                    output.write(buffer, 0, count)
-                  }
-                }
-              } ?: error("无法读取所选文件")
-            } catch (error: Exception) { file.delete(); throw error }
-            promise.resolve(Arguments.createMap().apply {
-              putString("uri", android.net.Uri.fromFile(file).toString()); putString("name", name)
-              putString("mime_type", context.contentResolver.getType(uri) ?: "application/octet-stream")
-              putDouble("size", file.length().toDouble())
-            })
-          } catch (error: Exception) { promise.reject("E_DOCUMENT", error.message, error) }
+          try { promise.resolve(copyPickedFile(uri)) }
+          catch (error: Exception) { promise.reject("E_DOCUMENT", error.message, error) }
         }.start()
       }
     })
@@ -175,6 +146,92 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
 
   @ReactMethod fun pickDocument(promise: Promise) = onUi { openDocument("*/*", promise) }
   @ReactMethod fun pickImage(promise: Promise) = onUi { openDocument("image/*", promise) }
+
+  private fun hasChatImageAccess(): Boolean {
+    val permission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_IMAGES
+      else Manifest.permission.READ_EXTERNAL_STORAGE
+    return context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED ||
+      (Build.VERSION.SDK_INT >= 34 && context.checkSelfPermission(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED)
+  }
+
+  @ReactMethod fun recentChatImages(promise: Promise) {
+    Thread {
+      val items = Arguments.createArray()
+      try {
+        if (hasChatImageAccess()) {
+          val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+          val idColumn = MediaStore.Images.Media._ID
+          val nameColumn = MediaStore.Images.Media.DISPLAY_NAME
+          val query = Bundle().apply {
+            putStringArray(ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(MediaStore.Images.Media.DATE_ADDED, idColumn))
+            putInt(ContentResolver.QUERY_ARG_SORT_DIRECTION, ContentResolver.QUERY_SORT_DIRECTION_DESCENDING)
+            putInt(ContentResolver.QUERY_ARG_LIMIT, 8)
+          }
+          context.contentResolver.query(collection, arrayOf(idColumn, nameColumn), query, null)?.use { cursor ->
+            while (items.size() < 8 && cursor.moveToNext()) {
+              val id = cursor.getLong(0)
+              items.pushMap(Arguments.createMap().apply {
+                putString("id", id.toString())
+                putString("uri", ContentUris.withAppendedId(collection, id).toString())
+                putString("name", cursor.getString(1) ?: "照片")
+              })
+            }
+          }
+        }
+        promise.resolve(items)
+      } catch (_: SecurityException) { promise.resolve(Arguments.createArray()) }
+      catch (error: Exception) { promise.reject("E_DOCUMENT", "无法显示最近照片", error) }
+    }.start()
+  }
+
+  @ReactMethod fun pickRecentChatImage(id: String, promise: Promise) {
+    Thread {
+      try {
+        require(hasChatImageAccess()) { "照片权限已变化，请从相册重新选择" }
+        val mediaId = id.toLongOrNull()?.takeIf { it > 0 } ?: error("无效的照片")
+        val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, mediaId)
+        promise.resolve(copyPickedFile(uri, imageOnly = true))
+      } catch (error: Exception) { promise.reject("E_DOCUMENT", error.message ?: "无法读取照片", error) }
+    }.start()
+  }
+
+  private fun copyPickedFile(uri: Uri, imageOnly: Boolean = false): WritableMap {
+    val resolver = context.contentResolver
+    val mime = resolver.getType(uri) ?: "application/octet-stream"
+    require(!imageOnly || mime.startsWith("image/")) { "所选照片已不可用，请从相册重新选择" }
+    var name = "document"
+    var size = -1L
+    resolver.query(uri, null, null, null, null)?.use { cursor ->
+      if (cursor.moveToFirst()) {
+        val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+        if (nameIndex >= 0) name = cursor.getString(nameIndex) ?: name
+        if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) size = cursor.getLong(sizeIndex)
+      }
+    }
+    require(size <= MAX_FILE_BYTES) { "所选文件最大 25 MB" }
+    val file = File(attachmentDir, UUID.randomUUID().toString())
+    try {
+      resolver.openInputStream(uri)?.use { input ->
+        file.outputStream().use { output ->
+          val buffer = ByteArray(8192)
+          var total = 0L
+          while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            total += count
+            require(total <= MAX_FILE_BYTES) { "所选文件最大 25 MB" }
+            output.write(buffer, 0, count)
+          }
+        }
+      } ?: error("无法读取所选文件")
+    } catch (error: Exception) { file.delete(); throw error }
+    return Arguments.createMap().apply {
+      putString("uri", Uri.fromFile(file).toString()); putString("name", name)
+      putString("mime_type", mime); putDouble("size", file.length().toDouble())
+    }
+  }
+
   private fun openDocument(mimeType: String, promise: Promise) {
     val activity = context.currentActivity
     if (activity == null) { promise.reject("E_ACTIVITY", "请在应用前台重试"); return }
@@ -376,6 +433,15 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
     promise.reject("E_SETTINGS", "无法打开系统设置，请在系统设置中找到妥啦并开启通知")
   }
 
+  @ReactMethod fun configureDailyNewsNotifications(server: String, userId: String, enabled: Boolean, promise: Promise) {
+    try {
+      DailyNewsWorker.configure(context, server, userId, enabled)
+      promise.resolve(null)
+    } catch (_: Exception) {
+      promise.reject("E_DAILY_NEWS", "无法设置本机新闻通知，请检查服务连接和通知权限")
+    }
+  }
+
   @ReactMethod fun showNotification(title: String, body: String, promise: Promise) {
     try {
       if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) { promise.reject("E_PERMISSION", "通知权限未开启"); return }
@@ -387,6 +453,31 @@ class TomorrowPlatformModule(private val context: ReactApplicationContext) : Rea
         .setContentTitle(title).setContentText(body).setStyle(NotificationCompat.BigTextStyle().bigText(body))
         .setContentIntent(pending).setAutoCancel(true).build()
       NotificationManagerCompat.from(context).notify(SystemClock.uptimeMillis().toInt(), notification); promise.resolve(null)
+    } catch (error: Exception) { promise.reject("E_NOTIFICATION", error.message, error) }
+  }
+
+  @ReactMethod fun updateRideNotification(status: String, matching: Boolean, promise: Promise) {
+    try {
+      val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+      val rideTag = "tada-ride"
+      if (status.isEmpty()) { manager.cancel(rideTag, 1); promise.resolve(null); return }
+      if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) { promise.resolve(null); return }
+      val channel = "tada_ride_status"
+      manager.createNotificationChannel(NotificationChannel(channel, "打车行程", NotificationManager.IMPORTANCE_LOW))
+      val builder = NotificationCompat.Builder(context, channel)
+        .setSmallIcon(R.drawable.ic_ride_notification).setContentTitle("妥啦 · 打车行程")
+        .setContentText(status.take(80)).setOngoing(true).setOnlyAlertOnce(true)
+        .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setTimeoutAfter(180_000L)
+      if (matching) builder.setProgress(0, 0, true)
+      context.packageManager.getLaunchIntentForPackage(context.packageName)?.let { intent ->
+        intent.action = Intent.ACTION_VIEW
+        intent.data = Uri.parse("tada://ride")
+        intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val pending = PendingIntent.getActivity(context, 41, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        builder.setContentIntent(pending)
+      }
+      manager.notify(rideTag, 1, builder.build())
+      promise.resolve(null)
     } catch (error: Exception) { promise.reject("E_NOTIFICATION", error.message, error) }
   }
 

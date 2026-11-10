@@ -16,6 +16,9 @@ import { platform } from '../src/platform/ports';
 jest.mock('../src/platform/ports', () => ({
   platform: {
     getSystemFontScale: jest.fn().mockResolvedValue(null),
+    hasRecentChatImages: true,
+    recentChatImages: jest.fn().mockResolvedValue([]),
+    pickRecentChatImage: jest.fn(),
     pickDocument: jest.fn().mockResolvedValue({
       uri: 'file:///note.txt',
       name: 'note.txt',
@@ -58,7 +61,7 @@ const reply = {
   },
 };
 
-async function setup(fontScale = 1) {
+async function setup(fontScale = 1, accountConnections?: unknown[]) {
   await act(async () => {
     Dimensions.set({
       window: { width: 360, height: 640, scale: 2.75, fontScale },
@@ -69,6 +72,7 @@ async function setup(fontScale = 1) {
       .fn()
       .mockResolvedValue({ runtime: { model_mode: 'local' } }),
     chat: jest.fn().mockResolvedValue(reply),
+    request: jest.fn(async (path: string) => ({ items: path === '/personal-mcp' ? accountConnections ?? [] : [] })),
   };
   addChatStreamMock(api);
   let tree!: ReactTestRenderer;
@@ -78,6 +82,7 @@ async function setup(fontScale = 1) {
         value={
           {
             api,
+            user: accountConnections ? { id: 'connection-test-user' } : null,
             invalidate: jest.fn(),
             formatDate: () => '',
           } as unknown as AppContextValue
@@ -99,6 +104,7 @@ async function setup(fontScale = 1) {
     api,
     input,
     control,
+    hasAttachmentPanel: () => tree.root.findAllByProps({ testID: 'chat-attachment-panel' }).length > 0,
     composer: () =>
       tree.root
         .findAllByType(ScrollView)
@@ -175,7 +181,7 @@ test.each([
 test('font, keyboard, and rotation changes resize the composer without replacing its draft', async () => {
   const app = await setup();
   await app.layout(180);
-  await app.type('Keep this draft while changing display settings.');
+  await app.type('Keep this draft');
   expect(app.inputStyle().maxHeight).toBe(44);
 
   // A font-only Dimensions event must take effect without a new root layout.
@@ -191,8 +197,56 @@ test('font, keyboard, and rotation changes resize the composer without replacing
   expect(app.inputStyle().minHeight).toBe(44);
   expect(app.inputStyle().maxHeight).toBe(44);
   expect(app.input().props.value).toBe(
-    'Keep this draft while changing display settings.',
+    'Keep this draft',
   );
+  await app.close();
+});
+
+test('the inline attachment panel toggles, previews an authorized recent image and preserves the draft', async () => {
+  (platform.recentChatImages as jest.Mock).mockResolvedValueOnce([{ id: '31', uri: 'content://media/external/images/media/31', name: '现场.jpg' }]);
+  (platform.pickRecentChatImage as jest.Mock).mockResolvedValueOnce({ uri: 'file:///selected.jpg', name: '现场.jpg', mime_type: 'image/jpeg' });
+  const app = await setup();
+  await app.type('保留这段草稿');
+  await act(async () => app.control('选择附件').props.onPress());
+  expect(app.hasAttachmentPanel()).toBe(true);
+  expect(app.control('收起附件').props.accessibilityState.expanded).toBe(true);
+  expect(app.control('从相机拍照')).toBeDefined();
+  expect(app.control('选择图片')).toBeDefined();
+  await act(async () => app.control('添加照片：现场.jpg').props.onPress());
+  expect(platform.pickRecentChatImage).toHaveBeenCalledWith('31');
+  expect(app.hasAttachmentPanel()).toBe(false);
+  expect(app.input().props.value).toBe('保留这段草稿');
+  expect(app.api.chat).not.toHaveBeenCalled();
+  await app.close();
+});
+
+test('clearing or sending a long draft keeps the same input and usable trailing tools', async () => {
+  const app = await setup();
+  const editor = app.input();
+  const assertTools = () => {
+    expect(app.input()).toBe(editor);
+    for (const label of ['切换语音输入', '选择附件']) {
+      expect(app.control(label).props.disabled).toBe(false);
+    }
+  };
+  await act(async () => editor.props.onFocus());
+  await app.layout(180);
+  await app.type('第一段。\n第二段：这段草稿要触发两行输入布局。');
+  assertTools();
+  expect(app.inputStyle().width).toBe('100%');
+  await app.type('');
+  assertTools();
+  expect(app.inputStyle().width).toBeUndefined();
+  expect(app.control('发送消息')).toBeUndefined();
+  const draft = '第二次输入一段足够长的草稿，直接发送后应恢复紧凑的工具栏。';
+  await app.type(draft);
+  await app.press('发送消息');
+  await app.layout(580);
+  expect(app.api.chat).toHaveBeenCalledWith(draft, undefined, expect.any(String), []);
+  expect(app.input().props.value).toBe('');
+  assertTools();
+  await app.press('选择附件');
+  expect(platform.pickDocument).toHaveBeenCalled();
   await app.close();
 });
 
@@ -212,6 +266,7 @@ test('large-font multiline drafts scroll in a bounded input and send every line'
     editable: true,
   });
   expect(app.inputStyle().maxHeight).toBe(64);
+  expect(app.inputStyle().width).toBe('100%');
   expect(app.control('发送消息').props.disabled).toBe(false);
 
   let finish!: (value: typeof reply) => void;
@@ -264,6 +319,7 @@ test('a viewport shorter than the composer keeps its actions and attachments in 
   await app.layout(37);
 
   const composer = app.composer();
+  expect(composer.props.removeClippedSubviews).toBe(false);
   expect(composer.props.keyboardShouldPersistTaps).toBe('handled');
   expect(composer.props.nestedScrollEnabled).toBe(true);
   expect(StyleSheet.flatten(composer.props.style)).toMatchObject({
@@ -421,4 +477,21 @@ test('font-read failure falls back to the current platform dimensions without ch
   expect(app.inputStyle().minHeight).toBe(64);
   expect(app.input().props.value).toBe('Keep this draft');
   await app.close();
+});
+
+
+test('sending a supported connection request opens its card in chat', async () => {
+  const app = await setup(1, [{
+    id: 'notion', name: 'Notion', description: '查找已授权的页面', status: 'not_connected',
+    credential_label: 'Notion Token', environment: 'production', tool_count: 0,
+  }]);
+  await app.type('妥啦能不能连接 Notion？');
+  await app.press('发送消息');
+  expect(app.control('连接Notion账号')).toBeDefined();
+  expect(app.api.chat).not.toHaveBeenCalled();
+
+  await app.type('1+2等于多少？');
+  expect(app.control('连接Notion账号')).toBeUndefined();
+  await app.press('发送消息');
+  expect(app.api.chat).toHaveBeenCalled();
 });

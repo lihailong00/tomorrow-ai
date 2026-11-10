@@ -23,9 +23,12 @@ export const privateVault = {
   async summaries(scope: string): Promise<VaultSummary[]> { return JSON.parse((await port().operate(scope, 'list', '{}')) || '[]'); },
   async reveal(scope: string, id: string): Promise<VaultRecord> { return JSON.parse((await port().operate(scope, 'reveal', JSON.stringify({ id }))) || '{}'); },
   async save(scope: string, record: VaultRecord): Promise<VaultSummary[]> { return JSON.parse((await port().operate(scope, 'save', JSON.stringify(record))) || '[]'); },
+  linkPhoneToAddress: (scope: string, phoneId: string, addressId: string) =>
+    port().operate(scope, 'linkPhone', JSON.stringify({ phone_id: phoneId, address_id: addressId })),
   async remove(scope: string, id: string): Promise<VaultSummary[]> { return JSON.parse((await port().operate(scope, 'delete', JSON.stringify({ id }))) || '[]'); },
   copy: (scope: string, id: string) => port().operate(scope, 'copy', JSON.stringify({ id })),
-  share: (scope: string, id: string) => port().operate(scope, 'share', JSON.stringify({ id })),
+  share: (scope: string, id: string, includeAddressContact = false) =>
+    port().operate(scope, 'share', JSON.stringify({ id, include_address_contact: includeAddressContact })),
   recovery: (scope: string) => port().operate(scope, 'recovery', '{}'),
   copyRecovery: (scope: string) => port().operate(scope, 'copyRecovery', '{}'),
   async snapshot(scope: string): Promise<VaultSnapshot> { return JSON.parse(await port().snapshot(scope)); },

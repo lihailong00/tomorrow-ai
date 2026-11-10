@@ -12,16 +12,26 @@ export interface InstanceManifest {
 }
 export interface Conversation { id: string; title: string; updated_at: string }
 export interface MessageAttachment { upload_id: string; name: string; mime_type: string; size: number; unavailable?: boolean }
+export interface Upload { id: string; name: string; mime_type: string; size: number }
 export interface Message {
   id: string; conversation_id: string; role: string; content: string; created_at: string;
   model_mode?: string | null; attachments?: MessageAttachment[];
 }
 export interface MessagePage extends PagedItems<Message> { next_before?: string | null }
 export type ReasoningEffort = 'off' | 'low' | 'high' | 'max';
+export interface ChatLocationContext {
+  source: 'device' | 'manual';
+  latitude?: number; longitude?: number; accuracy_m?: number;
+  observed_at: string; label?: string; coordinate_system?: 'wgs84' | 'gcj02';
+}
+export interface ChatClientContext {timezone: string; location?: Readonly<ChatLocationContext>}
 export interface ChatIntent {
   message: string; conversation_id: string | null; client_request_id: string;
   remember: boolean; upload_ids: readonly string[]; replace_message_id?: string;
   reasoning_effort?: ReasoningEffort;
+  client_context?: Readonly<ChatClientContext>;
+  interaction_mode?: 'enabled' | 'location_decided';
+  didi_order_confirmation_supported?: true;
 }
 export interface ChatResponse {
   conversation_id: string; message: Message; user_message?: Message | null;

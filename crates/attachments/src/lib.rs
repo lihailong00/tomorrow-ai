@@ -34,6 +34,19 @@ mod s3;
 
 const DEFAULT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_TEXT_BYTES: u64 = 64 * 1024;
+
+/// Extract text from an in-memory Office document without registering an upload.
+pub async fn extract_office_text(name: String, mime_type: String, bytes: Vec<u8>) -> Result<String, AttachmentError> {
+    let permit = office::PARSERS.acquire().await.map_err(|_| AttachmentError::new(
+        StatusCode::SERVICE_UNAVAILABLE, "office_parser_unavailable", "暂时无法读取 Office 文档",
+    ))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        office::extract_named(&name, &mime_type, &bytes)
+    }).await.map_err(|_| AttachmentError::new(
+        StatusCode::UNPROCESSABLE_ENTITY, "invalid_office_file", "无法解析 Office 文档",
+    ))?
+}
 const MAX_CONTEXT_BYTES: usize = 128 * 1024;
 const CONTEXT_NOTICE_RESERVE: usize = 512;
 const MAX_TRANSCRIPT_BYTES: usize = 1024 * 1024;

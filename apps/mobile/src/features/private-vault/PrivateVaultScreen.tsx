@@ -1,6 +1,6 @@
 /* eslint no-void: ["error", { "allowAsStatement": true }] */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, BackHandler, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, BackHandler, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
 import { useApp } from '../../app/context';
 import { errorMessage } from '../../api/client';
 import { findVaultRecords, validateVaultRecord, vaultFields, vaultKindLabels, vaultOwner, type VaultCloudState, type VaultKind, type VaultRecord, type VaultStatus, type VaultSummary } from '../../domain/privateVault';
@@ -10,8 +10,9 @@ import { Icon, type IconName } from '../../ui/visuals';
 import { VaultCloud } from './cloud';
 
 const p = { ink: '#30384B', muted: '#748096', blue: '#4D71C8', pale: '#EDF2FF', white: '#FFFFFF', line: '#E7ECF5', green: '#3B8274', red: '#B45164' };
-const kindIcon: Record<VaultKind, IconName> = { address: 'import', bank: 'file', identity: 'shield' };
-type Page = 'opening' | 'welcome' | 'restored' | 'vault' | 'chat' | 'storage' | 'detail' | 'edit' | 'recovery' | 'restore' | 'history';
+const kindIcon: Partial<Record<VaultKind, IconName>> = { address: 'mapPin', bank: 'file', identity: 'shield' };
+const revealDuration = 30;
+type Page = 'opening' | 'welcome' | 'restored' | 'vault' | 'chat' | 'storage' | 'detail' | 'edit' | 'choose' | 'recovery' | 'restore' | 'history';
 let nextOwner = 0;
 
 export function PrivateVaultScreen() {
@@ -22,10 +23,18 @@ export function PrivateVaultScreen() {
   return app.user ? <VaultSession key={owner.id} scope={owner.scope} /> : null;
 }
 
-function VaultButton({ label, onPress, secondary = false, disabled = false, danger = false }: { label: string; onPress: () => void; secondary?: boolean; disabled?: boolean; danger?: boolean }) {
+function VaultButton({ label, onPress, secondary = false, disabled = false }: { label: string; onPress: () => void; secondary?: boolean; disabled?: boolean }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} disabled={disabled}
-    style={({ pressed }) => [v.button, secondary && v.secondaryButton, danger && v.dangerButton, disabled && v.disabled, pressed && v.pressed]}>
+    style={({ pressed }) => [v.button, secondary && v.secondaryButton, disabled && v.disabled, pressed && v.pressed]}>
     <Text style={[v.buttonText, secondary && v.secondaryText]}>{label}</Text>
+  </Pressable>;
+}
+
+function DetailAction({ label, icon, onPress, disabled, primary }: { label: string; icon: IconName; onPress: () => void; disabled: boolean; primary?: boolean }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} disabled={disabled}
+    style={({ pressed }) => [v.button, v.detailAction, !primary && v.secondaryButton, disabled && v.disabled, pressed && v.pressed]}>
+    <Icon name={icon} size={17} color={primary ? p.white : p.blue} />
+    <Text style={[v.buttonText, v.detailActionLabel, !primary && v.secondaryText]}>{label}</Text>
   </Pressable>;
 }
 
@@ -40,6 +49,9 @@ function VaultSession({ scope }: { scope: string }) {
   const [remoteLoading, setRemoteLoading] = useState(false);
   const [selected, setSelected] = useState<VaultSummary | null>(null);
   const [revealed, setRevealed] = useState<VaultRecord | null>(null);
+  const [secondsLeft, setSecondsLeft] = useState(revealDuration);
+  const [detailSheet, setDetailSheet] = useState<'menu' | 'share' | null>(null);
+  const [shareContact, setShareContact] = useState(false);
   const [draft, setDraft] = useState<VaultRecord | null>(null);
   const [recovery, setRecovery] = useState('');
   const [recoveryInput, setRecoveryInput] = useState('');
@@ -56,8 +68,10 @@ function VaultSession({ scope }: { scope: string }) {
   const alive = useRef(true);
   const operation = useRef(false);
   const timeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lockAt = useRef(0);
   const currentPage = useRef(page); currentPage.current = page;
   const restoreReturnPage = useRef<Page>('storage');
+  const historyReturnPage = useRef<Page>('vault');
   const localExists = useRef(false);
   const remoteRead = useRef(0);
   const backAction = useRef<() => void>(() => {});
@@ -67,16 +81,24 @@ function VaultSession({ scope }: { scope: string }) {
     setRevealed(null); setDraft(null); setRecovery(''); setRecoveryInput(''); setAcknowledged(false);
     setQuery(''); setLookup(null);
     setShowRecoveryInput(false);
+    setDetailSheet(null); setShareContact(false);
   };
   const armLock = () => {
     if (timeout.current) clearTimeout(timeout.current);
+    lockAt.current = Date.now() + revealDuration * 1000;
     timeout.current = setTimeout(() => {
+      timeout.current = null;
       if (!alive.current) return;
       clearSecrets();
       if (['edit', 'recovery', 'restore'].includes(currentPage.current)) setPage('vault');
       setNotice('完整资料已自动隐藏，请重新验证后使用。');
-    }, 30000);
+    }, revealDuration * 1000);
   };
+  useEffect(() => {
+    if (!revealed || page !== 'detail') return;
+    const interval = setInterval(() => setSecondsLeft(Math.max(0, Math.ceil((lockAt.current - Date.now()) / 1000))), 1000);
+    return () => clearInterval(interval);
+  }, [page, revealed]);
   const refresh = async () => {
     const next = await privateVault.status(scope);
     if (alive.current) { localExists.current = next.exists; setStatus(next); }
@@ -147,9 +169,11 @@ function VaultSession({ scope }: { scope: string }) {
     if (busy) return;
     if (page === 'vault' || page === 'welcome' || page === 'opening') back();
     else if (page === 'restore') navigate(restoreReturnPage.current);
+    else if (page === 'history' && historyReturnPage.current === 'detail' && selected) navigate('detail');
     else navigate(page === 'recovery' ? 'storage' : localExists.current ? 'vault' : 'welcome');
   };
   backAction.current = goBack;
+  const openHistory = () => { historyReturnPage.current = page; navigate('history'); };
   const openRecord = (item: VaultSummary) => { setSelected(item); navigate('detail'); };
   const list = () => run(async () => {
     const items = await privateVault.summaries(scope);
@@ -205,7 +229,8 @@ function VaultSession({ scope }: { scope: string }) {
   const reveal = (edit: boolean) => selected && run(async () => {
     const value = await privateVault.reveal(scope, selected.id);
     if (!alive.current || AppState.currentState !== 'active') return;
-    if (edit) { setDraft(value); setPage('edit'); } else setRevealed(value);
+    if (edit) { clearSecrets(); setDraft(value); setPage('edit'); }
+    else { setSecondsLeft(revealDuration); setRevealed(value); }
     recordUse(edit ? '编辑资料' : '查看完整资料', selected.alias); armLock();
   });
   const syncSaved = async () => {
@@ -223,11 +248,18 @@ function VaultSession({ scope }: { scope: string }) {
   const copy = (item: VaultSummary) => run(async () => {
     await privateVault.copy(scope, item.id);
     if (!alive.current) return;
-    recordUse('复制资料', item.alias); setNotice('已复制完整内容，将在约 30 秒后尝试清空剪贴板。');
+    const label = item.type === 'address' ? '地址' : item.type === 'email' ? '邮箱地址' : '号码';
+    recordUse('复制资料', item.alias); setNotice(`已复制${label}，将在约 30 秒后尝试清空剪贴板。`);
   });
-  const share = (item: VaultSummary) => Alert.alert('分享「' + item.alias + '」',
-    '将提供' + vaultFields[item.type].map(field => field.label).join('、') + '。验证身份后，由你在系统分享面板选择接收人。',
-    [{ text: '取消', style: 'cancel' }, { text: '验证并选择接收人', onPress: () => { void run(async () => { await privateVault.share(scope, item.id); recordUse('打开资料分享', item.alias); }); } }]);
+  const openShare = (item: VaultSummary, includeContact: boolean) => run(async () => {
+    await privateVault.share(scope, item.id, includeContact);
+    recordUse('打开资料分享', item.alias);
+  });
+  const hideDetails = () => {
+    if (timeout.current) clearTimeout(timeout.current);
+    timeout.current = null;
+    clearSecrets(); setNotice('');
+  };
   const remove = () => selected && Alert.alert('删除「' + selected.alias + '」？', '本机资料会被删除；如果备份已开启，更新后的加密副本也会同步。',
     [{ text: '保留', style: 'cancel' }, { text: '删除', style: 'destructive', onPress: () => { void run(async () => {
       const items = await privateVault.remove(scope, selected.id);
@@ -238,8 +270,7 @@ function VaultSession({ scope }: { scope: string }) {
     if (busy || !status?.available) return;
     clearSecrets(); setDraft({ type, alias: '', fields: {} }); setPage('edit'); setError(''); armLock();
   };
-  const chooseType = () => Alert.alert('添加哪种资料？', '完整内容只在本机加密资料库中保存。',
-    (Object.keys(vaultKindLabels) as VaultKind[]).map(type => ({ text: vaultKindLabels[type], onPress: () => newRecord(type) })));
+  const chooseType = () => navigate('choose');
   const beginRecovery = () => run(async () => {
     const key = await privateVault.recovery(scope);
     if (!alive.current || AppState.currentState !== 'active') return;
@@ -275,7 +306,7 @@ function VaultSession({ scope }: { scope: string }) {
   });
 
   const renderRow = (item: VaultSummary) => <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={'查看私密资料：' + item.alias} onPress={() => openRecord(item)} disabled={busy} style={v.row}>
-    <View style={v.typeIcon}><Icon name={kindIcon[item.type]} size={22} color={p.blue} /></View>
+    <View style={v.typeIcon}><Icon name={kindIcon[item.type] ?? 'file'} size={22} color={p.blue} /></View>
     <View style={v.flex}><Text style={v.rowTitle}>{item.alias}</Text><Text style={v.small}>{item.summary}</Text></View><Icon name="chevronRight" size={17} color={p.muted} />
   </Pressable>;
   const renderStorage = () => <>
@@ -298,7 +329,10 @@ function VaultSession({ scope }: { scope: string }) {
   </>;
 
   return <KeyboardAvoidingView style={v.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-    <View style={v.header}><Pressable accessibilityRole="button" accessibilityLabel="返回上一页" onPress={goBack} disabled={busy} style={v.iconButton}><Icon name="back" color={p.ink} /></Pressable><Text style={v.headerTitle}>{page === 'storage' ? '存储与备份' : '私密资料'}</Text><Pressable accessibilityRole="button" accessibilityLabel="资料使用记录" onPress={() => navigate('history')} disabled={busy} style={v.iconButton}><Icon name="history" color={p.ink} /></Pressable></View>
+    <View style={v.header}><Pressable accessibilityRole="button" accessibilityLabel="返回上一页" onPress={goBack} disabled={busy} style={v.iconButton}><Icon name="back" color={p.ink} /></Pressable><Text style={v.headerTitle}>{page === 'storage' ? '存储与备份' : '私密资料'}</Text>
+      {page === 'detail' ? <Pressable accessibilityRole="button" accessibilityLabel="更多资料操作" onPress={() => setDetailSheet('menu')} disabled={busy} style={v.iconButton}><Icon name="more" color={p.ink} /></Pressable>
+        : <Pressable accessibilityRole="button" accessibilityLabel="资料使用记录" onPress={openHistory} disabled={busy} style={v.iconButton}><Icon name="history" color={p.ink} /></Pressable>}
+    </View>
     <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={v.content}>
       {page === 'opening' && <View style={v.onboardingHero}>{error ? <Text style={v.rowTitle}>资料库暂时无法打开</Text> : <ActivityIndicator color={p.blue} />}<Text style={v.subtitle}>{error ? '请确认当前版本支持设备安全资料库。' : '正在检查这台手机上的资料库…'}</Text></View>}
       {page === 'welcome' && <>
@@ -320,14 +354,47 @@ function VaultSession({ scope }: { scope: string }) {
         <Text style={v.footnote}>完整内容不进入普通记忆、模型上下文或向量检索。</Text>
       </>}
       {page === 'storage' && renderStorage()}
+      {page === 'choose' && <>
+        <Text style={v.title}>添加哪种资料？</Text><Text style={v.subtitle}>完整内容只在本机加密资料库中保存。</Text>
+        <View style={v.card}>{(Object.keys(vaultKindLabels) as VaultKind[]).map(type => (
+          <Pressable key={type} accessibilityRole="button" accessibilityLabel={vaultKindLabels[type]} onPress={() => newRecord(type)} disabled={busy || !status?.available} style={v.row}>
+            <View style={v.typeIcon}><Icon name={kindIcon[type] ?? 'file'} size={22} color={p.blue} /></View>
+            <Text style={[v.rowTitle, v.flex]}>{vaultKindLabels[type]}</Text><Icon name="chevronRight" size={17} color={p.muted} />
+          </Pressable>
+        ))}</View>
+      </>}
       {page === 'detail' && selected && <>
-        <Text style={v.title}>{selected.alias}</Text><Text style={v.subtitle}>{selected.summary}</Text>
-        <View style={v.card}>{vaultFields[selected.type].map(field => <View key={field.key} style={v.field}><Text style={v.small}>{field.label}</Text><Text style={v.value}>{revealed?.fields[field.key] || (field.key === 'number' ? selected.summary.replace(/^.*尾号 /, '•••• •••• ') : '••••')}</Text></View>)}</View>
-        <Text style={v.small}>{revealed ? '完整资料将在 30 秒后隐藏，离开页面立即隐藏。' : '完整内容仅在本机解锁显示。'}</Text>
-        <VaultButton label={revealed ? '隐藏完整资料' : '验证并查看完整资料'} onPress={() => { if (revealed) setRevealed(null); else { void reveal(false); } }} disabled={busy} />
-        <VaultButton label={selected.type === 'address' ? '复制完整地址' : '复制完整号码'} secondary onPress={() => { void copy(selected); }} disabled={busy} />
-        <VaultButton label="分享资料，由我选择接收人" secondary onPress={() => share(selected)} disabled={busy} />
-        <View style={v.tabs}><VaultButton label="编辑资料" secondary onPress={() => { void reveal(true); }} disabled={busy} /><VaultButton label="删除资料" danger onPress={remove} disabled={busy} /></View>
+        <View style={v.detailHero}>
+          <View style={v.detailIcon}><Icon name={kindIcon[selected.type] ?? 'file'} size={26} color={p.blue} /></View>
+          <View style={v.flex}><Text style={v.detailTitle}>{selected.alias}</Text><Text style={v.subtitle}>{selected.type === 'address' ? '收件资料' : vaultKindLabels[selected.type]}</Text></View>
+        </View>
+        <View style={v.detailCard}>
+          <View style={v.detailCardHeader}>
+            <Text style={[v.small, v.flex]}>{selected.type === 'address' ? '收件地址' : vaultFields[selected.type].find(field => field.key === 'number')?.label}</Text>
+            <View style={[v.detailStatus, revealed && v.detailStatusOpen]}>
+              <Icon name={revealed ? 'clock' : 'lock'} size={13} color={revealed ? p.green : p.muted} />
+              <Text style={[v.detailStatusText, revealed && v.detailStatusTextOpen]}>{revealed ? `显示中 00:${String(secondsLeft).padStart(2, '0')}` : '已隐藏'}</Text>
+            </View>
+            {!!revealed && <Pressable accessibilityRole="button" accessibilityLabel="立即隐藏资料" onPress={hideDetails} style={v.detailHide}><Icon name="eyeOff" size={19} color={p.muted} /></Pressable>}
+          </View>
+          <Text style={v.detailValue}>{selected.type === 'address'
+            ? (revealed?.fields.address || '•••• ••••')
+            : (revealed?.fields.number || selected.summary.replace(/^.*尾号 /, '•••• •••• '))}</Text>
+          {!revealed && selected.type === 'address' && <Text style={v.small}>完整收件地址已隐藏</Text>}
+          <View style={v.divider} />
+          <View style={v.detailFields}>
+            {vaultFields[selected.type].filter(field => field.key !== 'address' && field.key !== 'number').map(field => <View key={field.key} style={v.detailField}>
+              <Text style={v.small}>{field.label}</Text><Text style={v.detailFieldValue}>{revealed ? (revealed.fields[field.key] || '未填写') : '••••'}</Text>
+            </View>)}
+          </View>
+        </View>
+        <View style={v.tabs}>
+          {revealed ? <>
+            <DetailAction label={selected.type === 'address' ? '复制地址' : selected.type === 'email' ? '复制邮箱地址' : '复制号码'} icon="copy" disabled={busy} onPress={() => { void copy(selected); }} />
+            <DetailAction label="分享资料" icon="share" disabled={busy} onPress={() => { setShareContact(false); setDetailSheet('share'); }} />
+          </> : <DetailAction label="查看完整资料" icon="eye" primary disabled={busy} onPress={() => { void reveal(false); }} />}
+        </View>
+        <View style={v.detailPrivacy}><Icon name="shield" size={14} color={p.muted} /><Text style={v.small}>{revealed ? '离开页面即隐藏' : '需验证身份 · 解锁后显示 30 秒'}</Text></View>
       </>}
       {page === 'edit' && draft && <>
         <Text style={v.title}>{draft.id ? '编辑' : '添加'}{vaultKindLabels[draft.type]}</Text><Text style={v.subtitle}>内容只在本机加密保存。保存时需要验证身份。</Text>
@@ -339,7 +406,7 @@ function VaultSession({ scope }: { scope: string }) {
         <Text style={v.title}>需要哪份资料？</Text><Text style={v.subtitle}>本机资料查找，完整内容不会发送给模型。</Text>
         {lookup && <><View style={v.userQuery}><Text style={v.value}>{lookup.query}</Text></View><Text style={v.subtitle}>{lookup.matches.length > 1 ? '找到了多份资料，请选择要使用的那份。' : lookup.matches.length ? '找到这份资料，解锁后即可使用。' : '没有找到匹配资料。你可以先添加，或换一个资料名称。'}</Text>{lookup.matches.map(renderRow)}</>}
         <View style={v.card}><TextInput accessibilityLabel="要查找的私密资料" placeholder="例如：我的工资卡号是多少？" value={query} onChangeText={value => { setQuery(value); armLock(); }} maxLength={100} editable={!busy} autoCorrect={false} style={v.input} onSubmitEditing={() => { if (query.trim()) void lookupLocal(query); }} /><VaultButton label="在本机查找" disabled={busy || !query.trim()} onPress={() => { void lookupLocal(query); }} /></View>
-        {['我的银行卡号', '我的家庭地址', '我的身份证'].map(text => <VaultButton key={text} label={text} secondary disabled={busy} onPress={() => { void lookupLocal(text); }} />)}
+        {['我的手机号', '我的银行卡号', '我的家庭地址', '我的身份证'].map(text => <VaultButton key={text} label={text} secondary disabled={busy} onPress={() => { void lookupLocal(text); }} />)}
       </>}
       {page === 'recovery' && <>
         <Text style={v.title}>保管好你的恢复密钥</Text><Text style={v.subtitle}>换手机时，用它解开云端加密备份。请存放到你自己控制的安全位置。</Text>
@@ -371,6 +438,33 @@ function VaultSession({ scope }: { scope: string }) {
       {!status?.available && status && <Text style={v.error}>请先启用系统锁屏密码或指纹，资料库不会退回明文存储。</Text>}
       {busy && <View accessibilityLiveRegion="polite" style={v.inline}><ActivityIndicator color={p.blue} /><Text style={v.small}>请完成系统验证或等待操作结束…</Text></View>}
     </ScrollView>
+    {page === 'detail' && selected && detailSheet && <Modal transparent animationType="fade" onRequestClose={() => setDetailSheet(null)}>
+      <View style={v.detailOverlay}>
+        <Pressable accessible={false} style={StyleSheet.absoluteFill} onPress={() => setDetailSheet(null)} />
+        <View accessibilityViewIsModal style={v.detailPanel}>
+          <View style={v.inline}><Text style={[v.detailPanelTitle, v.flex]}>{detailSheet === 'menu' ? '资料操作' : '分享资料'}</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="关闭资料操作" onPress={() => setDetailSheet(null)} style={v.detailHide}><Icon name="close" size={20} color={p.muted} /></Pressable>
+          </View>
+          {detailSheet === 'menu' ? <>
+            <Pressable accessibilityRole="button" accessibilityLabel="编辑资料" style={v.detailMenuRow} onPress={() => { setDetailSheet(null); void reveal(true); }}><Icon name="edit" size={18} color={p.blue} /><Text style={v.value}>编辑资料</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="查看使用记录" style={v.detailMenuRow} onPress={openHistory}><Icon name="history" size={18} color={p.blue} /><Text style={v.value}>查看使用记录</Text></Pressable>
+            <View style={v.divider} />
+            <Pressable accessibilityRole="button" accessibilityLabel="删除资料" style={v.detailMenuRow} onPress={() => { setDetailSheet(null); remove(); }}><Icon name="delete" size={18} color={p.red} /><Text style={[v.value, v.detailDelete]}>删除资料</Text></Pressable>
+          </> : <>
+            <Text style={v.subtitle}>{selected.type === 'address' ? '默认只分享收件地址。' : '将分享' + vaultFields[selected.type].map(field => field.label).join('、') + '。'}</Text>
+            {selected.type === 'address' && <Pressable accessibilityRole="checkbox" accessibilityLabel="同时分享收件人和电话" accessibilityState={{ checked: shareContact }}
+              onPress={() => setShareContact(!shareContact)} style={v.detailMenuRow}>
+              <View style={[v.detailCheckbox, shareContact && v.detailCheckboxChecked]}>{shareContact && <Icon name="check" size={15} color={p.white} />}</View>
+              <Text style={[v.value, v.flex]}>同时分享收件人和电话</Text>
+            </Pressable>}
+            <VaultButton label="验证并选择接收人" onPress={() => {
+              if (!revealed || Date.now() >= lockAt.current) return;
+              setDetailSheet(null); void openShare(selected, shareContact);
+            }} disabled={busy} />
+          </>}
+        </View>
+      </View>
+    </Modal>}
   </KeyboardAvoidingView>;
 }
 
@@ -394,7 +488,7 @@ const v = StyleSheet.create({
   link: { color: p.blue, fontSize: 12 },
   button: { backgroundColor: p.blue, minHeight: 48, borderRadius: 16, justifyContent: 'center', alignItems: 'center', paddingVertical: 11, paddingHorizontal: 14, flexShrink: 1 },
   buttonText: { fontSize: 14, lineHeight: 22, color: p.white, fontWeight: '500', textAlign: 'center' },
-  secondaryButton: { backgroundColor: p.pale }, secondaryText: { color: p.blue }, dangerButton: { backgroundColor: p.red },
+  secondaryButton: { backgroundColor: p.pale }, secondaryText: { color: p.blue },
   disabled: { opacity: 0.45 }, pressed: { opacity: 0.75 },
   divider: { height: 1, backgroundColor: p.line, marginVertical: 1 },
   server: { gap: 3, paddingVertical: 2 }, url: { fontSize: 12, lineHeight: 19, color: p.muted },
@@ -413,4 +507,28 @@ const v = StyleSheet.create({
   onboardingHero: { alignItems: 'center', justifyContent: 'center', gap: 13, paddingVertical: 38 },
   onboardingHeroIcon: { width: 82, height: 82, borderRadius: 27, backgroundColor: '#E5EDFE', alignItems: 'center', justifyContent: 'center', marginVertical: 10 },
   successIcon: { backgroundColor: '#E5F1EB' },
+  detailHero: { flexDirection: 'row', alignItems: 'center', gap: 13, paddingTop: 5, paddingBottom: 5 },
+  detailIcon: { backgroundColor: '#E7EEFF', width: 52, height: 52, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  detailTitle: { fontSize: 25, lineHeight: 33, fontWeight: '600', color: p.ink },
+  detailCard: { backgroundColor: p.white, borderRadius: 23, borderWidth: 1, borderColor: p.line, paddingHorizontal: 17, paddingVertical: 14, gap: 8 },
+  detailCardHeader: { flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 42 },
+  detailStatus: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4, paddingHorizontal: 8, borderRadius: 12, backgroundColor: '#F0F3F9' },
+  detailStatusOpen: { backgroundColor: '#EAF5F0' },
+  detailStatusText: { fontSize: 11, color: p.muted, fontVariant: ['tabular-nums'] },
+  detailStatusTextOpen: { color: '#317466' },
+  detailHide: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 22, backgroundColor: '#F3F5FA' },
+  detailValue: { color: p.ink, fontSize: 19, lineHeight: 29, fontWeight: '600', marginBottom: 2 },
+  detailFields: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, paddingTop: 2 },
+  detailField: { flexGrow: 1, flexBasis: '42%', gap: 2 },
+  detailFieldValue: { color: p.ink, fontSize: 14, lineHeight: 21, fontWeight: '500' },
+  detailAction: { flex: 1, flexDirection: 'row', gap: 6, paddingHorizontal: 8 },
+  detailActionLabel: { flexShrink: 1 },
+  detailPrivacy: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 5 },
+  detailOverlay: { flex: 1, backgroundColor: '#18233B66', justifyContent: 'center', padding: 20 },
+  detailPanel: { alignSelf: 'center', width: '100%', maxWidth: 360, backgroundColor: p.white, borderRadius: 23, padding: 16, gap: 7 },
+  detailPanelTitle: { fontSize: 18, fontWeight: '600', color: p.ink },
+  detailMenuRow: { flexDirection: 'row', alignItems: 'center', minHeight: 48, paddingHorizontal: 5, gap: 10 },
+  detailDelete: { color: p.red },
+  detailCheckbox: { height: 21, width: 21, borderRadius: 6, borderWidth: 1, borderColor: p.muted, alignItems: 'center', justifyContent: 'center' },
+  detailCheckboxChecked: { backgroundColor: p.blue, borderColor: p.blue },
 });

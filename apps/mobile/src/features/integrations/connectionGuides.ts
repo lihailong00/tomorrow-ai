@@ -12,6 +12,12 @@ export type ConnectionGuide = {
 };
 
 const guides: Readonly<Record<string, ConnectionGuide>> = {
+  github: {
+    before: '请在',
+    linkText: 'GitHub 创建个人访问令牌',
+    url: 'https://github.com/settings/personal-access-tokens/new',
+    after: '，仅为需要读取的仓库授权，然后填写令牌。',
+  },
   amap: {
     before: '请先在',
     linkText: '高德开放平台申请 Key',
@@ -51,6 +57,12 @@ const guides: Readonly<Record<string, ConnectionGuide>> = {
     url: 'https://meeting.tencent.com/ai-skill.html',
     after:
       '，用个人账号登录并复制 Token。若进入了企业账号，请先切换为个人账号。',
+  },
+  liepin: {
+    before: '请先打开',
+    linkText: '猎聘 MCP 配置页',
+    url: 'https://www.liepin.com/mcp/auth#config',
+    after: '，用个人账号登录，复制 x-user-token 的值并填写。连接后可在对话中搜索职位。',
   },
   didi: {
     before: '请先在',

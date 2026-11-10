@@ -1,10 +1,10 @@
 [package]
 name = "tada-desktop"
-version = "0.1.2"
+version = "0.1.6"
 description = "妥啦 desktop client"
 edition = "2024"
 rust-version = "1.92"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 
 # This application is intentionally isolated from the server workspace. Building
 # a desktop client must not compile the API/worker or change the server lockfile.
@@ -14,6 +14,7 @@ license = "MIT"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+base64 = "0.22"
 tauri = { version = "2", features = [] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
@@ -25,7 +26,10 @@ url = "2"
 open = "5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+windows = { version = "0.62.2", features = ["Devices_Geolocation", "Foundation"] }
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
+windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }

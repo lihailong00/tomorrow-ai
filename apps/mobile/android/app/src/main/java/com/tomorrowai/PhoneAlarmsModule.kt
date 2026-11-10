@@ -16,7 +16,7 @@ import org.json.JSONObject
 import java.time.ZoneId
 import java.util.UUID
 
-/** Only explicit foreground button presses call this module. No cloud credentials. */
+/** Alarm operations originate from explicit foreground user actions. */
 class PhoneAlarmsModule(private val context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
   override fun getName() = "PhoneAlarms"
   private fun foreground() {
@@ -118,6 +118,17 @@ class PhoneAlarmsModule(private val context: ReactApplicationContext) : ReactCon
     check(intent.resolveActivity(context.packageManager) != null) { "手机没有提供系统闹钟创建入口" }
     context.currentActivity!!.startActivity(intent)
     "opened" // Never set EXTRA_DAYS: that would turn tomorrow into a weekly alarm.
+  }
+  @ReactMethod fun setNextSystemAlarm(date: String, time: String, title: String, promise: Promise) = openUi(promise) {
+    val next = PhoneAlarmPolicy.nextSystemTarget(date, time, System.currentTimeMillis())
+    val intent = Intent(AlarmClock.ACTION_SET_ALARM)
+      .putExtra(AlarmClock.EXTRA_HOUR, next.hour)
+      .putExtra(AlarmClock.EXTRA_MINUTES, next.minute)
+      .putExtra(AlarmClock.EXTRA_MESSAGE, PhoneAlarmPolicy.label(title))
+      .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+    check(intent.resolveActivity(context.packageManager) != null) { "手机没有提供系统闹钟创建入口" }
+    context.currentActivity!!.startActivity(intent)
+    "requested"
   }
 }
 

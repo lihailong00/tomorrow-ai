@@ -3,6 +3,8 @@ export type RuntimeContext = {
   server_time_utc: string; local_time: string; weekday: string; timezone: string;
   timezone_source: 'device' | 'profile' | 'default';
   location_status: 'available' | 'not_provided' | 'expired' | 'future_timestamp';
+  travel_places?: { home?: string; work?: string };
+  device_inspection?: { has_report: boolean; has_selected_app: boolean };
   location?: {
     source: 'device' | 'manual'; latitude?: number; longitude?: number; accuracy_m?: number;
     observed_at: string; label?: string; coordinate_system?: 'wgs84' | 'gcj02';
@@ -25,6 +27,13 @@ export function validRuntimeContext(value: unknown): value is RuntimeContext {
     const weekday = new Intl.DateTimeFormat('en-US', { timeZone: value.timezone, weekday: 'long' }).format(new Date(value.server_time_utc));
     if (value.weekday !== weekday) return false;
   } catch { return false; }
+  const places = value.travel_places;
+  if (places !== undefined && (!record(places) || Object.entries(places).some(([key, address]) =>
+    !['home', 'work'].includes(key) || typeof address !== 'string' || !address.trim() ||
+    [...address].length > 200 || /[\x00-\x1f\x7f]/.test(address)))) return false;
+  const inspection = value.device_inspection;
+  if (inspection !== undefined && (!record(inspection) || Object.keys(inspection).length !== 2 ||
+      typeof inspection.has_report !== 'boolean' || typeof inspection.has_selected_app !== 'boolean')) return false;
   const location = value.location;
   if (value.location_status !== 'available') return location === undefined;
   if (!record(location) || !['device', 'manual'].includes(String(location.source)) || !date(location.observed_at) ||

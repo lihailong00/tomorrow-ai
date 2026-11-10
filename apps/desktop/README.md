@@ -1,6 +1,6 @@
 # 妥啦桌面客户端
 
-Tauri 2 / Rust 外壳。共享产品界面在 `../client`；可独立构建 Web，浏览器不加载 Tauri 平台实现。桌面默认连接官方服务 `https://api.example.invalid`，不启动本地 Node、Pi 或 API 服务。
+Tauri 2 / Rust 外壳。共享产品界面在 `../client`；可独立构建 Web，浏览器不加载 Tauri 平台实现。桌面通过「连接服务器」连接自己的后端。桌面端不启动本地 Node、Pi 或 API 服务。
 
 ## Windows 开发与构建
 

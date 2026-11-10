@@ -5,6 +5,10 @@ mod actions;
 mod plans;
 mod preferences;
 pub(crate) mod rewards;
+mod journeys;
+pub use journeys::*;
+mod history;
+pub use history::*;
 
 use crate::{DomainError, Repository};
 use chrono::TimeZone;

@@ -15,6 +15,7 @@ use std::{
 };
 
 use axum::http::StatusCode;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use reqwest::{Client, RequestBuilder, Url};
 use serde_json::{Value, json};
@@ -220,6 +221,10 @@ fn safe_link(value: &str, domain: &str) -> Option<String> {
 }
 
 async fn json_response(request: RequestBuilder) -> Result<Value> {
+    serde_json::from_slice(&provider_body(request).await?).map_err(|_| provider_error())
+}
+
+async fn provider_body(request: RequestBuilder) -> Result<Vec<u8>> {
     let response = request.send().await.map_err(|_| provider_error())?;
     if matches!(response.status().as_u16(), 401 | 403) {
         return Err(permission_error());
@@ -243,7 +248,7 @@ async fn json_response(request: RequestBuilder) -> Result<Value> {
         }
         body.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&body).map_err(|_| provider_error())
+    Ok(body)
 }
 
 fn coordinate(value: &str) -> Result<String> {
@@ -329,10 +334,34 @@ async fn amap_read_with_key(client: &Client, query: &Value, key: &str) -> Result
                 json!({"source":"amap","operation":"search","items":items,"coordinate_system":"GCJ-02"}),
             )
         }
+        "nearby" => amap_nearby(client, query, &key, limit).await,
+        "map_view" => {
+            let location = coordinate(required_arg(query, "location", 80)?)?;
+            let zoom = bounded_number(query, "zoom", 15, 17)?;
+            let width = bounded_number(query, "width", 400, 800)?;
+            let height = bounded_number(query, "height", 250, 800)?;
+            if zoom < 3 || width < 100 || height < 100 { return Err(ConnectorError::invalid()); }
+            let bytes = provider_body(client.get("https://restapi.amap.com/v3/staticmap").query(&[
+                ("key", key), ("location", location), ("zoom", zoom.to_string()),
+                ("size", format!("{width}*{height}")), ("scale", "1".to_owned()),
+            ])).await?;
+            let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { "image/png" }
+                else if bytes.starts_with(b"\xff\xd8\xff") { "image/jpeg" }
+                else { return Err(provider_error()); };
+            Ok(json!({"image":format!("data:{mime};base64,{}", STANDARD.encode(bytes))}))
+        }
+        "reverse_geocode" => {
+            let location = coordinate(required_arg(query, "location", 80)?)?;
+            let value = json_response(client.get("https://restapi.amap.com/v3/geocode/regeo").query(&[
+                ("key", key), ("location", location), ("extensions", "base".into()), ("output", "JSON".into()),
+            ])).await?;
+            amap_address_result(&value)
+        }
         "route" => {
             let origin = coordinate(required_arg(query, "origin", 80)?)?;
             let destination = coordinate(required_arg(query, "destination", 80)?)?;
             let mode = text_arg(query, "mode", 32)?.unwrap_or("driving");
+            let include_geometry = query["include_geometry"] == true;
             let endpoint = match mode {
                 "driving" => "https://restapi.amap.com/v3/direction/driving",
                 "walking" => "https://restapi.amap.com/v3/direction/walking",
@@ -342,7 +371,7 @@ async fn amap_read_with_key(client: &Client, query: &Value, key: &str) -> Result
                 ("key", key),
                 ("origin", origin.clone()),
                 ("destination", destination.clone()),
-                ("extensions", "base".into()),
+                ("extensions", if include_geometry { "all" } else { "base" }.into()),
                 ("output", "JSON".into()),
             ]))
             .await?;
@@ -364,12 +393,145 @@ async fn amap_read_with_key(client: &Client, query: &Value, key: &str) -> Result
                 json!({"id":format!("route-{index}"),"title":format!("{}方案 {}",if mode == "walking" {"步行"}else{"驾车"},index+1),
                     "text":format!("距离 {distance} 米，预计 {duration} 秒。{}", instructions.join("；")),"url":link.to_string(),"distance_meters":distance,"duration_seconds":duration})
             }).collect();
-            Ok(
-                json!({"source":"amap","operation":"route","items":items,"coordinate_system":"GCJ-02","origin":origin,"destination":destination}),
-            )
+            let mut result = json!({"source":"amap","operation":"route","items":items,
+                "coordinate_system":"GCJ-02","origin":origin,"destination":destination});
+            if include_geometry {
+                if let Some(path) = paths.first() {
+                    result["geometry"] = json!(amap_route_geometry(path));
+                }
+            }
+            Ok(result)
         }
         _ => Err(unsupported()),
     }
+}
+
+fn amap_route_geometry(path: &Value) -> Vec<[f64; 2]> {
+    let points = path["steps"].as_array().into_iter().flatten()
+        .filter_map(|step| step["polyline"].as_str())
+        .flat_map(|line| line.split(';'))
+        .filter_map(|point| {
+            let (lng, lat) = point.split_once(',')?;
+            let (lng, lat) = (lng.parse::<f64>().ok()?, lat.parse::<f64>().ok()?);
+            ((-180.0..=180.0).contains(&lng) && (-90.0..=90.0).contains(&lat)
+                && (lng != 0.0 || lat != 0.0)).then_some([lng, lat])
+        })
+        .collect::<Vec<_>>();
+    const MAX_POINTS: usize = 512;
+    if points.len() <= MAX_POINTS {
+        return points;
+    }
+    (0..MAX_POINTS).map(|index| points[index * (points.len() - 1) / (MAX_POINTS - 1)]).collect()
+}
+
+fn amap_address_result(value: &Value) -> Result<Value> {
+    amap_success(value)?;
+    let address = &value["regeocode"];
+    let text = clipped(address, "formatted_address", 200);
+    if text.trim().is_empty() {
+        return Err(provider_error());
+    }
+    let components = &address["addressComponent"];
+    let mut city = clipped(components, "city", 80);
+    if city.trim().is_empty() {
+        let province = clipped(components, "province", 80);
+        if matches!(province.as_str(), "北京市" | "天津市" | "上海市" | "重庆市") {
+            city = province;
+        }
+    }
+    Ok(json!({"source":"amap","operation":"reverse_geocode","city":city,"address":text}))
+}
+
+async fn amap_nearby(client: &Client, query: &Value, key: &str, limit: usize) -> Result<Value> {
+    // The agent gives this integration read a 15-second budget for both requests.
+    let request_timeout = Duration::from_secs(6);
+    let keywords = required_arg(query, "keywords", 80)?;
+    let radius = bounded_number(query, "radius_m", 5000, 50_000)?;
+    if radius == 0 {
+        return Err(ConnectorError::invalid());
+    }
+    let location = text_arg(query, "location", 80)?;
+    let address = text_arg(query, "address", 200)?;
+    let center = match (location, address) {
+        (Some(location), None) => coordinate(location)?,
+        (None, Some(address)) => {
+            let result = json_response(client.get("https://restapi.amap.com/v3/geocode/geo")
+                .timeout(request_timeout)
+                .query(&[("key", key), ("address", address)])).await?;
+            amap_success(&result)?;
+            let geocodes = result["geocodes"].as_array().ok_or_else(provider_error)?;
+            let [place] = geocodes.as_slice() else {
+                return Ok(json!({"source":"amap","operation":"nearby","status":"center_unresolved","items":[]}));
+            };
+            coordinate(place["location"].as_str().ok_or_else(provider_error)?)?
+        }
+        _ => return Err(ConnectorError::invalid()),
+    };
+    let radius_arg = radius.to_string();
+    let mut request = client.get("https://restapi.amap.com/v5/place/around").timeout(request_timeout).query(&[
+        ("key", key), ("keywords", keywords), ("location", &center), ("radius", &radius_arg),
+        ("sortrule", "distance"), ("page_size", "25"),
+    ]);
+    let picker = query["map_picker"] == true;
+    if picker { request = request.query(&[("show_fields", "children,navi")]); }
+    let value = json_response(request).await?;
+    amap_success(&value)?;
+    amap_nearby_result(&value, radius, limit, picker.then_some(center.as_str()))
+}
+
+fn distance_between_coordinates(from: &str, to: &str) -> Option<u64> {
+    let radians = |point: &str| {
+        let (lon, lat) = point.split_once(',')?;
+        Some((lon.parse::<f64>().ok()?.to_radians(), lat.parse::<f64>().ok()?.to_radians()))
+    };
+    let (lon1, lat1) = radians(from)?;
+    let (lon2, lat2) = radians(to)?;
+    let h = ((lat2 - lat1) / 2.0).sin().powi(2)
+        + lat1.cos() * lat2.cos() * ((lon2 - lon1) / 2.0).sin().powi(2);
+    Some((12_742_000.0 * h.clamp(0.0, 1.0).sqrt().asin()).round() as u64)
+}
+
+fn amap_nearby_result(value: &Value, radius: u64, limit: usize, map_center: Option<&str>) -> Result<Value> {
+    let pois = value["pois"].as_array().ok_or_else(provider_error)?;
+    let mut places = Vec::new();
+    for poi in pois {
+        let title = clipped(poi, "name", 256);
+        let Some(location) = poi["location"].as_str().and_then(|location| coordinate(location).ok()) else { continue; };
+        let distance = if let Some(center) = map_center {
+            distance_between_coordinates(center, &location)
+        } else {
+            poi["distance"].as_str().and_then(|distance| distance.parse::<u64>().ok())
+        };
+        let Some(distance) = distance else { continue; };
+        if title.trim().is_empty() || distance > radius {
+            continue;
+        }
+        let mut link = Url::parse("https://uri.amap.com/navigation").expect("fixed URI");
+        link.query_pairs_mut().append_pair("to", &location).append_pair("coordinate", "gaode")
+            .append_pair("callnative", "1").append_pair("src", "tada");
+        let mut item = json!({"id":scalar_id(&poi["id"]), "title":title,
+            "address":clipped(poi,"address",512), "distance_m":distance, "url":link.to_string()});
+        if map_center.is_some() {
+            let mut children: Vec<_> = poi["children"].as_array().into_iter().flatten().take(8).filter_map(|child| {
+                let location = coordinate(child["location"].as_str()?).ok()?;
+                let title = clipped(child, "name", 200);
+                (!title.trim().is_empty()).then(|| json!({"title":title,"location":location,"address":clipped(child,"address",200)}))
+            }).collect();
+            for (field, name) in [("entr_location", "入口"), ("exit_location", "出口")] {
+                if let Some(point) = poi["navi"][field].as_str().and_then(|value| coordinate(value).ok()) {
+                    if point != location && !children.iter().any(|child| child["location"] == point) {
+                        children.push(json!({"title":format!("{title} · {name}"),"location":point}));
+                    }
+                }
+            }
+            item["location"] = json!(location);
+            item["children"] = json!(children);
+        }
+        places.push((distance, item));
+    }
+    places.sort_by_key(|(distance, _)| *distance);
+    let items: Vec<_> = places.into_iter().take(limit).map(|(_, place)| place).collect();
+    Ok(json!({"source":"amap","operation":"nearby","status":"completed","radius_m":radius,"items":items}))
 }
 
 fn amap_weather_result(value: &Value) -> Result<Value> {
@@ -684,6 +846,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn amap_route_geometry_preserves_the_start_and_end_when_downsampling() {
+        let dense_step = vec!["121.2,31.2"; 600].join(";");
+        let path = json!({"steps":[
+            {"polyline":"121.1,31.1;NaN,31.2;0,0"},
+            {"polyline":dense_step},
+            {"polyline":"121.3,31.3"}
+        ]});
+        let points = amap_route_geometry(&path);
+        assert_eq!(points.len(), 512);
+        assert_eq!(points.first(), Some(&[121.1, 31.1]));
+        assert_eq!(points.last(), Some(&[121.3, 31.3]));
+        assert!(points[1..511].iter().all(|point| *point == [121.2, 31.2]));
+    }
+
+    #[test]
     fn coordinate_validation_rejects_non_finite_and_extra_parameters() {
         for value in ["NaN,1", "0,inf", "181,1", "0,-91", "1,2,3", "1,2&key=x"] {
             assert!(coordinate(value).is_err(), "{value}");
@@ -692,6 +869,41 @@ mod tests {
             coordinate("116.397, 39.908").unwrap(),
             "116.397000,39.908000"
         );
+    }
+
+    #[test]
+    fn nearby_results_have_valid_navigation_and_are_sorted_within_radius() {
+        let result = amap_nearby_result(&json!({"pois":[
+            {"id":"far","name":"超出范围","location":"121.5,31.2","distance":"7000"},
+            {"id":"second","name":"第二家","location":"121.49,31.21","distance":"600"},
+            {"id":"first","name":"第一家","location":"121.48,31.21","distance":"80","address":"示例路1号"},
+            {"id":"invalid","name":"无坐标","location":[],"distance":"5"}
+        ]}), 5000, 2, None).unwrap();
+        assert_eq!(result["status"], "completed");
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["id"], "first");
+        assert_eq!(items[0]["distance_m"], 80);
+        assert_eq!(items[0]["address"], "示例路1号");
+        let link = Url::parse(items[0]["url"].as_str().unwrap()).unwrap();
+        assert_eq!(link.host_str(), Some("uri.amap.com"));
+        assert!(link.query_pairs().any(|(key, value)| key == "to" && value == "121.480000,31.210000"));
+        assert_eq!(items[1]["id"], "second");
+        assert!(amap_nearby_result(&json!({"pois":[]}), 5000, 2, None).unwrap()["items"].as_array().unwrap().is_empty());
+        assert!(amap_nearby_result(&json!({}), 5000, 2, None).is_err());
+    }
+
+    #[test]
+    fn map_picker_uses_coordinates_when_v5_omits_distance_and_returns_entrances() {
+        let value = json!({"pois":[
+            {"name":"远处","location":"122,31.2"},
+            {"name":"学校","location":"121.501,31.2","navi":{"entr_location":"121.502,31.2"}}
+        ]});
+        let result = amap_nearby_result(&value, 5000, 5, Some("121.5,31.2")).unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["title"], "学校");
+        assert_eq!(items[0]["children"][0]["location"], "121.502000,31.200000");
     }
 
     #[test]
@@ -844,3 +1056,15 @@ mod tests {
         task.abort();
     }
 }
+    #[test]
+    fn delivery_reverse_geocode_uses_the_municipality_for_an_empty_city_array() {
+        let mut response = json!({"status":"1","regeocode":{
+            "formatted_address":"上海市浦东新区测试路100号",
+            "addressComponent":{"province":"上海市","city":[]}
+        }});
+        let resolved = amap_address_result(&response).unwrap();
+        assert_eq!(resolved["city"], "上海市");
+        assert_eq!(resolved["address"], "上海市浦东新区测试路100号");
+        response["regeocode"]["formatted_address"] = json!("");
+        assert!(amap_address_result(&response).is_err());
+    }

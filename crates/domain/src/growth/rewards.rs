@@ -323,11 +323,15 @@ impl Repository {
         let records = sqlx::query("SELECT * FROM growth_rewards WHERE user_id=$1 AND active=1 AND local_date>=$2 AND local_date<=$3 ORDER BY earned_at DESC,todo_id DESC LIMIT 100")
             .bind(user).bind(start.to_string()).bind(end.to_string()).fetch_all(&mut *tx).await?
             .iter().map(reward_from_row).collect::<Result<Vec<_>,_>>()?;
+        let finished_journeys:i64=sqlx::query_scalar("SELECT COUNT(*) FROM growth_journeys j WHERE j.user_id=$1 AND EXISTS(SELECT 1 FROM growth_journey_steps s JOIN todos t ON t.user_id=s.user_id AND t.id=s.todo_id WHERE s.user_id=j.user_id AND s.journey_id=j.id AND t.status='completed') AND NOT EXISTS(SELECT 1 FROM growth_journey_steps s LEFT JOIN todos t ON t.user_id=s.user_id AND t.id=s.todo_id WHERE s.user_id=j.user_id AND s.journey_id=j.id AND s.skipped=0 AND (t.status IS NULL OR t.status<>'completed'))")
+            .bind(user).fetch_one(&mut *tx).await?;
         tx.commit().await?;
         let active_days = days.iter().filter(|day| day.action_count > 0).count() as i64;
         let lifetime_actions: i64 = counts.try_get("all_actions")?;
         let lifetime_learning: i64 = counts.try_get("learning")?;
-        let available_halos = if level >= 3 {
+        let available_halos = if level >= 5 {
+            vec!["classic".into(), "sunrise".into(), "starlight".into()]
+        } else if level >= 3 {
             vec!["classic".into(), "sunrise".into()]
         } else {
             vec!["classic".into()]
@@ -371,6 +375,14 @@ impl Repository {
                     progress: lifetime_learning.min(5),
                     target: 5,
                     unlocked: lifetime_learning >= 5,
+                },
+                GrowthMilestone {
+                    id: "first_journey".into(),
+                    title: "第一段旅程".into(),
+                    description: "走完一段路线，并确认完成其中的实际行动".into(),
+                    progress: finished_journeys.min(1),
+                    target: 1,
+                    unlocked: finished_journeys >= 1,
                 },
                 GrowthMilestone {
                     id: "weekly_four".into(),

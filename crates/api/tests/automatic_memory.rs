@@ -151,3 +151,184 @@ async fn default_chat_memory_extracts_once_recalls_and_forgets_without_opt_in_or
     );
     task.abort();
 }
+
+#[tokio::test]
+async fn chat_uses_current_availability_and_live_agenda_across_conversations() {
+    use chrono::{DateTime, Duration, Utc};
+    use tomorrow_domain::{CreateTodo, Message, UpdateTodo, personal_context::AgendaWindow};
+
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = requests.clone();
+    let upstream = Router::new().route(
+        "/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().unwrap().push(body);
+                Json(json!({"choices":[{"message":{"content":"测试回复"}}]}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let provider = ModelProvider::from_lookup(|key| match key {
+        "MODEL_BASE_URL" => Some(format!("http://{address}")),
+        "MODEL_NAME" => Some("fixture-model".into()),
+        _ => None,
+    });
+    let repo = Repository::connect("sqlite::memory:").await.unwrap();
+    let user = repo
+        .create_user("time@memory.test", "unused", "A", "Asia/Shanghai")
+        .await
+        .unwrap();
+    let other = repo
+        .create_user("other-time@memory.test", "unused", "B", "Asia/Shanghai")
+        .await
+        .unwrap();
+    let token = repo.create_session(&user.id).await.unwrap();
+    let router = app(AppState::new(
+        repo.clone(),
+        provider.clone(),
+        "sqlite::memory:",
+    ));
+    let ask = |text: &str| {
+        let input = json!({"message": text, "client_request_id": tomorrow_domain::new_id()});
+        call(&router, &token, "POST", "/v1/chat", input)
+    };
+    let snapshot = || {
+        let requests = requests.lock().unwrap();
+        let messages = requests.last().unwrap()["messages"].as_array().unwrap();
+        messages
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .filter_map(|m| m["content"].as_str())
+            .find_map(|content| {
+                content.lines().find_map(|line| {
+                    serde_json::from_str::<Value>(line)
+                        .ok()
+                        .filter(|value| value.get("as_of").is_some())
+                })
+            })
+    };
+
+    let (status, source) = ask("我现在有半个小时空闲时间要打算学习一下 Rust").await;
+    assert_eq!(status, 200, "{source}");
+    assert!(!repo.automatic_memory_step(&provider).await.unwrap());
+    let source_id = snapshot().unwrap()["availability"]["observation"]["source_message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, follow_up) = ask("我现在学什么？").await;
+    assert_eq!(status, 200, "{follow_up}");
+    assert_ne!(source["conversation_id"], follow_up["conversation_id"]);
+    let state = snapshot().unwrap()["availability"]["observation"].clone();
+    assert_eq!(state["source_message_id"], source_id);
+    assert_eq!(state["intent"], "打算学习一下 Rust");
+    let observed = state["observed_at"]
+        .as_str()
+        .unwrap()
+        .parse::<DateTime<Utc>>()
+        .unwrap();
+    let follow_up = Message {
+        id: tomorrow_domain::new_id(),
+        conversation_id: follow_up["conversation_id"].as_str().unwrap().into(),
+        role: "user".into(),
+        content: "我还有多久？".into(),
+        created_at: (observed + Duration::minutes(10)).to_rfc3339(),
+        model_mode: None,
+        attachments: vec![],
+    };
+    let at_ten = observed + Duration::minutes(10);
+    assert_eq!(
+        repo.current_availability(&user.id, &follow_up, at_ten)
+            .await
+            .unwrap()
+            .unwrap()
+            .remaining_minutes,
+        20,
+    );
+    assert!(
+        repo.current_availability(&other.id, &follow_up, at_ten)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repo.current_availability(&user.id, &follow_up, observed + Duration::minutes(30))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    repo.set_memory_preferences(&user.id, false).await.unwrap();
+    assert!(
+        repo.current_availability(&user.id, &follow_up, at_ten)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(ask("距离机场还有多久？").await.0, 200);
+    assert!(snapshot().is_none());
+
+    let zone = chrono_tz::Asia::Shanghai;
+    let question = "我周末要做什么？";
+    let window = AgendaWindow::from_question(question, zone, Utc::now()).unwrap();
+    let saturday = window.start + Duration::hours(10);
+    let sunday = saturday + Duration::days(1);
+    let todo = repo
+        .create_todo(
+            &user.id,
+            CreateTodo {
+                title: "练习 Rust".into(),
+                description: None,
+                kind: None,
+                due_at: Some(saturday.to_rfc3339()),
+                estimated_minutes: Some(30),
+                client_request_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(ask(question).await.0, 200);
+    let agenda = snapshot().unwrap()["agenda"].clone();
+    assert_eq!(agenda["google_primary_calendar"]["status"], "not_connected");
+    assert_eq!(agenda["dated_todos"]["items"][0]["source_kind"], "manual");
+    assert_eq!(
+        agenda["dated_todos"]["items"][0]["due_at"],
+        saturday.with_timezone(&Utc).to_rfc3339()
+    );
+    let moved = repo
+        .update_todo(
+            &user.id,
+            &todo.id,
+            UpdateTodo {
+                version: todo.version,
+                due_at: Some(Some(sunday.to_rfc3339())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(ask(question).await.0, 200);
+    let agenda = snapshot().unwrap()["agenda"].clone();
+    let items = agenda["dated_todos"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["due_at"], sunday.with_timezone(&Utc).to_rfc3339());
+    repo.update_todo(
+        &user.id,
+        &todo.id,
+        UpdateTodo {
+            version: moved.version,
+            status: Some("dismissed".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(ask(question).await.0, 200);
+    assert_eq!(
+        snapshot().unwrap()["agenda"]["dated_todos"]["items"],
+        json!([])
+    );
+    task.abort();
+}

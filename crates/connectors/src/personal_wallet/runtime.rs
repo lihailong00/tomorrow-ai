@@ -131,24 +131,25 @@ impl WalletRuntime for CliRuntime {
                 .clone()
                 .try_acquire_owned()
                 .map_err(|_| super::busy())?;
-            // Kernel-held profile lock also serializes multiple API processes.
-            // --no-fork keeps the lock held if a parent service is interrupted.
+            // Keep the profile lock in the supervising process. The CLI can
+            // start helpers, which must not inherit the lock descriptor.
+            let applying = matches!(&operation, Operation::Apply);
             let mut command = Command::new("/usr/bin/flock");
             command
-                .args(["--nonblock", "--no-fork"])
+                .args(["--wait", "3", "--conflict-exit-code", "73", "--close"])
                 .arg(self.home.join(".tada-alipay-runtime.lock"))
+                .args(["/usr/bin/timeout", "--kill-after=3s", "38s"])
                 .arg(&self.binary);
             command
                 .env_clear()
                 .env("HOME", &self.home)
-                .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+                .env("PATH", "/opt/tomorrow/bin:/usr/local/bin:/usr/bin:/bin")
                 .env("LANG", "C.UTF-8")
                 .env("AIPAY_OUTPUT_CHANNEL", "webchat")
                 .current_dir(self.binary.parent().ok_or_else(provider_error)?)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
+                .stderr(Stdio::null());
             match operation {
                 Operation::Check => {
                     command.arg("check-wallet");
@@ -191,7 +192,7 @@ impl WalletRuntime for CliRuntime {
             command.arg("--json");
             let mut child = command.spawn().map_err(|_| provider_error())?;
             let mut stdout = child.stdout.take().ok_or_else(provider_error)?;
-            let output = timeout(Duration::from_secs(40), async {
+            let output = timeout(Duration::from_secs(46), async {
                 let mut output = Vec::new();
                 (&mut stdout)
                     .take(96 * 1024 + 1)
@@ -201,24 +202,31 @@ impl WalletRuntime for CliRuntime {
                 if output.len() > 96 * 1024 {
                     return Err(provider_error());
                 }
-                let _status = child.wait().await.map_err(|_| provider_error())?;
+                let status = child.wait().await.map_err(|_| provider_error())?;
+                if status.code() == Some(73) {
+                    return Err(super::busy());
+                }
+                if matches!(status.code(), Some(124 | 137) | None) {
+                    return Err(provider_error());
+                }
                 // Provider business failures may exit nonzero but still return
                 // an authoritative bounded JSON envelope. Never expose stderr.
                 let value: Value = serde_json::from_slice(&output).map_err(|_| provider_error())?;
-                if !value.is_object() || value.get("code").and_then(Value::as_i64).is_none() {
+                if applying && status.success() {
+                    if let Some(link) = super::validation::native_apply_link(&value) {
+                        return Ok(serde_json::json!({"code": 200, "access_url": link}));
+                    }
+                }
+                if value.get("code").and_then(Value::as_i64).is_none() {
                     return Err(provider_error());
                 }
                 Ok(value)
             })
             .await;
-            match output {
-                Ok(result) => result,
-                Err(_) => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    Err(provider_error())
-                }
-            }
+            // The OS timeout bounds the CLI even if this Rust task is
+            // cancelled. Keep the supervisor alive to hold the profile lock
+            // until that command exits.
+            output.unwrap_or_else(|_| Err(provider_error()))
         })
     }
 }

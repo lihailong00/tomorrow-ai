@@ -1,9 +1,11 @@
 import type { Connector } from '../../domain/types';
 import type { Integration } from '../integrations/types';
+import { slackIntegration } from '../integrations/slackModel';
 import type { HealthConnection } from '../health/types';
 import type { PersonalMcpConnection } from '../personal-mcp/types';
 import { unavailableWallet, type WalletConnectionStatus } from '../personal-mcp/walletModel';
 import type { AppInputStatus } from '../../platform/appInputs';
+import { hasSavedConnection } from '../integrations/connectionVisibility';
 
 export const capabilityAppearance = {
   background: '#F6F7FB',
@@ -31,6 +33,7 @@ export type HubEntry = Base &
     | { kind: 'integration'; source: Integration }
     | { kind: 'health'; source: HealthConnection }
     | { kind: 'mcp'; source: PersonalMcpConnection }
+    | { kind: 'liepin-guide' }
     | { kind: 'wallet'; source: WalletConnectionStatus }
     | { kind: 'phone' }
     | { kind: 'notifications' }
@@ -42,7 +45,7 @@ export type PhoneConnectionStatus = {
 };
 
 // Public service names only. Availability and credentials always come from the
-// current authenticated server; these entries keep older/offline catalogs searchable.
+// current authenticated server; this table supplies search aliases only.
 const providerChoices: ReadonlyArray<
   readonly [string, string, 'integration' | 'mcp', readonly string[]]
 > = [
@@ -67,7 +70,9 @@ const providerChoices: ReadonlyArray<
   ['tencent_docs', '腾讯文档', 'mcp', ['Tencent Docs']],
   ['tencent_meeting', '腾讯会议', 'mcp', ['Tencent Meeting']],
   ['didi', '滴滴出行', 'mcp', ['DiDi', '滴滴']],
+  ['liepin', '猎聘', 'mcp', ['Liepin', '求职', '职位', '找工作']],
   ['mcdonalds', '麦当劳', 'mcp', ['McDonalds', "McDonald's"]],
+  ['slack', 'Slack', 'integration', ['工作区', '公开频道', '协作']],
   ['notion', 'Notion', 'mcp', ['Notion']],
   ['memos', 'Memos', 'mcp', ['Memos']],
   ['weread', '微信读书', 'mcp', ['WeRead']],
@@ -156,7 +161,8 @@ export function buildHubEntries(input: {
           ? 'unavailable'
           : 'available',
     });
-  for (const source of input.integrations ?? [])
+  const integrations = input.integrations ?? [];
+  for (const source of integrations.some(item => item.id === 'slack') ? integrations : [...integrations, slackIntegration])
     entries.push({
       key: 'integration:' + source.id,
       kind: 'integration',
@@ -167,7 +173,7 @@ export function buildHubEntries(input: {
       state:
         source.status === 'connected'
           ? 'connected'
-          : source.status === 'not_configured'
+          : source.status === 'not_configured' || (source.mode === 'map' && source.credential_scope !== 'user')
           ? 'unavailable'
           : 'available',
     });
@@ -188,7 +194,9 @@ export function buildHubEntries(input: {
           ? 'unavailable'
           : 'available',
     });
-  for (const source of (input.mcp ?? []).filter(item => item.id !== 'alipay'))
+  for (const source of input.mcp ?? []) {
+    if (source.id === 'alipay') continue;
+    if (source.id === 'liepin' && source.status === 'not_configured' && !hasSavedConnection(source)) continue;
     entries.push({
       key: 'mcp:' + source.id,
       kind: 'mcp',
@@ -205,55 +213,16 @@ export function buildHubEntries(input: {
           ? 'unavailable'
           : 'available',
     });
-  for (const [id, name, kind] of providerChoices) {
-    if (entries.some(entry => 'source' in entry && entry.source.id === id))
-      continue;
-    const detail =
-      '当前服务器尚未提供此连接，请升级服务后使用你本人的凭证授权。';
-    if (kind === 'integration') {
-      const source: Integration = {
-        id,
-        name,
-        category: id === 'amap' ? '出行' : '邮件',
-        mode: id === 'amap' ? 'map' : 'mail',
-        status: 'not_configured',
-        detail,
-        ...(id === 'amap' ? { credential_scope: 'user' } : {}),
-      };
-      entries.push({
-        key: 'integration:' + id,
-        kind,
-        source,
-        name,
-        detail,
-        category: category(id, source.mode),
-        state: 'unavailable',
-      });
-    } else {
-      const source: PersonalMcpConnection = {
-        id,
-        name,
-        description: detail,
-        help_url: '',
-        credential_label: '个人凭证',
-        transport: 'unavailable',
-        status: 'not_configured',
-        environment: 'production',
-        tool_count: 0,
-        has_credentials: false,
-      };
-      entries.push({
-        key: 'mcp:' + id,
-        kind,
-        source,
-        name,
-        detail,
-        category: category(id),
-        state: 'unavailable',
-      });
-    }
   }
-  return entries;
+  if (!entries.some(entry => entry.key === 'mcp:liepin')) {
+    entries.push({
+      key: 'mcp:liepin', kind: 'liepin-guide', name: '猎聘', category: category('liepin'),
+      detail: '搜索职位、筛选城市和薪资 · 个人授权',
+      state: 'unavailable',
+    });
+  }
+  return entries.filter(entry => entry.kind === 'liepin-guide' || entry.key === 'integration:slack' || entry.state !== 'unavailable' ||
+    ('source' in entry && hasSavedConnection(entry.source)));
 }
 
 export function splitHubEntries(
@@ -265,14 +234,17 @@ export function splitHubEntries(
     value.toLocaleLowerCase().replace(/[\s_-]+/g, '');
   const matches = normalize(query.trim());
   const matchesQuery = (entry: HubEntry) => {
-    const id = 'source' in entry ? entry.source.id : entry.key;
+    const id = entry.kind === 'liepin-guide' ? 'liepin' : 'source' in entry ? entry.source.id : entry.key;
     const choice = providerChoices.find(([providerId]) => providerId === id);
+    const aliases = entry.kind === 'phone'
+      ? '联系人 通讯录 短信 日历 日程 照片 相册 截图 Contacts Address Book SMS Calendar Photos'
+      : choice?.[3].join(' ') || '';
     return (
       !matches ||
       normalize(
         `${entry.key} ${entry.name} ${entry.detail} ${entry.category} ${
           choice?.[1] || ''
-        } ${choice?.[3].join(' ') || ''}`,
+        } ${aliases}`,
       ).includes(matches)
     );
   };
@@ -282,12 +254,13 @@ export function splitHubEntries(
   return {
     connected: unique.filter(
       entry =>
-        (entry.state === 'connected' || entry.state === 'reconnect') &&
+        (entry.state === 'connected' || entry.state === 'reconnect' ||
+          (entry.state === 'unavailable' && 'source' in entry && hasSavedConnection(entry.source))) &&
         matchesQuery(entry),
     ),
     available: unique
       .filter(
-        entry => entry.state !== 'connected' && entry.state !== 'reconnect',
+        entry => entry.state === 'available' || entry.kind === 'liepin-guide',
       )
       .filter(
         entry =>

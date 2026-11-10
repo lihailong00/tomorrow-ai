@@ -1,4 +1,5 @@
-//! Chinese document/calendar OAuth adapters. Credentials stay in the caller's encrypted vault.
+//! OAuth adapters for document, calendar, and live Slack connections.
+//! Credentials stay in the caller's encrypted vault.
 //!
 //! Protocol sources (checked 2026-10-27):
 //! - https://docs.qq.com/open/document/app/oauth2/authorize.html
@@ -25,6 +26,9 @@ use sha2::Sha256;
 
 use crate::{ConnectorError, Result};
 
+#[path = "slack.rs"]
+mod slack;
+
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONTENT_CHARS: usize = 80_000;
 
@@ -34,6 +38,7 @@ enum Kind {
     Wps,
     Feishu,
     DingTalk,
+    Slack,
 }
 
 impl Kind {
@@ -43,6 +48,7 @@ impl Kind {
             "wps" => Some(Self::Wps),
             "feishu" => Some(Self::Feishu),
             "dingtalk" => Some(Self::DingTalk),
+            "slack" => Some(Self::Slack),
             _ => None,
         }
     }
@@ -53,6 +59,7 @@ impl Kind {
             Self::Wps => "wps",
             Self::Feishu => "feishu",
             Self::DingTalk => "dingtalk",
+            Self::Slack => "slack",
         }
     }
 
@@ -63,6 +70,7 @@ impl Kind {
             Self::Feishu => "drive:drive.metadata:readonly",
             // DingTalk resource scopes are additionally granted in its developer console.
             Self::DingTalk => "openid",
+            Self::Slack => "search:read.public",
         }
     }
 
@@ -72,6 +80,7 @@ impl Kind {
             Self::Wps => "https://openapi.wps.cn/oauth2/auth",
             Self::Feishu => "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
             Self::DingTalk => "https://login.dingtalk.com/oauth2/auth",
+            Self::Slack => "https://slack.com/oauth/v2/authorize",
         }
     }
 
@@ -81,6 +90,7 @@ impl Kind {
             Self::Wps => "https://openapi.wps.cn",
             Self::Feishu => "https://open.feishu.cn",
             Self::DingTalk => "https://api.dingtalk.com",
+            Self::Slack => "https://slack.com",
         }
     }
 
@@ -91,6 +101,7 @@ impl Kind {
             // v2 remains the documented compatibility endpoint. No fallback can reuse a code.
             Self::Feishu => "/open-apis/authen/v2/oauth/token",
             Self::DingTalk => "/v1.0/oauth2/userAccessToken",
+            Self::Slack => "/api/oauth.v2.access",
         }
     }
 }
@@ -134,6 +145,7 @@ pub(super) fn required_configuration(id: &str) -> Vec<&'static str> {
             "DINGTALK_REDIRECT_URI",
             "DINGTALK_SCOPES",
         ],
+        "slack" => vec!["SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET", "SLACK_REDIRECT_URI"],
         _ => Vec::new(),
     }
 }
@@ -159,7 +171,11 @@ impl OAuthProvider {
         let client_id = values.next()??;
         let client_secret = values.next()??;
         let redirect_uri = values.next()??;
-        let scopes = values.next()??;
+        let scopes = if id == "slack" {
+            Kind::Slack.required_scope().to_owned()
+        } else {
+            values.next()??
+        };
         Self::configured(id, client_id, client_secret, redirect_uri, &scopes).ok()
     }
 
@@ -217,6 +233,14 @@ impl OAuthProvider {
             return Err(invalid());
         }
         let mut url = Url::parse(self.kind.authorize()).map_err(|_| invalid())?;
+        if self.kind == Kind::Slack {
+            url.query_pairs_mut()
+                .append_pair("client_id", &self.client_id)
+                .append_pair("redirect_uri", &self.redirect_uri)
+                .append_pair("user_scope", self.kind.required_scope())
+                .append_pair("state", state);
+            return Ok(url.into());
+        }
         let scope = match self.kind {
             // Tencent Docs accepts "all"; approved app permissions constrain actual access.
             Kind::TencentDocs => "all".into(),
@@ -280,6 +304,7 @@ impl OAuthProvider {
             // The vendor explicitly documents query credentials on its fixed HTTPS token endpoint.
             Kind::TencentDocs => self.client.get(token_url).query(&body),
             Kind::Wps => self.client.post(token_url).form(&body),
+            Kind::Slack => self.client.post(token_url).form(&body),
             Kind::Feishu => self.client.post(token_url).json(&body),
             Kind::DingTalk => {
                 let mut ding = json!({"clientId":self.client_id,"clientSecret":self.client_secret,"grantType":grant});
@@ -291,6 +316,9 @@ impl OAuthProvider {
                 self.client.post(token_url).json(&ding)
             }
         };
+        if self.kind == Kind::Slack {
+            return slack::parse_token(slack::response(request).await?, previous);
+        }
         let response = read_json(request).await?;
         let source = response
             .get("data")
@@ -591,6 +619,7 @@ impl OAuthProvider {
             Kind::Feishu => data.get("files"),
             Kind::DingTalk if plan.action == "events" => data.get("events"),
             Kind::DingTalk => data.get("calendars"),
+            Kind::Slack => return Err(invalid()),
         }
         .and_then(Value::as_array)
         .ok_or_else(upstream)?;
@@ -616,6 +645,7 @@ impl OAuthProvider {
             Kind::Feishu => cursor(data.get("next_page_token")),
             Kind::Wps => cursor(data.get("next_page_token")),
             Kind::DingTalk => cursor(data.get("nextToken")),
+            Kind::Slack => return Err(invalid()),
         }
         .unwrap_or(Value::Null);
         let has_more = data
@@ -907,7 +937,7 @@ fn safe_public_link(kind: Kind, value: &str) -> bool {
             Kind::TencentDocs => host == "docs.qq.com",
             Kind::Wps => host == "kdocs.cn" || host.ends_with(".kdocs.cn"),
             Kind::Feishu => host == "feishu.cn" || host.ends_with(".feishu.cn"),
-            Kind::DingTalk => false,
+            Kind::DingTalk | Kind::Slack => false,
         };
         url.scheme() == "https"
             && document_host

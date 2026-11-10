@@ -29,7 +29,9 @@ Assert-Rejected { Get-TadaAndroidPackageTarget -Architectures armeabi-v7a } 'one
 if ($phone.StorageReport -eq $emulator.StorageReport) { throw 'Targets must keep independent reports.' }
 $standard = Get-TadaAndroidBuildPlan -PackageTarget $phone
 Assert-Equal $standard.GradleTask ':app:assembleDebug'
-Assert-Equal $standard.ArtifactDirectory 'artifacts/apk'
+Assert-Equal $standard.ArtifactDirectory 'artifacts/apk/candidates/debug'
+Assert-Equal $standard.Candidate $true
+Assert-Equal (Get-TadaAndroidBuildPlan -PackageTarget $phone -BuildType Release).ArtifactDirectory 'artifacts/apk'
 $release = Get-TadaAndroidBuildPlan -PackageTarget $phone -BuildType Release -Candidate
 $compact = Get-TadaAndroidBuildPlan -PackageTarget $phone -BuildType Release -Compact -Candidate
 Assert-Equal $release.GradleTask ':app:assembleRelease'
